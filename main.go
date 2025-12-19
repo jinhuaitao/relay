@@ -13,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +30,6 @@ const (
 	ControlPort = ":9999" // Agent 连接端口
 	WebPort     = ":8888" // 网页管理端口
 	DownloadURL = "https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
-	UDPTimeout  = 60 * time.Second // UDP会话超时时间
 )
 
 // --- 数据结构 ---
@@ -42,7 +43,7 @@ type AppConfig struct {
 
 type ForwardTask struct {
 	ID       string `json:"id"`
-	Protocol string `json:"protocol"` // tcp, udp, both
+	Protocol string `json:"protocol"`
 	Listen   string `json:"listen"`
 	Target   string `json:"target"`
 }
@@ -98,11 +99,20 @@ var (
 // --- 主程序 ---
 
 func main() {
-	mode := flag.String("mode", "master", "运行模式")
+	mode := flag.String("mode", "master", "运行模式: master | agent")
 	name := flag.String("name", "", "Agent名称")
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
+	serviceOp := flag.String("service", "", "install | uninstall (安装/卸载开机自启)")
+	
 	flag.Parse()
+
+	// 优先处理服务安装/卸载
+	if *serviceOp != "" {
+		handleService(*serviceOp, *mode, *name, *connect, *token)
+		return
+	}
+
 	setupSignalHandler()
 
 	if *mode == "master" {
@@ -110,15 +120,125 @@ func main() {
 		runMaster()
 	} else if *mode == "agent" {
 		if *name == "" || *connect == "" || *token == "" {
-			log.Fatal("参数不足")
+			log.Fatal("参数不足: Agent模式需要 -name, -connect, -token")
 		}
 		runAgent(*name, *connect, *token)
 	} else {
-		log.Fatal("未知模式")
+		log.Fatal("未知模式，请使用 -mode master 或 -mode agent")
 	}
 }
 
-// ================= MASTER =================
+// ================= 服务管理逻辑 (核心升级) =================
+
+func handleService(op, mode, name, connect, token string) {
+	if os.Geteuid() != 0 {
+		log.Fatal("错误: 安装/卸载服务必须使用 root 权限 (sudo)")
+	}
+
+	exePath, err := os.Executable()
+	if err != nil { exePath = "/root/relay" }
+	exePath, _ = filepath.Abs(exePath)
+
+	// 构建启动参数字符串
+	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"", mode, name, connect, token)
+
+	// 检测系统类型
+	isSystemd := false
+	if _, err := os.Stat("/run/systemd/system"); err == nil { isSystemd = true }
+	
+	// Alpine 检测
+	isOpenRC := false
+	if _, err := os.Stat("/etc/alpine-release"); err == nil { isOpenRC = true }
+
+	if op == "install" {
+		log.Println("正在安装开机自启服务...")
+		if isSystemd {
+			installSystemd(exePath, args)
+		} else if isOpenRC {
+			installOpenRC(exePath, args) // Alpine
+		} else {
+			log.Println("未检测到 Systemd 或 OpenRC，尝试使用 nohup 后台运行...")
+			cmd := exec.Command("nohup", exePath, "-mode", mode, "-name", name, "-connect", connect, "-token", token, "&")
+			cmd.Start()
+			log.Println("已通过 nohup 启动。注意：重启后需要重新运行。")
+		}
+	} else if op == "uninstall" {
+		log.Println("正在卸载服务...")
+		if isSystemd {
+			uninstallSystemd()
+		} else if isOpenRC {
+			uninstallOpenRC()
+		} else {
+			log.Println("非服务模式，请手动 kill 进程。")
+		}
+	}
+}
+
+func installSystemd(exe, args string) {
+	content := fmt.Sprintf(`[Unit]
+Description=GoRelay Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%s %s
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+`, exe, args)
+
+	os.WriteFile("/etc/systemd/system/gorelay.service", []byte(content), 0644)
+	exec.Command("systemctl", "daemon-reload").Run()
+	exec.Command("systemctl", "enable", "gorelay").Run()
+	exec.Command("systemctl", "restart", "gorelay").Run()
+	log.Println("Systemd 服务已安装并启动！")
+}
+
+func uninstallSystemd() {
+	exec.Command("systemctl", "stop", "gorelay").Run()
+	exec.Command("systemctl", "disable", "gorelay").Run()
+	os.Remove("/etc/systemd/system/gorelay.service")
+	exec.Command("systemctl", "daemon-reload").Run()
+	log.Println("Systemd 服务已卸载。")
+}
+
+func installOpenRC(exe, args string) {
+	// Alpine OpenRC 脚本模板
+	// OpenRC 的 command_args 比较特殊，需要仔细转义
+	// 简单起见，我们生成一个 wrapper 脚本或者直接在 args 里写死
+	// 这里使用标准的 OpenRC 格式
+	
+	content := fmt.Sprintf(`#!/sbin/openrc-run
+
+name="gorelay"
+description="GoRelay Service"
+command="%s"
+command_args="%s"
+command_background=true
+pidfile="/run/gorelay.pid"
+
+depend() {
+	need net
+	after firewall
+}
+`, exe, args)
+
+	os.WriteFile("/etc/init.d/gorelay", []byte(content), 0755)
+	exec.Command("rc-update", "add", "gorelay", "default").Run()
+	exec.Command("rc-service", "gorelay", "restart").Run()
+	log.Println("OpenRC (Alpine) 服务已安装并启动！")
+}
+
+func uninstallOpenRC() {
+	exec.Command("rc-service", "gorelay", "stop").Run()
+	exec.Command("rc-update", "del", "gorelay", "default").Run()
+	os.Remove("/etc/init.d/gorelay")
+	log.Println("OpenRC 服务已卸载。")
+}
+
+// ================= MASTER 逻辑 =================
 
 func runMaster() {
 	go func() {
@@ -193,7 +313,6 @@ func pushConfigToAll() {
 		target := fmt.Sprintf("%s:%s", r.TargetIP, r.TargetPort)
 		tasks[r.ExitAgent] = append(tasks[r.ExitAgent], ForwardTask{ID: r.ID+"_exit", Protocol: r.Protocol, Listen: ":"+r.BridgePort, Target: target})
 		if exit, ok := agents[r.ExitAgent]; ok {
-			// 处理 IPv6 地址加括号
 			rip := exit.RemoteIP
 			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") { rip = "[" + rip + "]" }
 			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID+"_entry", Protocol: r.Protocol, Listen: ":"+r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
@@ -379,74 +498,34 @@ func pipeTCP(src net.Conn, target, tid string) {
 	go copyCount(dst, src, &cnt.Tx); copyCount(src, dst, &cnt.Rx)
 }
 
-// UDP 核心升级：会话管理
 func handleUDP(ln *net.UDPConn, target, tid string) {
-	// 简单的内存会话表：SourceAddr -> RemoteConn
-	sessions := make(map[string]*net.UDPConn)
-	// 最后活跃时间
-	lastActive := make(map[string]time.Time)
-	var sl sync.Mutex
-
-	dstAddr, _ := net.ResolveUDPAddr("udp", target)
-	v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
-	buf := make([]byte, 4096)
-
-	// 定时清理过期会话
+	sessions := make(map[string]*net.UDPConn); lastActive := make(map[string]time.Time); var sl sync.Mutex
+	dstAddr, _ := net.ResolveUDPAddr("udp", target); v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter); buf := make([]byte, 4096)
 	go func() {
 		for {
-			time.Sleep(10 * time.Second)
-			sl.Lock()
-			now := time.Now()
+			time.Sleep(10 * time.Second); sl.Lock(); now := time.Now()
 			for k, t := range lastActive {
-				if now.Sub(t) > UDPTimeout {
-					if conn, ok := sessions[k]; ok { conn.Close() }
-					delete(sessions, k)
-					delete(lastActive, k)
-				}
+				if now.Sub(t) > 60*time.Second { if c, ok := sessions[k]; ok { c.Close() }; delete(sessions, k); delete(lastActive, k) }
 			}
 			sl.Unlock()
 		}
 	}()
-
 	for {
-		n, srcAddr, err := ln.ReadFromUDP(buf)
-		if err != nil { break }
-		atomic.AddInt64(&cnt.Tx, int64(n))
-
-		sAddr := srcAddr.String()
-		sl.Lock()
-		conn, exists := sessions[sAddr]
-		lastActive[sAddr] = time.Now()
-		sl.Unlock()
-
+		n, srcAddr, err := ln.ReadFromUDP(buf); if err != nil { break }
+		atomic.AddInt64(&cnt.Tx, int64(n)); sAddr := srcAddr.String()
+		sl.Lock(); conn, exists := sessions[sAddr]; lastActive[sAddr] = time.Now(); sl.Unlock()
 		if exists {
 			conn.Write(buf[:n])
 		} else {
-			// 建立新会话
-			newConn, err := net.DialUDP("udp", nil, dstAddr)
-			if err != nil { continue }
-			
-			sl.Lock()
-			sessions[sAddr] = newConn
-			sl.Unlock()
-			
+			newConn, err := net.DialUDP("udp", nil, dstAddr); if err != nil { continue }
+			sl.Lock(); sessions[sAddr] = newConn; sl.Unlock()
 			newConn.Write(buf[:n])
-
-			// 异步读取回包
 			go func(c *net.UDPConn, sa *net.UDPAddr) {
 				b := make([]byte, 4096)
 				for {
-					c.SetReadDeadline(time.Now().Add(UDPTimeout))
-					m, _, e := c.ReadFromUDP(b)
-					if e != nil { 
-						c.Close()
-						sl.Lock(); delete(sessions, sa.String()); delete(lastActive, sa.String()); sl.Unlock()
-						break 
-					}
-					ln.WriteToUDP(b[:m], sa)
-					atomic.AddInt64(&cnt.Rx, int64(m))
-					
-					sl.Lock(); lastActive[sa.String()] = time.Now(); sl.Unlock()
+					c.SetReadDeadline(time.Now().Add(60*time.Second)); m, _, e := c.ReadFromUDP(b)
+					if e != nil { c.Close(); sl.Lock(); delete(sessions, sa.String()); delete(lastActive, sa.String()); sl.Unlock(); break }
+					ln.WriteToUDP(b[:m], sa); atomic.AddInt64(&cnt.Rx, int64(m)); sl.Lock(); lastActive[sa.String()] = time.Now(); sl.Unlock()
 				}
 			}(newConn, srcAddr)
 		}
@@ -535,10 +614,10 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
     <div id="deploy" class="page">
         <div class="card">
             <h3 style="margin-top:0">生成部署命令</h3>
-            <p style="color:#666;font-size:13px">在 B/C 机器上执行此命令，即可自动下载、授权、后台运行。</p>
+            <p style="color:#666;font-size:13px">在 B/C 机器上执行此命令，会自动下载并安装为系统服务 (Systemd/OpenRC)，实现开机自启。</p>
             <div style="display:flex;gap:10px;margin-top:15px">
                 <input id="agentName" placeholder="节点名称 (如: HK-Node)" value="Node-1" style="max-width:300px">
-                <button onclick="genCmd()">生成后台命令</button>
+                <button onclick="genCmd()">生成安装命令</button>
             </div>
             <div class="cmd-box"><div id="cmdText">...</div></div>
             <div style="text-align:right;margin-top:10px"><button onclick="copyCmd()" style="background:#555">复制命令</button></div>
@@ -588,11 +667,7 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
 </div>
 <script>
     var host=location.hostname, port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
-    
-    // IPv6 兼容性处理
-    if (host.indexOf(':') > -1 && host.indexOf('[') === -1) {
-        host = '[' + host + ']';
-    }
+    if (host.indexOf(':') > -1 && host.indexOf('[') === -1) { host = '[' + host + ']'; }
 
     function nav(id, el) {
         window.location.hash = id;
@@ -608,13 +683,13 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
         }
     }
 
-    if(location.hash) {
-        nav(location.hash.substring(1));
-    }
+    if(location.hash) { nav(location.hash.substring(1)); }
 
     function genCmd() {
         var n = document.getElementById('agentName').value;
-        document.getElementById('cmdText').innerText = 'wget -q -O relay '+dwUrl+' && chmod +x relay && nohup ./relay -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'" >/dev/null 2>&1 &';
+        // 生成极简安装命令：下载 -> 授权 -> 运行自带安装模式
+        var cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
+        document.getElementById('cmdText').innerText = cmd;
     }
 
     function copyCmd() {
@@ -623,12 +698,9 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
         else { var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('已复制'); }
     }
 
-    // 自动刷新逻辑：只刷新仪表盘，其他页面不刷新
     setInterval(()=>{ 
         if(document.querySelector('.page.active').id === 'dashboard') {
-            if(document.activeElement.tagName !== "INPUT") {
-                location.reload();
-            }
+            if(document.activeElement.tagName !== "INPUT") location.reload();
         }
     }, 5000);
 </script></body></html>
