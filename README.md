@@ -1,31 +1,45 @@
 🚀 GoRelay Pro - 高性能分布式端口转发系统
+
 GoRelay Pro 是一款专为极客和运维人员设计的现代化、高性能、分布式 TCP/UDP 端口转发与反向代理工具。
+
 它采用 Master (控制面板) + Agent (转发节点) 的架构，通过一个单文件二进制程序即可完成所有角色的部署。无需繁琐的配置文件，所有操作均可在其精美的 Web 控制台中完成。
+
 ✨ 核心特性
  * ⚡ 极致性能：基于 Go 语言编写，底层采用内存池 (Buffer Pool) 和 Zero-Copy 技术，支持 TCP Nodelay 与 KeepAlive，轻松应对数万并发连接。
+ * 
  * 🎨 星云美学 UI：拥有“流体极光”风格的现代化登录界面与响应式仪表盘，支持深色/浅色模式自动切换，提供极佳的用户体验。
+ * 
  * 🛡️ 安全可靠：Master 与 Agent 之间采用 Token 鉴权机制，防止未授权连接。所有配置数据本地持久化保存 (config.json)，重启不丢失。
+ * 
  * 📦 单文件部署：无任何第三方依赖，一个二进制文件走天下。内置 自安装 (Self-Install) 功能，一条命令即可自动配置 Systemd 或 OpenRC 开机自启。
+ * 
  * 🌐 全协议支持：完美支持 TCP、UDP 以及 TCP+UDP 混合转发。原生支持 IPv6 网络环境。
+ * 
  * 📊 实时监控：仪表盘提供精确到字节的实时流量监控与速率计算。
-📚 部署教程
+
+ 
+# 📚 部署教程
 第一步：准备工作
 您需要准备：
  * 中转机 (Master)：一台拥有公网 IP 的服务器，用于部署控制面板。
  * 节点机 (Agent)：一台或多台用于实际转发流量的服务器（可以是那台中转机自己，也可以是其他国内/国外机器）。
-# 一键安装脚本
+# 第二步
+## 1.一键安装脚本
 ```
 curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go_relay.sh && chmod +x go_relay.sh && ./go_relay.sh
 ```
-第二步：编译与安装 (Master 端)
+## 2.编译与安装 (Master 端)
+
 假设您已经在 Master 服务器上。
+
  * 编译项目 (如果您没有 Go 环境，请先安装 Go 1.20+)：
-   # 下载代码并保存为 main.go
-# 编译为 Linux 64位可执行文件
+ * 
+###  下载代码并保存为 main.go
+### 编译为 Linux 64位可执行文件
 ```
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay main.go
 ```
-# 赋予执行权限
+### 赋予执行权限
 ```
 chmod +x relay
 ```
