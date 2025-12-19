@@ -25,9 +25,10 @@ import (
 
 const (
 	ConfigFile  = "config.json"
-	ControlPort = ":9999" // 监听 :9999 意味着同时监听 IPv4(0.0.0.0) 和 IPv6([::])
-	WebPort     = ":8888" 
+	ControlPort = ":9999" // Agent 连接端口
+	WebPort     = ":8888" // 网页管理端口
 	DownloadURL = "https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
+	UDPTimeout  = 60 * time.Second // UDP会话超时时间
 )
 
 // --- 数据结构 ---
@@ -41,7 +42,7 @@ type AppConfig struct {
 
 type ForwardTask struct {
 	ID       string `json:"id"`
-	Protocol string `json:"protocol"`
+	Protocol string `json:"protocol"` // tcp, udp, both
 	Listen   string `json:"listen"`
 	Target   string `json:"target"`
 }
@@ -121,7 +122,6 @@ func main() {
 
 func runMaster() {
 	go func() {
-		// net.Listen("tcp", ":9999") 默认支持 IPv4 和 IPv6 (Dual Stack)
 		ln, err := net.Listen("tcp", ControlPort)
 		if err != nil { log.Fatal(err) }
 		for {
@@ -190,20 +190,13 @@ func pushConfigToAll() {
 	defer mu.Unlock()
 	tasks := make(map[string][]ForwardTask)
 	for _, r := range rules {
-		// IPv6 目标地址处理：如果是 IPv6，net.Dial 需要 [::1]:80 格式
-		// 但用户可能只填了 ::1。这里不做强制校验，由用户输入决定。
 		target := fmt.Sprintf("%s:%s", r.TargetIP, r.TargetPort)
-		
 		tasks[r.ExitAgent] = append(tasks[r.ExitAgent], ForwardTask{ID: r.ID+"_exit", Protocol: r.Protocol, Listen: ":"+r.BridgePort, Target: target})
 		if exit, ok := agents[r.ExitAgent]; ok {
-			// 中转连接：Agent B -> Agent C。如果 C 是 IPv6，这里会自动处理。
-			// net.SplitHostPort 解析出来的 RemoteIP 不带括号。
-			// 如果是 IPv6，需要加括号才能拼端口。
-			remoteIP := exit.RemoteIP
-			if strings.Contains(remoteIP, ":") {
-				remoteIP = "[" + remoteIP + "]"
-			}
-			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID+"_entry", Protocol: r.Protocol, Listen: ":"+r.EntryPort, Target: fmt.Sprintf("%s:%s", remoteIP, r.BridgePort)})
+			// 处理 IPv6 地址加括号
+			rip := exit.RemoteIP
+			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") { rip = "[" + rip + "]" }
+			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID+"_entry", Protocol: r.Protocol, Listen: ":"+r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
 		}
 	}
 	for n, a := range agents {
@@ -368,34 +361,98 @@ func startProxy(t ForwardTask) {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen); if err!=nil { return }
 			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
-			for { c,e := ln.Accept(); if e!=nil {break}; go pipe(c, t.Target, t.ID, true) }
+			for { c,e := ln.Accept(); if e!=nil {break}; go pipeTCP(c, t.Target, t.ID) }
 		}()
 	}
 	if t.Protocol == "udp" || t.Protocol == "both" {
 		go func() {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen); ln, err := net.ListenUDP("udp", addr); if err!=nil {return}
 			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
-			dstAddr, _ := net.ResolveUDPAddr("udp", t.Target)
-			buf := make([]byte, 4096)
-			for {
-				n, src, err := ln.ReadFromUDP(buf); if err!=nil {break}
-				v, _ := agentTraffic.Load(t.ID); cnt := v.(*TrafficCounter); atomic.AddInt64(&cnt.Tx, int64(n))
-				go func(d []byte, sa *net.UDPAddr) {
-					c, e := net.DialUDP("udp", nil, dstAddr); if e!=nil {return}; defer c.Close()
-					c.Write(d); c.SetReadDeadline(time.Now().Add(5*time.Second))
-					b := make([]byte, 4096); m, _, e := c.ReadFromUDP(b)
-					if e==nil { ln.WriteToUDP(b[:m], sa); atomic.AddInt64(&cnt.Rx, int64(m)) }
-				}(buf[:n], src)
-			}
+			handleUDP(ln, t.Target, t.ID)
 		}()
 	}
 }
 
-func pipe(src net.Conn, target, tid string, isTcp bool) {
+func pipeTCP(src net.Conn, target, tid string) {
 	defer src.Close(); dst, err := net.DialTimeout("tcp", target, 5*time.Second); if err!=nil {return}; defer dst.Close()
 	v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx); copyCount(src, dst, &cnt.Rx)
 }
+
+// UDP 核心升级：会话管理
+func handleUDP(ln *net.UDPConn, target, tid string) {
+	// 简单的内存会话表：SourceAddr -> RemoteConn
+	sessions := make(map[string]*net.UDPConn)
+	// 最后活跃时间
+	lastActive := make(map[string]time.Time)
+	var sl sync.Mutex
+
+	dstAddr, _ := net.ResolveUDPAddr("udp", target)
+	v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
+	buf := make([]byte, 4096)
+
+	// 定时清理过期会话
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			sl.Lock()
+			now := time.Now()
+			for k, t := range lastActive {
+				if now.Sub(t) > UDPTimeout {
+					if conn, ok := sessions[k]; ok { conn.Close() }
+					delete(sessions, k)
+					delete(lastActive, k)
+				}
+			}
+			sl.Unlock()
+		}
+	}()
+
+	for {
+		n, srcAddr, err := ln.ReadFromUDP(buf)
+		if err != nil { break }
+		atomic.AddInt64(&cnt.Tx, int64(n))
+
+		sAddr := srcAddr.String()
+		sl.Lock()
+		conn, exists := sessions[sAddr]
+		lastActive[sAddr] = time.Now()
+		sl.Unlock()
+
+		if exists {
+			conn.Write(buf[:n])
+		} else {
+			// 建立新会话
+			newConn, err := net.DialUDP("udp", nil, dstAddr)
+			if err != nil { continue }
+			
+			sl.Lock()
+			sessions[sAddr] = newConn
+			sl.Unlock()
+			
+			newConn.Write(buf[:n])
+
+			// 异步读取回包
+			go func(c *net.UDPConn, sa *net.UDPAddr) {
+				b := make([]byte, 4096)
+				for {
+					c.SetReadDeadline(time.Now().Add(UDPTimeout))
+					m, _, e := c.ReadFromUDP(b)
+					if e != nil { 
+						c.Close()
+						sl.Lock(); delete(sessions, sa.String()); delete(lastActive, sa.String()); sl.Unlock()
+						break 
+					}
+					ln.WriteToUDP(b[:m], sa)
+					atomic.AddInt64(&cnt.Rx, int64(m))
+					
+					sl.Lock(); lastActive[sa.String()] = time.Now(); sl.Unlock()
+				}
+			}(newConn, srcAddr)
+		}
+	}
+}
+
 func copyCount(dst io.Writer, src io.Reader, c *int64) {
 	b := make([]byte, 32*1024)
 	for { n, e := src.Read(b); if n>0 { atomic.AddInt64(c, int64(n)); dst.Write(b[:n]) }; if e!=nil { break } }
