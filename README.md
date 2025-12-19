@@ -92,3 +92,10 @@ Master (面板) 维护：
  * 防火墙：请确保 Master 机器放行了 8888 (Web面板) 和 9999 (Agent通信) 端口。Agent 机器需要放行您设置的转发端口。
  * UDP 优化：如果您主要用于转发 UDP 流量（如游戏），建议在服务器上优化 sysctl 参数以获得最佳性能。
  * 安全性：请务必保管好您的 通信 Token，任何拥有 Token 的人都可以接入您的网络。
+# 界面效果
+<img width="1625" height="1088" alt="image" src="https://github.com/user-attachments/assets/54a6c46e-75bc-4f3a-8ab5-1f964e44a283" />
+<img width="1634" height="1014" alt="image" src="https://github.com/user-attachments/assets/6f7bf704-2c27-4a15-8b0a-529f9ad47684" />
+<img width="1637" height="999" alt="image" src="https://github.com/user-attachments/assets/6fbc3129-2603-45f3-912a-1b1aaf2f3868" />
+<img width="1631" height="1003" alt="image" src="https://github.com/user-attachments/assets/c7ebe3c5-1ba8-488d-9ef3-ad46afbb997f" />
+<img width="1640" height="1004" alt="image" src="https://github.com/user-attachments/assets/906c5bc4-c972-4953-931a-3463d0a54dc8" />
+
