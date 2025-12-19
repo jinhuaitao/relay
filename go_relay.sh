@@ -48,7 +48,7 @@ print_logo() {
     echo "/_/ |_|\___/_/\__,_/\__, /  "
     echo "                   /____/   "
     echo -e "${PLAIN}"
-    echo -e "   ${YELLOW}Relay 流量转发管理脚本 v1.1 (Auto IP)${PLAIN}"
+    echo -e "   ${YELLOW}Relay 流量转发管理脚本${PLAIN}"
     print_line
 }
 
