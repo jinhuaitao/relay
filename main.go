@@ -31,11 +31,12 @@ const (
 	ControlPort = ":9999" // Agent 连接端口
 	WebPort     = ":8888" // 网页管理端口
 	DownloadURL = "https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
-	
-	// 性能调优
+
+	// --- 性能调优参数 ---
 	TCPKeepAlive   = 15 * time.Second
-	UDPBufferSize  = 4 * 1024 * 1024 
-	CopyBufferSize = 32 * 1024       
+	UDPBufferSize  = 16 * 1024 * 1024 // UDP Socket 缓冲: 16MB
+	SocketBufSize  = 8 * 1024 * 1024  // TCP Socket 缓冲: 8MB (针对长链路优化)
+	CopyBufferSize = 64 * 1024        // 应用层内存拷贝缓冲: 64KB
 )
 
 // --- 内存池 ---
@@ -57,19 +58,18 @@ type LogicalRule struct {
 	TargetPort string `json:"target_port"`
 	Protocol   string `json:"protocol"`
 	BridgePort string `json:"bridge_port"`
-	
+
 	TotalTx int64 `json:"-"`
 	TotalRx int64 `json:"-"`
 }
 
-// 修改：配置结构体现在包含规则列表
 type AppConfig struct {
 	WebUser    string        `json:"web_user"`
 	WebPass    string        `json:"web_pass"`
 	AgentToken string        `json:"agent_token"`
 	MasterIP   string        `json:"master_ip"`
 	IsSetup    bool          `json:"is_setup"`
-	Rules      []LogicalRule `json:"saved_rules"` // 持久化规则
+	Rules      []LogicalRule `json:"saved_rules"`
 }
 
 type ForwardTask struct {
@@ -101,6 +101,12 @@ type TrafficCounter struct {
 	Tx int64
 }
 
+// UDP 会话结构 (用于 sync.Map)
+type udpSession struct {
+	conn       *net.UDPConn
+	lastActive time.Time
+}
+
 // --- 全局变量 ---
 
 var (
@@ -108,8 +114,8 @@ var (
 	agents           = make(map[string]*AgentInfo)
 	rules            = make([]LogicalRule, 0)
 	mu               sync.Mutex
-	runningListeners sync.Map 
-	agentTraffic     sync.Map 
+	runningListeners sync.Map
+	agentTraffic     sync.Map
 	sessions         = make(map[string]time.Time)
 )
 
@@ -123,7 +129,7 @@ func main() {
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
 	serviceOp := flag.String("service", "", "install | uninstall")
-	
+
 	flag.Parse()
 
 	if *serviceOp != "" {
@@ -134,7 +140,7 @@ func main() {
 	setupSignalHandler()
 
 	if *mode == "master" {
-		loadConfig() // 加载配置和规则
+		loadConfig()
 		runMaster()
 	} else if *mode == "agent" {
 		if *name == "" || *connect == "" || *token == "" {
@@ -150,10 +156,16 @@ func setRLimit() {
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		var rLimit syscall.Rlimit
 		err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		rLimit.Cur = rLimit.Max
-		if rLimit.Cur < 65535 { rLimit.Cur = 65535 }
-		if rLimit.Max < 65535 { rLimit.Max = 65535 }
+		if rLimit.Cur < 65535 {
+			rLimit.Cur = 65535
+		}
+		if rLimit.Max < 65535 {
+			rLimit.Max = 65535
+		}
 		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	}
 }
@@ -161,32 +173,49 @@ func setRLimit() {
 // ================= 服务管理 =================
 
 func handleService(op, mode, name, connect, token string) {
-	if os.Geteuid() != 0 { log.Fatal("需 root 权限") }
-	exe, _ := os.Executable(); exe, _ = filepath.Abs(exe)
+	if os.Geteuid() != 0 {
+		log.Fatal("需 root 权限")
+	}
+	exe, _ := os.Executable()
+	exe, _ = filepath.Abs(exe)
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"", mode, name, connect, token)
-	isSys := false; if _, err := os.Stat("/run/systemd/system"); err == nil { isSys = true }
-	isAlpine := false; if _, err := os.Stat("/etc/alpine-release"); err == nil { isAlpine = true }
+	isSys := false
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		isSys = true
+	}
+	isAlpine := false
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		isAlpine = true
+	}
 
 	if op == "install" {
 		if isSys {
 			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=65535\n[Install]\nWantedBy=multi-user.target", exe, args)
 			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
-			exec.Command("systemctl","enable","gorelay").Run()
-			exec.Command("systemctl","restart","gorelay").Run()
+			exec.Command("systemctl", "enable", "gorelay").Run()
+			exec.Command("systemctl", "restart", "gorelay").Run()
 			log.Println("Systemd 服务已安装")
 		} else if isAlpine {
 			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 65535\"\ndepend(){ need net; }", exe, args)
 			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
-			exec.Command("rc-update","add","gorelay","default").Run()
-			exec.Command("rc-service","gorelay","restart").Run()
+			exec.Command("rc-update", "add", "gorelay", "default").Run()
+			exec.Command("rc-service", "gorelay", "restart").Run()
 			log.Println("OpenRC 服务已安装")
 		} else {
 			exec.Command("nohup", exe, args, "&").Start()
 			log.Println("已通过 nohup 启动")
 		}
 	} else {
-		if isSys { exec.Command("systemctl","disable","gorelay").Run(); exec.Command("systemctl","stop","gorelay").Run(); os.Remove("/etc/systemd/system/gorelay.service") }
-		if isAlpine { exec.Command("rc-update","del","gorelay","default").Run(); exec.Command("rc-service","gorelay","stop").Run(); os.Remove("/etc/init.d/gorelay") }
+		if isSys {
+			exec.Command("systemctl", "disable", "gorelay").Run()
+			exec.Command("systemctl", "stop", "gorelay").Run()
+			os.Remove("/etc/systemd/system/gorelay.service")
+		}
+		if isAlpine {
+			exec.Command("rc-update", "del", "gorelay", "default").Run()
+			exec.Command("rc-service", "gorelay", "stop").Run()
+			os.Remove("/etc/init.d/gorelay")
+		}
 		log.Println("服务已卸载")
 	}
 }
@@ -196,8 +225,15 @@ func handleService(op, mode, name, connect, token string) {
 func runMaster() {
 	go func() {
 		ln, err := net.Listen("tcp", ControlPort)
-		if err != nil { log.Fatal(err) }
-		for { c, err := ln.Accept(); if err == nil { go handleAgentConn(c) } }
+		if err != nil {
+			log.Fatal(err)
+		}
+		for {
+			c, err := ln.Accept()
+			if err == nil {
+				go handleAgentConn(c)
+			}
+		}
 	}()
 
 	http.HandleFunc("/", authMiddleware(handleDashboard))
@@ -205,6 +241,7 @@ func runMaster() {
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/setup", handleSetup)
 	http.HandleFunc("/add", authMiddleware(handleAddRule))
+	http.HandleFunc("/edit", authMiddleware(handleEditRule)) // 编辑规则
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 
@@ -216,23 +253,35 @@ func handleAgentConn(conn net.Conn) {
 	defer conn.Close()
 	dec := json.NewDecoder(conn)
 	var msg Message
-	if dec.Decode(&msg) != nil || msg.Type != "auth" { return }
-	
+	if dec.Decode(&msg) != nil || msg.Type != "auth" {
+		return
+	}
+
 	data := msg.Payload.(map[string]interface{})
-	if data["token"].(string) != config.AgentToken { return }
-	
+	if data["token"].(string) != config.AgentToken {
+		return
+	}
+
 	name := data["name"].(string)
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	
-	mu.Lock(); agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn}; mu.Unlock()
+
+	mu.Lock()
+	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn}
+	mu.Unlock()
 	pushConfigToAll()
-	
+
 	for {
 		var m Message
-		if dec.Decode(&m) != nil { break }
-		if m.Type == "stats" { handleStatsReport(m.Payload) }
+		if dec.Decode(&m) != nil {
+			break
+		}
+		if m.Type == "stats" {
+			handleStatsReport(m.Payload)
+		}
 	}
-	mu.Lock(); delete(agents, name); mu.Unlock()
+	mu.Lock()
+	delete(agents, name)
+	mu.Unlock()
 }
 
 func handleStatsReport(payload interface{}) {
@@ -261,15 +310,20 @@ func pushConfigToAll() {
 	tasks := make(map[string][]ForwardTask)
 	for _, r := range rules {
 		target := fmt.Sprintf("%s:%s", r.TargetIP, r.TargetPort)
-		tasks[r.ExitAgent] = append(tasks[r.ExitAgent], ForwardTask{ID: r.ID+"_exit", Protocol: r.Protocol, Listen: ":"+r.BridgePort, Target: target})
+		tasks[r.ExitAgent] = append(tasks[r.ExitAgent], ForwardTask{ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: target})
 		if exit, ok := agents[r.ExitAgent]; ok {
 			rip := exit.RemoteIP
-			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") { rip = "[" + rip + "]" }
-			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID+"_entry", Protocol: r.Protocol, Listen: ":"+r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
+			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
+				rip = "[" + rip + "]"
+			}
+			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
 		}
 	}
 	for n, a := range agents {
-		t := tasks[n]; if t == nil { t = []ForwardTask{} }
+		t := tasks[n]
+		if t == nil {
+			t = []ForwardTask{}
+		}
 		json.NewEncoder(a.Conn).Encode(Message{Type: "update", Payload: t})
 	}
 }
@@ -279,12 +333,23 @@ func pushConfigToAll() {
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
-	al := make([]AgentInfo, 0); for _, a := range agents { al = append(al, *a) }
-	var totalTraffic int64; for _, r := range rules { totalTraffic += (r.TotalTx + r.TotalRx) }
+	al := make([]AgentInfo, 0)
+	for _, a := range agents {
+		al = append(al, *a)
+	}
+	var totalTraffic int64
+	for _, r := range rules {
+		totalTraffic += (r.TotalTx + r.TotalRx)
+	}
 	data := struct {
-		Agents []AgentInfo; Rules []LogicalRule; Token string; User string; DownloadURL string
-		TotalTraffic int64; MasterIP string
-	}{ al, rules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP }
+		Agents       []AgentInfo
+		Rules        []LogicalRule
+		Token        string
+		User         string
+		DownloadURL  string
+		TotalTraffic int64
+		MasterIP     string
+	}{al, rules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP}
 	t := template.New("dash").Funcs(template.FuncMap{"formatBytes": formatBytes})
 	t, _ = t.Parse(dashboardHtml)
 	t.Execute(w, data)
@@ -292,19 +357,39 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock(); setup := config.IsSetup; mu.Unlock()
-		if !setup { http.Redirect(w, r, "/setup", http.StatusSeeOther); return }
+		mu.Lock()
+		setup := config.IsSetup
+		mu.Unlock()
+		if !setup {
+			http.Redirect(w, r, "/setup", http.StatusSeeOther)
+			return
+		}
 		c, err := r.Cookie("sid")
-		if err != nil { http.Redirect(w, r, "/login", http.StatusSeeOther); return }
-		mu.Lock(); exp, ok := sessions[c.Value]; mu.Unlock()
-		if !ok || time.Now().After(exp) { http.Redirect(w, r, "/login", http.StatusSeeOther); return }
-		mu.Lock(); sessions[c.Value] = time.Now().Add(1*time.Hour); mu.Unlock()
+		if err != nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		mu.Lock()
+		exp, ok := sessions[c.Value]
+		mu.Unlock()
+		if !ok || time.Now().After(exp) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		mu.Lock()
+		sessions[c.Value] = time.Now().Add(1 * time.Hour)
+		mu.Unlock()
 		next(w, r)
 	}
 }
 func handleSetup(w http.ResponseWriter, r *http.Request) {
-	mu.Lock(); setup := config.IsSetup; mu.Unlock()
-	if setup { http.Redirect(w, r, "/", http.StatusSeeOther); return }
+	mu.Lock()
+	setup := config.IsSetup
+	mu.Unlock()
+	if setup {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	if r.Method == "POST" {
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
@@ -321,10 +406,16 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 }
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
-		mu.Lock(); u, p := config.WebUser, config.WebPass; mu.Unlock()
+		mu.Lock()
+		u, p := config.WebUser, config.WebPass
+		mu.Unlock()
 		if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == p {
-			sid := make([]byte, 16); rand.Read(sid); sidStr := hex.EncodeToString(sid)
-			mu.Lock(); sessions[sidStr] = time.Now().Add(1*time.Hour); mu.Unlock()
+			sid := make([]byte, 16)
+			rand.Read(sid)
+			sidStr := hex.EncodeToString(sid)
+			mu.Lock()
+			sessions[sidStr] = time.Now().Add(1 * time.Hour)
+			mu.Unlock()
 			http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
@@ -338,35 +429,77 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
-	if r.Method!="POST" { return }
+	if r.Method != "POST" {
+		return
+	}
 	mu.Lock()
 	rules = append(rules, LogicalRule{
-		ID: fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:         fmt.Sprintf("%d", time.Now().UnixNano()),
 		EntryAgent: r.FormValue("entry_agent"), EntryPort: r.FormValue("entry_port"),
 		ExitAgent: r.FormValue("exit_agent"), TargetIP: r.FormValue("target_ip"), TargetPort: r.FormValue("target_port"),
 		Protocol: r.FormValue("protocol"), BridgePort: fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
 	})
-	saveConfig() // 持久化
+	saveConfig()
 	mu.Unlock()
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
+
+// 编辑规则处理
+func handleEditRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+	id := r.FormValue("id")
+	mu.Lock()
+	for i, rule := range rules {
+		if rule.ID == id {
+			rules[i].EntryAgent = r.FormValue("entry_agent")
+			rules[i].EntryPort = r.FormValue("entry_port")
+			rules[i].ExitAgent = r.FormValue("exit_agent")
+			rules[i].TargetIP = r.FormValue("target_ip")
+			rules[i].TargetPort = r.FormValue("target_port")
+			rules[i].Protocol = r.FormValue("protocol")
+			break
+		}
+	}
+	saveConfig()
+	mu.Unlock()
+	go pushConfigToAll()
+	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+}
+
 func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	mu.Lock()
-	var nr []LogicalRule; for _,x := range rules { if x.ID != id { nr = append(nr, x) } }
-	rules = nr; 
-	saveConfig() // 持久化
-	mu.Unlock(); 
-	go pushConfigToAll(); http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+	var nr []LogicalRule
+	for _, x := range rules {
+		if x.ID != id {
+			nr = append(nr, x)
+		}
+	}
+	rules = nr
+	saveConfig()
+	mu.Unlock()
+	go pushConfigToAll()
+	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method!="POST" { return }
+	if r.Method != "POST" {
+		return
+	}
 	mu.Lock()
-	if p := r.FormValue("password"); p!="" { config.WebPass = md5Hash(p) }
-	if t := r.FormValue("token"); t!="" { config.AgentToken = t }
-	if ip := r.FormValue("master_ip"); ip!="" { config.MasterIP = ip }
-	saveConfig(); mu.Unlock()
+	if p := r.FormValue("password"); p != "" {
+		config.WebPass = md5Hash(p)
+	}
+	if t := r.FormValue("token"); t != "" {
+		config.AgentToken = t
+	}
+	if ip := r.FormValue("master_ip"); ip != "" {
+		config.MasterIP = ip
+	}
+	saveConfig()
+	mu.Unlock()
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
 }
 
@@ -375,43 +508,66 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 func runAgent(name, masterAddr, token string) {
 	for {
 		conn, err := net.Dial("tcp", masterAddr)
-		if err != nil { time.Sleep(5 * time.Second); continue }
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
 		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token}})
-		
+
 		stop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(3 * time.Second)
 			defer t.Stop()
 			for {
 				select {
-				case <-stop: return
+				case <-stop:
+					return
 				case <-t.C:
 					var reps []TrafficReport
 					agentTraffic.Range(func(k, v interface{}) bool {
 						c := v.(*TrafficCounter)
 						tx, rx := atomic.SwapInt64(&c.Tx, 0), atomic.SwapInt64(&c.Rx, 0)
-						if tx>0 || rx>0 { reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx}) }
+						if tx > 0 || rx > 0 {
+							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx})
+						}
 						return true
 					})
-					if len(reps)>0 { json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps}) } else { json.NewEncoder(conn).Encode(Message{Type: "ping"}) }
+					if len(reps) > 0 {
+						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
+					} else {
+						json.NewEncoder(conn).Encode(Message{Type: "ping"})
+					}
 				}
 			}
 		}()
 
 		dec := json.NewDecoder(conn)
 		for {
-			var msg Message; if dec.Decode(&msg) != nil { close(stop); conn.Close(); break }
+			var msg Message
+			if dec.Decode(&msg) != nil {
+				close(stop)
+				conn.Close()
+				break
+			}
 			if msg.Type == "update" {
-				d, _ := json.Marshal(msg.Payload); var tasks []ForwardTask; json.Unmarshal(d, &tasks)
+				d, _ := json.Marshal(msg.Payload)
+				var tasks []ForwardTask
+				json.Unmarshal(d, &tasks)
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
-					if _, ok := runningListeners.Load(t.ID); ok { continue }
+					if _, ok := runningListeners.Load(t.ID); ok {
+						continue
+					}
 					agentTraffic.Store(t.ID, &TrafficCounter{})
 					startProxy(t)
 				}
 				runningListeners.Range(func(k, v interface{}) bool {
-					if !active[k.(string)] { v.(func())(); runningListeners.Delete(k); agentTraffic.Delete(k) }
+					if !active[k.(string)] {
+						v.(func())()
+						runningListeners.Delete(k)
+						agentTraffic.Delete(k)
+					}
 					return true
 				})
 			}
@@ -421,29 +577,60 @@ func runAgent(name, masterAddr, token string) {
 }
 
 func startProxy(t ForwardTask) {
-	var closers []func(); var l sync.Mutex; closed := false
-	closeAll := func() { l.Lock(); defer l.Unlock(); if closed { return }; closed=true; for _, f := range closers { f() } }
+	var closers []func()
+	var l sync.Mutex
+	closed := false
+	closeAll := func() {
+		l.Lock()
+		defer l.Unlock()
+		if closed {
+			return
+		}
+		closed = true
+		for _, f := range closers {
+			f()
+		}
+	}
 	runningListeners.Store(t.ID, closeAll)
 
 	if t.Protocol == "tcp" || t.Protocol == "both" {
 		go func() {
-			ln, err := net.Listen("tcp", t.Listen); if err!=nil { return }
-			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
-			for { 
-				c,e := ln.Accept()
-				if e!=nil { break }
-				if tc, ok := c.(*net.TCPConn); ok {
-					tc.SetKeepAlive(true); tc.SetKeepAlivePeriod(TCPKeepAlive); tc.SetNoDelay(true)
+			ln, err := net.Listen("tcp", t.Listen)
+			if err != nil {
+				return
+			}
+			l.Lock()
+			closers = append(closers, func() { ln.Close() })
+			l.Unlock()
+			for {
+				c, e := ln.Accept()
+				if e != nil {
+					break
 				}
-				go pipeTCP(c, t.Target, t.ID) 
+				// 优化：设置服务端连接缓冲区
+				if tc, ok := c.(*net.TCPConn); ok {
+					tc.SetKeepAlive(true)
+					tc.SetKeepAlivePeriod(TCPKeepAlive)
+					tc.SetNoDelay(true)
+					tc.SetReadBuffer(SocketBufSize)
+					tc.SetWriteBuffer(SocketBufSize)
+				}
+				go pipeTCP(c, t.Target, t.ID)
 			}
 		}()
 	}
 	if t.Protocol == "udp" || t.Protocol == "both" {
 		go func() {
-			addr, _ := net.ResolveUDPAddr("udp", t.Listen); ln, err := net.ListenUDP("udp", addr); if err!=nil {return}
-			ln.SetReadBuffer(UDPBufferSize); ln.SetWriteBuffer(UDPBufferSize)
-			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
+			addr, _ := net.ResolveUDPAddr("udp", t.Listen)
+			ln, err := net.ListenUDP("udp", addr)
+			if err != nil {
+				return
+			}
+			ln.SetReadBuffer(UDPBufferSize)
+			ln.SetWriteBuffer(UDPBufferSize)
+			l.Lock()
+			closers = append(closers, func() { ln.Close() })
+			l.Unlock()
 			handleUDP(ln, t.Target, t.ID)
 		}()
 	}
@@ -451,96 +638,172 @@ func startProxy(t ForwardTask) {
 
 func pipeTCP(src net.Conn, target, tid string) {
 	defer src.Close()
-	dst, err := net.DialTimeout("tcp", target, 5*time.Second); if err!=nil {return}; defer dst.Close()
-	if tc, ok := dst.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true); tc.SetKeepAlivePeriod(TCPKeepAlive); tc.SetNoDelay(true)
+	// 优化：连接超时设置
+	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		return
 	}
-	v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx); copyCount(src, dst, &cnt.Rx)
+	defer dst.Close()
+
+	// 优化：设置目标连接缓冲区
+	if tc, ok := dst.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(TCPKeepAlive)
+		tc.SetNoDelay(true)
+		tc.SetReadBuffer(SocketBufSize)
+		tc.SetWriteBuffer(SocketBufSize)
+	}
+
+	v, _ := agentTraffic.Load(tid)
+	cnt := v.(*TrafficCounter)
+
+	// 双向并发拷贝
+	go copyCount(dst, src, &cnt.Tx)
+	copyCount(src, dst, &cnt.Rx)
 }
 
 func handleUDP(ln *net.UDPConn, target, tid string) {
-	sessions := make(map[string]*net.UDPConn); lastActive := make(map[string]time.Time); var sl sync.Mutex
-	dstAddr, _ := net.ResolveUDPAddr("udp", target); v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
-	bufPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bufPtr); buf := *bufPtr
+	// 优化：使用 sync.Map 替代 Mutex 锁，减少竞争
+	sessions := &sync.Map{}
 
+	dstAddr, _ := net.ResolveUDPAddr("udp", target)
+	v, _ := agentTraffic.Load(tid)
+	cnt := v.(*TrafficCounter)
+
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
+
+	// 清理协程
 	go func() {
 		for {
-			time.Sleep(10 * time.Second); sl.Lock(); now := time.Now()
-			for k, t := range lastActive {
-				if now.Sub(t) > 60*time.Second { if c, ok := sessions[k]; ok { c.Close() }; delete(sessions, k); delete(lastActive, k) }
-			}
-			sl.Unlock()
+			time.Sleep(30 * time.Second)
+			now := time.Now()
+			sessions.Range(func(key, value interface{}) bool {
+				s := value.(*udpSession)
+				if now.Sub(s.lastActive) > 60*time.Second {
+					s.conn.Close()
+					sessions.Delete(key)
+				}
+				return true
+			})
 		}
 	}()
+
 	for {
-		n, srcAddr, err := ln.ReadFromUDP(buf); if err != nil { break }
-		atomic.AddInt64(&cnt.Tx, int64(n)); sAddr := srcAddr.String()
-		sl.Lock(); conn, exists := sessions[sAddr]; lastActive[sAddr] = time.Now(); sl.Unlock()
-		if exists {
-			conn.Write(buf[:n])
+		n, srcAddr, err := ln.ReadFromUDP(buf)
+		if err != nil {
+			break
+		}
+		atomic.AddInt64(&cnt.Tx, int64(n))
+		sAddr := srcAddr.String()
+
+		// 优化：无锁快速查找
+		val, ok := sessions.Load(sAddr)
+
+		if ok {
+			s := val.(*udpSession)
+			s.lastActive = time.Now() // 更新活跃时间
+			s.conn.Write(buf[:n])
 		} else {
-			newConn, err := net.DialUDP("udp", nil, dstAddr); if err != nil { continue }
-			newConn.SetReadBuffer(UDPBufferSize); newConn.SetWriteBuffer(UDPBufferSize)
-			sl.Lock(); sessions[sAddr] = newConn; sl.Unlock()
+			// 建立新连接
+			newConn, err := net.DialUDP("udp", nil, dstAddr)
+			if err != nil {
+				continue
+			}
+			newConn.SetReadBuffer(UDPBufferSize)
+			newConn.SetWriteBuffer(UDPBufferSize)
+
+			s := &udpSession{conn: newConn, lastActive: time.Now()}
+			sessions.Store(sAddr, s)
+
 			newConn.Write(buf[:n])
-			go func(c *net.UDPConn, sa *net.UDPAddr) {
-				bPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bPtr); b := *bPtr
+
+			// 开启回传协程
+			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
+				bPtr := bufPool.Get().(*[]byte)
+				defer bufPool.Put(bPtr)
+				b := *bPtr
 				for {
-					c.SetReadDeadline(time.Now().Add(60*time.Second)); m, _, e := c.ReadFromUDP(b)
-					if e != nil { c.Close(); sl.Lock(); delete(sessions, sa.String()); delete(lastActive, sa.String()); sl.Unlock(); break }
-					ln.WriteToUDP(b[:m], sa); atomic.AddInt64(&cnt.Rx, int64(m)); sl.Lock(); lastActive[sa.String()] = time.Now(); sl.Unlock()
+					c.SetReadDeadline(time.Now().Add(65 * time.Second))
+					m, _, e := c.ReadFromUDP(b)
+					if e != nil {
+						c.Close()
+						sessions.Delete(k)
+						break
+					}
+					ln.WriteToUDP(b[:m], sa)
+					atomic.AddInt64(&cnt.Rx, int64(m))
+
+					// 更新活跃时间
+					if val, ok := sessions.Load(k); ok {
+						val.(*udpSession).lastActive = time.Now()
+					}
 				}
-			}(newConn, srcAddr)
+			}(newConn, srcAddr, sAddr)
 		}
 	}
 }
 
 func copyCount(dst io.Writer, src io.Reader, c *int64) {
-	bufPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bufPtr); buf := *bufPtr
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
+
 	cw := &CounterWriter{Writer: dst, Counter: c}
-	for {
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := cw.Write(buf[0:nr])
-			if ew != nil || nr != nw { break }
-		}
-		if er != nil { break }
-	}
+	// 优化：使用 io.CopyBuffer
+	io.CopyBuffer(cw, src, buf)
 }
 
 type CounterWriter struct {
 	io.Writer
 	Counter *int64
 }
+
 func (w *CounterWriter) Write(p []byte) (n int, err error) {
 	n, err = w.Writer.Write(p)
-	if n > 0 { atomic.AddInt64(w.Counter, int64(n)) }
+	if n > 0 {
+		atomic.AddInt64(w.Counter, int64(n))
+	}
 	return
 }
 
 // ================= HELPERS =================
-func loadConfig() { 
+func loadConfig() {
 	f, err := os.Open(ConfigFile)
-	if err == nil { 
+	if err == nil {
 		defer f.Close()
 		json.NewDecoder(f).Decode(&config)
 		// 恢复规则到内存
 		rules = config.Rules
-	} 
+	}
 }
-func saveConfig() { 
-	// 将内存中的规则同步到 Config 结构体以便保存
+func saveConfig() {
 	config.Rules = rules
 	f, _ := os.Create(ConfigFile)
 	defer f.Close()
 	json.NewEncoder(f).Encode(&config)
 }
-func md5Hash(s string) string { h := md5.New(); h.Write([]byte(s)); return hex.EncodeToString(h.Sum(nil)) }
-func setupSignalHandler() { c := make(chan os.Signal, 1); signal.Notify(c, os.Interrupt, syscall.SIGTERM); go func() { <-c; os.Exit(0) }() }
+func md5Hash(s string) string {
+	h := md5.New()
+	h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil))
+}
+func setupSignalHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() { <-c; os.Exit(0) }()
+}
 func formatBytes(b int64) string {
-	const u = 1024; if b < u { return fmt.Sprintf("%d B", b) }
-	div, exp := int64(u), 0; for n := b / u; n >= u; n /= u { div *= u; exp++ }
+	const u = 1024
+	if b < u {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(u), 0
+	for n := b / u; n >= u; n /= u {
+		div *= u
+		exp++
+	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
@@ -577,6 +840,13 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
 .cmd-box{background:#2d2d2d;color:#f8f8f2;padding:15px;border-radius:4px;font-family:monospace;word-break:break-all;margin-top:10px}
 .form-g{margin-bottom:10px}label{display:block;font-size:12px;margin-bottom:5px;color:#666}
 .grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;align-items:end}
+
+/* Modal CSS */
+.modal {display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);}
+.modal-content {background:#fff;margin:10% auto;padding:20px;border-radius:8px;width:90%;max-width:500px;position:relative;animation:slideDown .3s}
+@keyframes slideDown {from{transform:translateY(-30px);opacity:0}to{transform:translateY(0);opacity:1}}
+.close {position:absolute;right:15px;top:10px;font-size:24px;cursor:pointer;color:#aaa}
+.close:hover{color:#000}
 </style>
 </head>
 <body>
@@ -644,7 +914,10 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
                 <td>{{.TargetIP}}:{{.TargetPort}}</td>
                 <td><span style="background:#eee;padding:2px 6px;border-radius:4px;font-size:12px">{{.Protocol}}</span></td>
                 <td style="font-family:monospace;font-size:13px;color:#555">↑{{formatBytes .TotalTx}} &nbsp; ↓{{formatBytes .TotalRx}}</td>
-                <td><a href="/delete?id={{.ID}}" style="color:#dc3545;text-decoration:none">删除</a></td>
+                <td>
+                    <button style="background:#6c757d;padding:4px 8px;font-size:12px" onclick="openEdit('{{.ID}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}')">编辑</button>
+                    <a href="/delete?id={{.ID}}" style="color:#dc3545;text-decoration:none;margin-left:8px;font-size:14px">删除</a>
+                </td>
             </tr>{{end}}
             </tbody></table>
         </div>
@@ -662,6 +935,24 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
         </div>
     </div>
 </div>
+
+<div id="editModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeEdit()">&times;</span>
+        <h3>编辑规则</h3>
+        <form action="/edit" method="POST">
+            <input type="hidden" name="id" id="e_id">
+            <div class="form-g"><label>入口 (B)</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+            <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
+            <div class="form-g"><label>出口 (C)</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+            <div class="form-g"><label>目标IP</label><input name="target_ip" id="e_tip" required></div>
+            <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
+            <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
+            <button style="width:100%;margin-top:15px">保存修改</button>
+        </form>
+    </div>
+</div>
+
 <script>
     var host="{{.MasterIP}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
     if (!host) host = location.hostname; 
@@ -695,8 +986,23 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
         else { var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('已复制'); }
     }
 
+    // Modal Logic
+    var modal = document.getElementById("editModal");
+    function openEdit(id, entry, eport, exit, tip, tport, proto) {
+        document.getElementById('e_id').value = id;
+        document.getElementById('e_entry').value = entry;
+        document.getElementById('e_eport').value = eport;
+        document.getElementById('e_exit').value = exit;
+        document.getElementById('e_tip').value = tip;
+        document.getElementById('e_tport').value = tport;
+        document.getElementById('e_proto').value = proto;
+        modal.style.display = "block";
+    }
+    function closeEdit() { modal.style.display = "none"; }
+    window.onclick = function(event) { if (event.target == modal) { closeEdit(); } }
+
     setInterval(()=>{ 
-        if(document.querySelector('.page.active').id === 'dashboard') {
+        if(document.querySelector('.page.active').id === 'dashboard' && modal.style.display !== "block") {
             if(document.activeElement.tagName !== "INPUT") location.reload();
         }
     }, 5000);
