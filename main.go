@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,29 +31,22 @@ const (
 	ControlPort = ":9999" // Agent 连接端口
 	WebPort     = ":8888" // 网页管理端口
 	DownloadURL = "https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
+	
+	// 性能调优
+	TCPKeepAlive   = 15 * time.Second
+	UDPBufferSize  = 4 * 1024 * 1024 
+	CopyBufferSize = 32 * 1024       
 )
 
+// --- 内存池 ---
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, CopyBufferSize)
+		return &b
+	},
+}
+
 // --- 数据结构 ---
-
-type AppConfig struct {
-	WebUser    string `json:"web_user"`
-	WebPass    string `json:"web_pass"`
-	AgentToken string `json:"agent_token"`
-	IsSetup    bool   `json:"is_setup"`
-}
-
-type ForwardTask struct {
-	ID       string `json:"id"`
-	Protocol string `json:"protocol"`
-	Listen   string `json:"listen"`
-	Target   string `json:"target"`
-}
-
-type TrafficReport struct {
-	TaskID  string `json:"task_id"`
-	TxDelta int64  `json:"tx"`
-	RxDelta int64  `json:"rx"`
-}
 
 type LogicalRule struct {
 	ID         string `json:"id"`
@@ -66,6 +60,29 @@ type LogicalRule struct {
 	
 	TotalTx int64 `json:"-"`
 	TotalRx int64 `json:"-"`
+}
+
+// 修改：配置结构体现在包含规则列表
+type AppConfig struct {
+	WebUser    string        `json:"web_user"`
+	WebPass    string        `json:"web_pass"`
+	AgentToken string        `json:"agent_token"`
+	MasterIP   string        `json:"master_ip"`
+	IsSetup    bool          `json:"is_setup"`
+	Rules      []LogicalRule `json:"saved_rules"` // 持久化规则
+}
+
+type ForwardTask struct {
+	ID       string `json:"id"`
+	Protocol string `json:"protocol"`
+	Listen   string `json:"listen"`
+	Target   string `json:"target"`
+}
+
+type TrafficReport struct {
+	TaskID  string `json:"task_id"`
+	TxDelta int64  `json:"tx"`
+	RxDelta int64  `json:"rx"`
 }
 
 type AgentInfo struct {
@@ -99,15 +116,16 @@ var (
 // --- 主程序 ---
 
 func main() {
-	mode := flag.String("mode", "master", "运行模式: master | agent")
+	setRLimit()
+
+	mode := flag.String("mode", "master", "运行模式")
 	name := flag.String("name", "", "Agent名称")
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
-	serviceOp := flag.String("service", "", "install | uninstall (安装/卸载开机自启)")
+	serviceOp := flag.String("service", "", "install | uninstall")
 	
 	flag.Parse()
 
-	// 优先处理服务安装/卸载
 	if *serviceOp != "" {
 		handleService(*serviceOp, *mode, *name, *connect, *token)
 		return
@@ -116,138 +134,70 @@ func main() {
 	setupSignalHandler()
 
 	if *mode == "master" {
-		loadConfig()
+		loadConfig() // 加载配置和规则
 		runMaster()
 	} else if *mode == "agent" {
 		if *name == "" || *connect == "" || *token == "" {
-			log.Fatal("参数不足: Agent模式需要 -name, -connect, -token")
+			log.Fatal("Agent模式参数不足")
 		}
 		runAgent(*name, *connect, *token)
 	} else {
-		log.Fatal("未知模式，请使用 -mode master 或 -mode agent")
+		log.Fatal("未知模式")
 	}
 }
 
-// ================= 服务管理逻辑 (核心升级) =================
+func setRLimit() {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		var rLimit syscall.Rlimit
+		err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+		if err != nil { return }
+		rLimit.Cur = rLimit.Max
+		if rLimit.Cur < 65535 { rLimit.Cur = 65535 }
+		if rLimit.Max < 65535 { rLimit.Max = 65535 }
+		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	}
+}
+
+// ================= 服务管理 =================
 
 func handleService(op, mode, name, connect, token string) {
-	if os.Geteuid() != 0 {
-		log.Fatal("错误: 安装/卸载服务必须使用 root 权限 (sudo)")
-	}
-
-	exePath, err := os.Executable()
-	if err != nil { exePath = "/root/relay" }
-	exePath, _ = filepath.Abs(exePath)
-
-	// 构建启动参数字符串
+	if os.Geteuid() != 0 { log.Fatal("需 root 权限") }
+	exe, _ := os.Executable(); exe, _ = filepath.Abs(exe)
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"", mode, name, connect, token)
-
-	// 检测系统类型
-	isSystemd := false
-	if _, err := os.Stat("/run/systemd/system"); err == nil { isSystemd = true }
-	
-	// Alpine 检测
-	isOpenRC := false
-	if _, err := os.Stat("/etc/alpine-release"); err == nil { isOpenRC = true }
+	isSys := false; if _, err := os.Stat("/run/systemd/system"); err == nil { isSys = true }
+	isAlpine := false; if _, err := os.Stat("/etc/alpine-release"); err == nil { isAlpine = true }
 
 	if op == "install" {
-		log.Println("正在安装开机自启服务...")
-		if isSystemd {
-			installSystemd(exePath, args)
-		} else if isOpenRC {
-			installOpenRC(exePath, args) // Alpine
+		if isSys {
+			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=65535\n[Install]\nWantedBy=multi-user.target", exe, args)
+			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
+			exec.Command("systemctl","enable","gorelay").Run()
+			exec.Command("systemctl","restart","gorelay").Run()
+			log.Println("Systemd 服务已安装")
+		} else if isAlpine {
+			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 65535\"\ndepend(){ need net; }", exe, args)
+			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
+			exec.Command("rc-update","add","gorelay","default").Run()
+			exec.Command("rc-service","gorelay","restart").Run()
+			log.Println("OpenRC 服务已安装")
 		} else {
-			log.Println("未检测到 Systemd 或 OpenRC，尝试使用 nohup 后台运行...")
-			cmd := exec.Command("nohup", exePath, "-mode", mode, "-name", name, "-connect", connect, "-token", token, "&")
-			cmd.Start()
-			log.Println("已通过 nohup 启动。注意：重启后需要重新运行。")
+			exec.Command("nohup", exe, args, "&").Start()
+			log.Println("已通过 nohup 启动")
 		}
-	} else if op == "uninstall" {
-		log.Println("正在卸载服务...")
-		if isSystemd {
-			uninstallSystemd()
-		} else if isOpenRC {
-			uninstallOpenRC()
-		} else {
-			log.Println("非服务模式，请手动 kill 进程。")
-		}
+	} else {
+		if isSys { exec.Command("systemctl","disable","gorelay").Run(); exec.Command("systemctl","stop","gorelay").Run(); os.Remove("/etc/systemd/system/gorelay.service") }
+		if isAlpine { exec.Command("rc-update","del","gorelay","default").Run(); exec.Command("rc-service","gorelay","stop").Run(); os.Remove("/etc/init.d/gorelay") }
+		log.Println("服务已卸载")
 	}
 }
 
-func installSystemd(exe, args string) {
-	content := fmt.Sprintf(`[Unit]
-Description=GoRelay Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=%s %s
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-`, exe, args)
-
-	os.WriteFile("/etc/systemd/system/gorelay.service", []byte(content), 0644)
-	exec.Command("systemctl", "daemon-reload").Run()
-	exec.Command("systemctl", "enable", "gorelay").Run()
-	exec.Command("systemctl", "restart", "gorelay").Run()
-	log.Println("Systemd 服务已安装并启动！")
-}
-
-func uninstallSystemd() {
-	exec.Command("systemctl", "stop", "gorelay").Run()
-	exec.Command("systemctl", "disable", "gorelay").Run()
-	os.Remove("/etc/systemd/system/gorelay.service")
-	exec.Command("systemctl", "daemon-reload").Run()
-	log.Println("Systemd 服务已卸载。")
-}
-
-func installOpenRC(exe, args string) {
-	// Alpine OpenRC 脚本模板
-	// OpenRC 的 command_args 比较特殊，需要仔细转义
-	// 简单起见，我们生成一个 wrapper 脚本或者直接在 args 里写死
-	// 这里使用标准的 OpenRC 格式
-	
-	content := fmt.Sprintf(`#!/sbin/openrc-run
-
-name="gorelay"
-description="GoRelay Service"
-command="%s"
-command_args="%s"
-command_background=true
-pidfile="/run/gorelay.pid"
-
-depend() {
-	need net
-	after firewall
-}
-`, exe, args)
-
-	os.WriteFile("/etc/init.d/gorelay", []byte(content), 0755)
-	exec.Command("rc-update", "add", "gorelay", "default").Run()
-	exec.Command("rc-service", "gorelay", "restart").Run()
-	log.Println("OpenRC (Alpine) 服务已安装并启动！")
-}
-
-func uninstallOpenRC() {
-	exec.Command("rc-service", "gorelay", "stop").Run()
-	exec.Command("rc-update", "del", "gorelay", "default").Run()
-	os.Remove("/etc/init.d/gorelay")
-	log.Println("OpenRC 服务已卸载。")
-}
-
-// ================= MASTER 逻辑 =================
+// ================= MASTER =================
 
 func runMaster() {
 	go func() {
 		ln, err := net.Listen("tcp", ControlPort)
 		if err != nil { log.Fatal(err) }
-		for {
-			c, err := ln.Accept()
-			if err == nil { go handleAgentConn(c) }
-		}
+		for { c, err := ln.Accept(); if err == nil { go handleAgentConn(c) } }
 	}()
 
 	http.HandleFunc("/", authMiddleware(handleDashboard))
@@ -329,18 +279,12 @@ func pushConfigToAll() {
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
-	
-	al := make([]AgentInfo, 0)
-	for _, a := range agents { al = append(al, *a) }
-	
-	var totalTraffic int64
-	for _, r := range rules { totalTraffic += (r.TotalTx + r.TotalRx) }
-
+	al := make([]AgentInfo, 0); for _, a := range agents { al = append(al, *a) }
+	var totalTraffic int64; for _, r := range rules { totalTraffic += (r.TotalTx + r.TotalRx) }
 	data := struct {
 		Agents []AgentInfo; Rules []LogicalRule; Token string; User string; DownloadURL string
-		TotalTraffic int64
-	}{ al, rules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic }
-	
+		TotalTraffic int64; MasterIP string
+	}{ al, rules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP }
 	t := template.New("dash").Funcs(template.FuncMap{"formatBytes": formatBytes})
 	t, _ = t.Parse(dashboardHtml)
 	t.Execute(w, data)
@@ -402,6 +346,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		ExitAgent: r.FormValue("exit_agent"), TargetIP: r.FormValue("target_ip"), TargetPort: r.FormValue("target_port"),
 		Protocol: r.FormValue("protocol"), BridgePort: fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
 	})
+	saveConfig() // 持久化
 	mu.Unlock()
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
@@ -410,18 +355,22 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	mu.Lock()
 	var nr []LogicalRule; for _,x := range rules { if x.ID != id { nr = append(nr, x) } }
-	rules = nr; mu.Unlock(); go pushConfigToAll(); http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+	rules = nr; 
+	saveConfig() // 持久化
+	mu.Unlock(); 
+	go pushConfigToAll(); http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method!="POST" { return }
 	mu.Lock()
 	if p := r.FormValue("password"); p!="" { config.WebPass = md5Hash(p) }
 	if t := r.FormValue("token"); t!="" { config.AgentToken = t }
+	if ip := r.FormValue("master_ip"); ip!="" { config.MasterIP = ip }
 	saveConfig(); mu.Unlock()
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
 }
 
-// ================= AGENT =================
+// ================= AGENT CORE =================
 
 func runAgent(name, masterAddr, token string) {
 	for {
@@ -480,12 +429,20 @@ func startProxy(t ForwardTask) {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen); if err!=nil { return }
 			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
-			for { c,e := ln.Accept(); if e!=nil {break}; go pipeTCP(c, t.Target, t.ID) }
+			for { 
+				c,e := ln.Accept()
+				if e!=nil { break }
+				if tc, ok := c.(*net.TCPConn); ok {
+					tc.SetKeepAlive(true); tc.SetKeepAlivePeriod(TCPKeepAlive); tc.SetNoDelay(true)
+				}
+				go pipeTCP(c, t.Target, t.ID) 
+			}
 		}()
 	}
 	if t.Protocol == "udp" || t.Protocol == "both" {
 		go func() {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen); ln, err := net.ListenUDP("udp", addr); if err!=nil {return}
+			ln.SetReadBuffer(UDPBufferSize); ln.SetWriteBuffer(UDPBufferSize)
 			l.Lock(); closers=append(closers, func(){ ln.Close() }); l.Unlock()
 			handleUDP(ln, t.Target, t.ID)
 		}()
@@ -493,14 +450,20 @@ func startProxy(t ForwardTask) {
 }
 
 func pipeTCP(src net.Conn, target, tid string) {
-	defer src.Close(); dst, err := net.DialTimeout("tcp", target, 5*time.Second); if err!=nil {return}; defer dst.Close()
+	defer src.Close()
+	dst, err := net.DialTimeout("tcp", target, 5*time.Second); if err!=nil {return}; defer dst.Close()
+	if tc, ok := dst.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true); tc.SetKeepAlivePeriod(TCPKeepAlive); tc.SetNoDelay(true)
+	}
 	v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx); copyCount(src, dst, &cnt.Rx)
 }
 
 func handleUDP(ln *net.UDPConn, target, tid string) {
 	sessions := make(map[string]*net.UDPConn); lastActive := make(map[string]time.Time); var sl sync.Mutex
-	dstAddr, _ := net.ResolveUDPAddr("udp", target); v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter); buf := make([]byte, 4096)
+	dstAddr, _ := net.ResolveUDPAddr("udp", target); v, _ := agentTraffic.Load(tid); cnt := v.(*TrafficCounter)
+	bufPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bufPtr); buf := *bufPtr
+
 	go func() {
 		for {
 			time.Sleep(10 * time.Second); sl.Lock(); now := time.Now()
@@ -518,10 +481,11 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 			conn.Write(buf[:n])
 		} else {
 			newConn, err := net.DialUDP("udp", nil, dstAddr); if err != nil { continue }
+			newConn.SetReadBuffer(UDPBufferSize); newConn.SetWriteBuffer(UDPBufferSize)
 			sl.Lock(); sessions[sAddr] = newConn; sl.Unlock()
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr) {
-				b := make([]byte, 4096)
+				bPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bPtr); b := *bPtr
 				for {
 					c.SetReadDeadline(time.Now().Add(60*time.Second)); m, _, e := c.ReadFromUDP(b)
 					if e != nil { c.Close(); sl.Lock(); delete(sessions, sa.String()); delete(lastActive, sa.String()); sl.Unlock(); break }
@@ -533,13 +497,45 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 }
 
 func copyCount(dst io.Writer, src io.Reader, c *int64) {
-	b := make([]byte, 32*1024)
-	for { n, e := src.Read(b); if n>0 { atomic.AddInt64(c, int64(n)); dst.Write(b[:n]) }; if e!=nil { break } }
+	bufPtr := bufPool.Get().(*[]byte); defer bufPool.Put(bufPtr); buf := *bufPtr
+	cw := &CounterWriter{Writer: dst, Counter: c}
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := cw.Write(buf[0:nr])
+			if ew != nil || nr != nw { break }
+		}
+		if er != nil { break }
+	}
+}
+
+type CounterWriter struct {
+	io.Writer
+	Counter *int64
+}
+func (w *CounterWriter) Write(p []byte) (n int, err error) {
+	n, err = w.Writer.Write(p)
+	if n > 0 { atomic.AddInt64(w.Counter, int64(n)) }
+	return
 }
 
 // ================= HELPERS =================
-func loadConfig() { f, err := os.Open(ConfigFile); if err == nil { defer f.Close(); json.NewDecoder(f).Decode(&config) } }
-func saveConfig() { f, _ := os.Create(ConfigFile); defer f.Close(); json.NewEncoder(f).Encode(&config) }
+func loadConfig() { 
+	f, err := os.Open(ConfigFile)
+	if err == nil { 
+		defer f.Close()
+		json.NewDecoder(f).Decode(&config)
+		// 恢复规则到内存
+		rules = config.Rules
+	} 
+}
+func saveConfig() { 
+	// 将内存中的规则同步到 Config 结构体以便保存
+	config.Rules = rules
+	f, _ := os.Create(ConfigFile)
+	defer f.Close()
+	json.NewEncoder(f).Encode(&config)
+}
 func md5Hash(s string) string { h := md5.New(); h.Write([]byte(s)); return hex.EncodeToString(h.Sum(nil)) }
 func setupSignalHandler() { c := make(chan os.Signal, 1); signal.Notify(c, os.Interrupt, syscall.SIGTERM); go func() { <-c; os.Exit(0) }() }
 func formatBytes(b int64) string {
@@ -614,10 +610,10 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
     <div id="deploy" class="page">
         <div class="card">
             <h3 style="margin-top:0">生成部署命令</h3>
-            <p style="color:#666;font-size:13px">在 B/C 机器上执行此命令，会自动下载并安装为系统服务 (Systemd/OpenRC)，实现开机自启。</p>
+            <p style="color:#666;font-size:13px">在 B/C 机器上执行此命令，即可自动下载、授权、开机自启。</p>
             <div style="display:flex;gap:10px;margin-top:15px">
                 <input id="agentName" placeholder="节点名称 (如: HK-Node)" value="Node-1" style="max-width:300px">
-                <button onclick="genCmd()">生成安装命令</button>
+                <button onclick="genCmd()">生成部署命令</button>
             </div>
             <div class="cmd-box"><div id="cmdText">...</div></div>
             <div style="text-align:right;margin-top:10px"><button onclick="copyCmd()" style="background:#555">复制命令</button></div>
@@ -660,13 +656,15 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
             <form action="/update_settings" method="POST">
                 <div class="form-g"><label>修改密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
                 <div class="form-g"><label>Agent Token</label><input name="token" value="{{.Token}}"></div>
+                <div class="form-g"><label>面板公网IP (用于生成命令)</label><input name="master_ip" value="{{.MasterIP}}" placeholder="例如 1.2.3.4"></div>
                 <button style="margin-top:10px">保存设置</button>
             </form>
         </div>
     </div>
 </div>
 <script>
-    var host=location.hostname, port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
+    var host="{{.MasterIP}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
+    if (!host) host = location.hostname; 
     if (host.indexOf(':') > -1 && host.indexOf('[') === -1) { host = '[' + host + ']'; }
 
     function nav(id, el) {
@@ -687,7 +685,6 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
 
     function genCmd() {
         var n = document.getElementById('agentName').value;
-        // 生成极简安装命令：下载 -> 授权 -> 运行自带安装模式
         var cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
         document.getElementById('cmdText').innerText = cmd;
     }
