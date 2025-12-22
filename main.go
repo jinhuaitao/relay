@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,18 +29,20 @@ import (
 
 const (
 	ConfigFile  = "config.json"
-	ControlPort = ":9999" // Agent 连接端口
-	WebPort     = ":8888" // 网页管理端口
-	DownloadURL = "https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
+	ControlPort = ":9999"
+	WebPort     = ":8888"
+	DownloadURL = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 
-	// --- 性能调优参数 ---
-	TCPKeepAlive   = 15 * time.Second
-	UDPBufferSize  = 16 * 1024 * 1024 // UDP Socket 缓冲: 16MB
-	SocketBufSize  = 8 * 1024 * 1024  // TCP Socket 缓冲: 8MB (针对长链路优化)
-	CopyBufferSize = 64 * 1024        // 应用层内存拷贝缓冲: 64KB
+	// --- 🚀 性能调优参数 ---
+	TCPKeepAlive = 60 * time.Second
+	// 针对千兆/万兆网络优化缓冲区
+	UDPBufferSize  = 16 * 1024 * 1024 // 16MB
+	SocketBufSize  = 8 * 1024 * 1024  // 8MB
+	// 64KB 是多数操作系统的管道大小，对于大流量传输效率更高
+	CopyBufferSize = 64 * 1024 
 )
 
-// --- 内存池 ---
+// 使用 sync.Pool 复用 buffer，大幅减少 GC 压力
 var bufPool = sync.Pool{
 	New: func() interface{} {
 		b := make([]byte, CopyBufferSize)
@@ -50,26 +53,28 @@ var bufPool = sync.Pool{
 // --- 数据结构 ---
 
 type LogicalRule struct {
-	ID         string `json:"id"`
-	EntryAgent string `json:"entry_agent"`
-	EntryPort  string `json:"entry_port"`
-	ExitAgent  string `json:"exit_agent"`
-	TargetIP   string `json:"target_ip"`
-	TargetPort string `json:"target_port"`
-	Protocol   string `json:"protocol"`
-	BridgePort string `json:"bridge_port"`
-
-	TotalTx int64 `json:"-"`
-	TotalRx int64 `json:"-"`
+	ID           string `json:"id"`
+	EntryAgent   string `json:"entry_agent"`
+	EntryPort    string `json:"entry_port"`
+	ExitAgent    string `json:"exit_agent"`
+	TargetIP     string `json:"target_ip"`
+	TargetPort   string `json:"target_port"`
+	Protocol     string `json:"protocol"`
+	BridgePort   string `json:"bridge_port"`
+	TrafficLimit int64  `json:"traffic_limit"`
+	TotalTx      int64  `json:"total_tx"`
+	TotalRx      int64  `json:"total_rx"`
 }
 
 type AppConfig struct {
-	WebUser    string        `json:"web_user"`
-	WebPass    string        `json:"web_pass"`
-	AgentToken string        `json:"agent_token"`
-	MasterIP   string        `json:"master_ip"`
-	IsSetup    bool          `json:"is_setup"`
-	Rules      []LogicalRule `json:"saved_rules"`
+	WebUser      string        `json:"web_user"`
+	WebPass      string        `json:"web_pass"`
+	AgentToken   string        `json:"agent_token"`
+	MasterIP     string        `json:"master_ip"`
+	MasterIPv6   string        `json:"master_ipv6"`
+	MasterDomain string        `json:"master_domain"`
+	IsSetup      bool          `json:"is_setup"`
+	Rules        []LogicalRule `json:"saved_rules"`
 }
 
 type ForwardTask struct {
@@ -101,7 +106,6 @@ type TrafficCounter struct {
 	Tx int64
 }
 
-// UDP 会话结构 (用于 sync.Map)
 type udpSession struct {
 	conn       *net.UDPConn
 	lastActive time.Time
@@ -115,8 +119,10 @@ var (
 	rules            = make([]LogicalRule, 0)
 	mu               sync.Mutex
 	runningListeners sync.Map
+	activeTargets    sync.Map
 	agentTraffic     sync.Map
 	sessions         = make(map[string]time.Time)
+	configDirty      int32
 )
 
 // --- 主程序 ---
@@ -152,21 +158,15 @@ func main() {
 	}
 }
 
+// 提升文件描述符限制，支持高并发连接
 func setRLimit() {
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		var rLimit syscall.Rlimit
-		err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-		if err != nil {
-			return
+		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
+			rLimit.Cur = 1000000 // 提升到 100万
+			rLimit.Max = 1000000
+			syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 		}
-		rLimit.Cur = rLimit.Max
-		if rLimit.Cur < 65535 {
-			rLimit.Cur = 65535
-		}
-		if rLimit.Max < 65535 {
-			rLimit.Max = 65535
-		}
-		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	}
 }
 
@@ -190,13 +190,13 @@ func handleService(op, mode, name, connect, token string) {
 
 	if op == "install" {
 		if isSys {
-			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=65535\n[Install]\nWantedBy=multi-user.target", exe, args)
+			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", exe, args)
 			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
 			exec.Command("systemctl", "enable", "gorelay").Run()
 			exec.Command("systemctl", "restart", "gorelay").Run()
 			log.Println("Systemd 服务已安装")
 		} else if isAlpine {
-			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 65535\"\ndepend(){ need net; }", exe, args)
+			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", exe, args)
 			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
 			exec.Command("rc-update", "add", "gorelay", "default").Run()
 			exec.Command("rc-service", "gorelay", "restart").Run()
@@ -223,6 +223,18 @@ func handleService(op, mode, name, connect, token string) {
 // ================= MASTER =================
 
 func runMaster() {
+	// 异步持久化配置，避免磁盘 IO 阻塞转发线程
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			if atomic.CompareAndSwapInt32(&configDirty, 1, 0) {
+				mu.Lock()
+				saveConfig()
+				mu.Unlock()
+			}
+		}
+	}()
+
 	go func() {
 		ln, err := net.Listen("tcp", ControlPort)
 		if err != nil {
@@ -241,7 +253,7 @@ func runMaster() {
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/setup", handleSetup)
 	http.HandleFunc("/add", authMiddleware(handleAddRule))
-	http.HandleFunc("/edit", authMiddleware(handleEditRule)) // 编辑规则
+	http.HandleFunc("/edit", authMiddleware(handleEditRule))
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 
@@ -257,8 +269,8 @@ func handleAgentConn(conn net.Conn) {
 		return
 	}
 
-	data := msg.Payload.(map[string]interface{})
-	if data["token"].(string) != config.AgentToken {
+	data, ok := msg.Payload.(map[string]interface{})
+	if !ok || data["token"].(string) != config.AgentToken {
 		return
 	}
 
@@ -288,8 +300,11 @@ func handleStatsReport(payload interface{}) {
 	d, _ := json.Marshal(payload)
 	var reports []TrafficReport
 	json.Unmarshal(d, &reports)
+
 	mu.Lock()
 	defer mu.Unlock()
+
+	limitTriggered := false
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_entry") {
 			rid := strings.TrimSuffix(rep.TaskID, "_entry")
@@ -297,42 +312,66 @@ func handleStatsReport(payload interface{}) {
 				if rules[i].ID == rid {
 					rules[i].TotalTx += rep.TxDelta
 					rules[i].TotalRx += rep.RxDelta
+					// 标记配置变动，但不立即写入磁盘
+					atomic.StoreInt32(&configDirty, 1)
+					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
+						limitTriggered = true
+					}
 					break
 				}
 			}
 		}
 	}
+	// 只有触发熔断时才立即保存并推送，保证实时性
+	if limitTriggered {
+		saveConfig()
+		go pushConfigToAll()
+	}
 }
 
 func pushConfigToAll() {
 	mu.Lock()
-	defer mu.Unlock()
-	tasks := make(map[string][]ForwardTask)
+	tasksMap := make(map[string][]ForwardTask)
 	for _, r := range rules {
+		if r.TrafficLimit > 0 && (r.TotalTx+r.TotalRx) >= r.TrafficLimit {
+			continue
+		}
 		target := fmt.Sprintf("%s:%s", r.TargetIP, r.TargetPort)
-		tasks[r.ExitAgent] = append(tasks[r.ExitAgent], ForwardTask{ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: target})
+		tasksMap[r.ExitAgent] = append(tasksMap[r.ExitAgent], ForwardTask{ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: target})
+
 		if exit, ok := agents[r.ExitAgent]; ok {
 			rip := exit.RemoteIP
 			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
 				rip = "[" + rip + "]"
 			}
-			tasks[r.EntryAgent] = append(tasks[r.EntryAgent], ForwardTask{ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
+			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort)})
 		}
 	}
-	for n, a := range agents {
-		t := tasks[n]
+	activeAgents := make(map[string]*AgentInfo)
+	for k, v := range agents {
+		activeAgents[k] = v
+	}
+	mu.Unlock()
+
+	for n, a := range activeAgents {
+		t := tasksMap[n]
 		if t == nil {
 			t = []ForwardTask{}
 		}
-		json.NewEncoder(a.Conn).Encode(Message{Type: "update", Payload: t})
+		go func(conn net.Conn, tasks []ForwardTask) {
+			json.NewEncoder(conn).Encode(Message{Type: "update", Payload: tasks})
+		}(a.Conn, t)
 	}
 }
 
 // ================= WEB HANDLERS =================
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+
 	mu.Lock()
-	defer mu.Unlock()
 	al := make([]AgentInfo, 0)
 	for _, a := range agents {
 		al = append(al, *a)
@@ -341,6 +380,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, r := range rules {
 		totalTraffic += (r.TotalTx + r.TotalRx)
 	}
+	displayRules := make([]LogicalRule, len(rules))
+	copy(displayRules, rules)
+	mu.Unlock()
+
 	data := struct {
 		Agents       []AgentInfo
 		Rules        []LogicalRule
@@ -349,8 +392,24 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		DownloadURL  string
 		TotalTraffic int64
 		MasterIP     string
-	}{al, rules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP}
-	t := template.New("dash").Funcs(template.FuncMap{"formatBytes": formatBytes})
+		MasterIPv6   string
+		MasterDomain string
+	}{al, displayRules, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP, config.MasterIPv6, config.MasterDomain}
+
+	t := template.New("dash").Funcs(template.FuncMap{
+		"formatBytes": formatBytes,
+		"add":         func(a, b int64) int64 { return a + b },
+		"percent": func(currTx, currRx, limit int64) float64 {
+			if limit <= 0 {
+				return 0
+			}
+			p := (float64(currTx+currRx) / float64(limit)) * 100
+			if p > 100 {
+				p = 100
+			}
+			return p
+		},
+	})
 	t, _ = t.Parse(dashboardHtml)
 	t.Execute(w, data)
 }
@@ -376,20 +435,11 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		mu.Lock()
-		sessions[c.Value] = time.Now().Add(1 * time.Hour)
-		mu.Unlock()
 		next(w, r)
 	}
 }
+
 func handleSetup(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	setup := config.IsSetup
-	mu.Unlock()
-	if setup {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
 	if r.Method == "POST" {
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
@@ -404,6 +454,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	t, _ := template.New("s").Parse(setupHtml)
 	t.Execute(w, nil)
 }
+
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		mu.Lock()
@@ -414,7 +465,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			rand.Read(sid)
 			sidStr := hex.EncodeToString(sid)
 			mu.Lock()
-			sessions[sidStr] = time.Now().Add(1 * time.Hour)
+			sessions[sidStr] = time.Now().Add(12 * time.Hour)
 			mu.Unlock()
 			http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -424,20 +475,28 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	t, _ := template.New("l").Parse(loginHtml)
 	t.Execute(w, nil)
 }
+
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
+
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
+	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	mu.Lock()
 	rules = append(rules, LogicalRule{
-		ID:         fmt.Sprintf("%d", time.Now().UnixNano()),
-		EntryAgent: r.FormValue("entry_agent"), EntryPort: r.FormValue("entry_port"),
-		ExitAgent: r.FormValue("exit_agent"), TargetIP: r.FormValue("target_ip"), TargetPort: r.FormValue("target_port"),
-		Protocol: r.FormValue("protocol"), BridgePort: fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
+		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
+		EntryAgent:   r.FormValue("entry_agent"),
+		EntryPort:    r.FormValue("entry_port"),
+		ExitAgent:    r.FormValue("exit_agent"),
+		TargetIP:     r.FormValue("target_ip"),
+		TargetPort:   r.FormValue("target_port"),
+		Protocol:     r.FormValue("protocol"),
+		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
+		BridgePort:   fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
 	})
 	saveConfig()
 	mu.Unlock()
@@ -445,27 +504,35 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
-// 编辑规则处理
 func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
 	id := r.FormValue("id")
+	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
+
 	mu.Lock()
-	for i, rule := range rules {
-		if rule.ID == id {
+	found := false
+	for i := range rules {
+		if rules[i].ID == id {
 			rules[i].EntryAgent = r.FormValue("entry_agent")
 			rules[i].EntryPort = r.FormValue("entry_port")
 			rules[i].ExitAgent = r.FormValue("exit_agent")
 			rules[i].TargetIP = r.FormValue("target_ip")
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
+			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
+			found = true
 			break
 		}
 	}
-	saveConfig()
+	if found {
+		saveConfig()
+	}
 	mu.Unlock()
-	go pushConfigToAll()
+	if found {
+		go pushConfigToAll()
+	}
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
@@ -484,6 +551,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
+
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
@@ -495,9 +563,9 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if t := r.FormValue("token"); t != "" {
 		config.AgentToken = t
 	}
-	if ip := r.FormValue("master_ip"); ip != "" {
-		config.MasterIP = ip
-	}
+	config.MasterIP = r.FormValue("master_ip")
+	config.MasterIPv6 = r.FormValue("master_ipv6")
+	config.MasterDomain = r.FormValue("master_domain")
 	saveConfig()
 	mu.Unlock()
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
@@ -533,7 +601,9 @@ func runAgent(name, masterAddr, token string) {
 						return true
 					})
 					if len(reps) > 0 {
+						conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
+						conn.SetWriteDeadline(time.Time{})
 					} else {
 						json.NewEncoder(conn).Encode(Message{Type: "ping"})
 					}
@@ -554,12 +624,25 @@ func runAgent(name, masterAddr, token string) {
 				var tasks []ForwardTask
 				json.Unmarshal(d, &tasks)
 				active := make(map[string]bool)
+
 				for _, t := range tasks {
 					active[t.ID] = true
+					if lastTarget, loaded := activeTargets.Load(t.ID); loaded {
+						if lastTarget.(string) != t.Target {
+							if closeFunc, ok := runningListeners.Load(t.ID); ok {
+								closeFunc.(func())()
+								runningListeners.Delete(t.ID)
+								agentTraffic.Delete(t.ID)
+								activeTargets.Delete(t.ID)
+								time.Sleep(1 * time.Second)
+							}
+						}
+					}
 					if _, ok := runningListeners.Load(t.ID); ok {
 						continue
 					}
 					agentTraffic.Store(t.ID, &TrafficCounter{})
+					activeTargets.Store(t.ID, t.Target)
 					startProxy(t)
 				}
 				runningListeners.Range(func(k, v interface{}) bool {
@@ -567,6 +650,7 @@ func runAgent(name, masterAddr, token string) {
 						v.(func())()
 						runningListeners.Delete(k)
 						agentTraffic.Delete(k)
+						activeTargets.Delete(k)
 					}
 					return true
 				})
@@ -579,7 +663,9 @@ func runAgent(name, masterAddr, token string) {
 func startProxy(t ForwardTask) {
 	var closers []func()
 	var l sync.Mutex
+	activeConns := make(map[net.Conn]struct{})
 	closed := false
+
 	closeAll := func() {
 		l.Lock()
 		defer l.Unlock()
@@ -590,6 +676,10 @@ func startProxy(t ForwardTask) {
 		for _, f := range closers {
 			f()
 		}
+		// 强制关闭所有连接，实现瞬间断流
+		for c := range activeConns {
+			c.Close()
+		}
 	}
 	runningListeners.Store(t.ID, closeAll)
 
@@ -597,6 +687,10 @@ func startProxy(t ForwardTask) {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen)
 			if err != nil {
+				// 监听失败清理状态
+				runningListeners.Delete(t.ID)
+				activeTargets.Delete(t.ID)
+				agentTraffic.Delete(t.ID)
 				return
 			}
 			l.Lock()
@@ -607,15 +701,28 @@ func startProxy(t ForwardTask) {
 				if e != nil {
 					break
 				}
-				// 优化：设置服务端连接缓冲区
 				if tc, ok := c.(*net.TCPConn); ok {
+					// 性能关键：开启 KeepAlive 并设置大缓冲
 					tc.SetKeepAlive(true)
 					tc.SetKeepAlivePeriod(TCPKeepAlive)
 					tc.SetNoDelay(true)
 					tc.SetReadBuffer(SocketBufSize)
 					tc.SetWriteBuffer(SocketBufSize)
 				}
-				go pipeTCP(c, t.Target, t.ID)
+				l.Lock()
+				if closed {
+					c.Close()
+					l.Unlock()
+					continue
+				}
+				activeConns[c] = struct{}{}
+				l.Unlock()
+				go func(conn net.Conn) {
+					pipeTCP(conn, t.Target, t.ID)
+					l.Lock()
+					delete(activeConns, conn)
+					l.Unlock()
+				}(c)
 			}
 		}()
 	}
@@ -624,6 +731,9 @@ func startProxy(t ForwardTask) {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen)
 			ln, err := net.ListenUDP("udp", addr)
 			if err != nil {
+				runningListeners.Delete(t.ID)
+				activeTargets.Delete(t.ID)
+				agentTraffic.Delete(t.ID)
 				return
 			}
 			ln.SetReadBuffer(UDPBufferSize)
@@ -638,14 +748,11 @@ func startProxy(t ForwardTask) {
 
 func pipeTCP(src net.Conn, target, tid string) {
 	defer src.Close()
-	// 优化：连接超时设置
 	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		return
 	}
 	defer dst.Close()
-
-	// 优化：设置目标连接缓冲区
 	if tc, ok := dst.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(TCPKeepAlive)
@@ -653,43 +760,48 @@ func pipeTCP(src net.Conn, target, tid string) {
 		tc.SetReadBuffer(SocketBufSize)
 		tc.SetWriteBuffer(SocketBufSize)
 	}
-
 	v, _ := agentTraffic.Load(tid)
+	if v == nil {
+		return
+	}
 	cnt := v.(*TrafficCounter)
-
-	// 双向并发拷贝
 	go copyCount(dst, src, &cnt.Tx)
 	copyCount(src, dst, &cnt.Rx)
 }
 
 func handleUDP(ln *net.UDPConn, target, tid string) {
-	// 优化：使用 sync.Map 替代 Mutex 锁，减少竞争
-	sessions := &sync.Map{}
-
+	udpSessions := &sync.Map{}
+	defer func() {
+		udpSessions.Range(func(key, value interface{}) bool {
+			value.(*udpSession).conn.Close()
+			return true
+		})
+	}()
 	dstAddr, _ := net.ResolveUDPAddr("udp", target)
 	v, _ := agentTraffic.Load(tid)
+	if v == nil {
+		return
+	}
 	cnt := v.(*TrafficCounter)
-
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
-
-	// 清理协程
 	go func() {
 		for {
 			time.Sleep(30 * time.Second)
 			now := time.Now()
-			sessions.Range(func(key, value interface{}) bool {
+			udpSessions.Range(func(key, value interface{}) bool {
 				s := value.(*udpSession)
 				if now.Sub(s.lastActive) > 60*time.Second {
 					s.conn.Close()
-					sessions.Delete(key)
+					udpSessions.Delete(key)
 				}
 				return true
 			})
 		}
 	}()
-
+	// 使用 sync.Pool 中的大缓冲
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
+	
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -697,48 +809,35 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 		}
 		atomic.AddInt64(&cnt.Tx, int64(n))
 		sAddr := srcAddr.String()
-
-		// 优化：无锁快速查找
-		val, ok := sessions.Load(sAddr)
-
+		val, ok := udpSessions.Load(sAddr)
 		if ok {
 			s := val.(*udpSession)
-			s.lastActive = time.Now() // 更新活跃时间
+			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
 		} else {
-			// 建立新连接
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				continue
 			}
-			newConn.SetReadBuffer(UDPBufferSize)
-			newConn.SetWriteBuffer(UDPBufferSize)
-
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
-			sessions.Store(sAddr, s)
-
+			udpSessions.Store(sAddr, s)
 			newConn.Write(buf[:n])
-
-			// 开启回传协程
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
+				// UDP 响应也需要大缓冲
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
 				b := *bPtr
+				
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
 					if e != nil {
 						c.Close()
-						sessions.Delete(k)
+						udpSessions.Delete(k)
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
 					atomic.AddInt64(&cnt.Rx, int64(m))
-
-					// 更新活跃时间
-					if val, ok := sessions.Load(k); ok {
-						val.(*udpSession).lastActive = time.Now()
-					}
 				}
 			}(newConn, srcAddr, sAddr)
 		}
@@ -749,9 +848,8 @@ func copyCount(dst io.Writer, src io.Reader, c *int64) {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
-
 	cw := &CounterWriter{Writer: dst, Counter: c}
-	// 优化：使用 io.CopyBuffer
+	// 使用带缓冲区的大块复制，提升吞吐量
 	io.CopyBuffer(cw, src, buf)
 }
 
@@ -768,32 +866,34 @@ func (w *CounterWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
-// ================= HELPERS =================
 func loadConfig() {
 	f, err := os.Open(ConfigFile)
 	if err == nil {
 		defer f.Close()
 		json.NewDecoder(f).Decode(&config)
-		// 恢复规则到内存
 		rules = config.Rules
 	}
 }
+
 func saveConfig() {
 	config.Rules = rules
 	f, _ := os.Create(ConfigFile)
 	defer f.Close()
 	json.NewEncoder(f).Encode(&config)
 }
+
 func md5Hash(s string) string {
 	h := md5.New()
 	h.Write([]byte(s))
 	return hex.EncodeToString(h.Sum(nil))
 }
+
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() { <-c; os.Exit(0) }()
 }
+
 func formatBytes(b int64) string {
 	const u = 1024
 	if b < u {
@@ -804,14 +904,12 @@ func formatBytes(b int64) string {
 		div *= u
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// ================= UI TEMPLATES =================
+const setupHtml = `<!DOCTYPE html><html><head><title>GoRelay Setup</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{background:#f3f4f6;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}.card{background:#fff;padding:40px;border-radius:16px;box-shadow:0 10px 15px -3px rgba(0,0,0,0.1);width:100%;max-width:360px}h2{text-align:center;color:#111827;margin-bottom:30px;font-weight:700}label{display:block;margin-bottom:8px;color:#374151;font-size:14px;font-weight:500}input{width:100%;padding:12px;border:1px solid #d1d5db;border-radius:8px;box-sizing:border-box;font-size:14px;transition:0.2s;margin-bottom:20px;outline:none}input:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79, 70, 229, 0.1)}button{width:100%;padding:12px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:0.2s}button:hover{background:#4338ca}</style></head><body><form class="card" method="POST"><h2>初始化配置</h2><label>管理员账号</label><input name="username" required><label>管理员密码</label><input type="password" name="password" required><label>Agent 通信 Token</label><input name="token" required><button>启动服务</button></form></body></html>`
 
-const setupHtml = `<!DOCTYPE html><html><head><title>GoRelay Setup</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{background:linear-gradient(135deg,#f5f7fa 0%,#c3cfe2 100%);display:flex;justify-content:center;align-items:center;height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}.card{background:#fff;padding:40px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.1);width:100%;max-width:360px;animation:fadeIn .5s ease-out}h2{text-align:center;color:#333;margin-bottom:30px;font-weight:600}label{display:block;margin-bottom:8px;color:#666;font-size:14px;font-weight:500}input{width:100%;padding:12px;border:1px solid #e1e4e8;border-radius:6px;box-sizing:border-box;font-size:14px;transition:0.2s;margin-bottom:20px}input:focus{border-color:#007bff;outline:none;box-shadow:0 0 0 3px rgba(0,123,255,.1)}button{width:100%;padding:12px;background:#007bff;color:#fff;border:none;border-radius:6px;font-size:16px;font-weight:600;cursor:pointer;transition:0.2s}button:hover{background:#0056b3}button:active{transform:scale(.98)}@keyframes fadeIn{from{opacity:0;transform:translateY(-20px)}to{opacity:1;transform:translateY(0)}}</style></head><body><form class="card" method="POST"><h2>初始化配置</h2><label>管理员账号</label><input name="username" required><label>管理员密码</label><input type="password" name="password" required><label>Agent 通信 Token</label><input name="token" required><button>启动服务</button></form></body></html>`
-
-const loginHtml = `<!DOCTYPE html><html><head><title>GoRelay Login</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{background:linear-gradient(135deg,#e0eaec 0%,#4b6cb7 100%);display:flex;justify-content:center;align-items:center;height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}.card{background:#fff;padding:40px;border-radius:12px;box-shadow:0 10px 25px rgba(0,0,0,.2);width:100%;max-width:350px;animation:zoomIn .4s cubic-bezier(0.175, 0.885, 0.32, 1.275)}h2{text-align:center;color:#333;margin-bottom:30px;font-weight:700}input{width:100%;padding:13px;border:1px solid #ddd;border-radius:8px;box-sizing:border-box;font-size:15px;margin-bottom:15px;transition:all .3s}input:focus{border-color:#4b6cb7;box-shadow:0 0 8px rgba(75,108,183,.2);outline:none}button{width:100%;padding:13px;background:linear-gradient(to right, #4b6cb7, #182848);color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:transform .1s}button:hover{opacity:.9}button:active{transform:scale(.97)}@keyframes zoomIn{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:scale(1)}}</style></head><body><form class="card" method="POST"><h2>登录面板</h2><input name="username" placeholder="账号" required><input type="password" name="password" placeholder="密码" required><button>登 录</button></form></body></html>`
+const loginHtml = `<!DOCTYPE html><html><head><title>GoRelay Login</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{background:#f3f4f6;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}.card{background:#fff;padding:40px;border-radius:16px;box-shadow:0 10px 15px -3px rgba(0,0,0,0.1);width:100%;max-width:350px}h2{text-align:center;color:#111827;margin-bottom:30px;font-weight:700}input{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:8px;box-sizing:border-box;font-size:15px;margin-bottom:20px;transition:all .2s;outline:none}input:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79, 70, 229, 0.1)}button{width:100%;padding:13px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;transition:background .2s}button:hover{background:#4338ca}</style></head><body><form class="card" method="POST"><h2>登录面板</h2><input name="username" placeholder="账号" required><input type="password" name="password" placeholder="密码" required><button>登 录</button></form></body></html>`
 
 const dashboardHtml = `
 <!DOCTYPE html>
@@ -819,176 +917,233 @@ const dashboardHtml = `
 <head>
 <meta charset="UTF-8"><title>GoRelay Pro</title>
 <style>
-:root{--w:220px;--c:#0d6efd;--bg:#f8f9fa}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;height:100vh;background:var(--bg)}
-.sidebar{width:var(--w);background:#212529;color:#fff;display:flex;flex-direction:column}
-.brand{padding:20px;font-size:18px;font-weight:700;text-align:center;border-bottom:1px solid #343a40;letter-spacing:1px}
-.menu{flex:1;padding-top:10px}
-.item{display:block;padding:12px 20px;color:#adb5bd;text-decoration:none;cursor:pointer;border-left:3px solid transparent;transition:.2s}
-.item:hover,.item.active{background:#343a40;color:#fff;border-left-color:var(--c)}
-.user{padding:20px;text-align:center;border-top:1px solid #343a40}
-.logout{display:block;margin-top:10px;background:#dc3545;color:#fff;text-decoration:none;padding:5px;border-radius:3px;font-size:12px}
-.main{flex:1;padding:30px;overflow-y:auto}
-.page{display:none}.page.active{display:block}
-.card{background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);margin-bottom:20px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin-bottom:20px}
-.stat-card{background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.05);display:flex;justify-content:space-between;align-items:center}
-.stat-n{font-size:24px;font-weight:700;color:#333}.stat-l{color:#666;font-size:13px}
-table{width:100%;border-collapse:collapse}th,td{padding:12px;text-align:left;border-bottom:1px solid #eee}
-.badge{padding:3px 8px;border-radius:10px;font-size:12px;background:#d1e7dd;color:#0f5132}
-input,select{padding:8px;border:1px solid #ddd;border-radius:4px;width:100%;box-sizing:border-box}
-button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius:4px;cursor:pointer}
-.cmd-box{background:#2d2d2d;color:#f8f8f2;padding:15px;border-radius:4px;font-family:monospace;word-break:break-all;margin-top:10px}
-.form-g{margin-bottom:10px}label{display:block;font-size:12px;margin-bottom:5px;color:#666}
-.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;align-items:end}
-
-/* Modal CSS */
-.modal {display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);}
-.modal-content {background:#fff;margin:10% auto;padding:20px;border-radius:8px;width:90%;max-width:500px;position:relative;animation:slideDown .3s}
-@keyframes slideDown {from{transform:translateY(-30px);opacity:0}to{transform:translateY(0);opacity:1}}
-.close {position:absolute;right:15px;top:10px;font-size:24px;cursor:pointer;color:#aaa}
-.close:hover{color:#000}
+:root{--w:240px;--primary:#4f46e5;--bg:#f3f4f6;--text:#1f2937;--border:#e5e7eb}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;display:flex;height:100vh;background:var(--bg);color:var(--text)}
+.sidebar{width:var(--w);background:#111827;color:#fff;display:flex;flex-direction:column;flex-shrink:0}
+.brand{padding:24px;font-size:20px;font-weight:700;letter-spacing:0.5px;color:#fff;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:10px}
+.menu{flex:1;padding:20px 10px;display:flex;flex-direction:column;gap:5px}
+.item{display:flex;align-items:center;padding:12px 16px;color:#9ca3af;text-decoration:none;cursor:pointer;border-radius:8px;transition:all .2s;font-size:14px;font-weight:500}
+.item:hover{background:#1f2937;color:#fff}
+.item.active{background:var(--primary);color:#fff}
+.icon{margin-right:12px;font-size:18px}
+.user{padding:20px;border-top:1px solid #1f2937;background:#0f1521}
+.user-info{font-size:14px;font-weight:600;margin-bottom:8px;color:#fff}
+.logout{display:block;text-align:center;background:#dc2626;color:#fff;text-decoration:none;padding:8px;border-radius:6px;font-size:12px;transition:.2s}
+.logout:hover{background:#b91c1c}
+.main{flex:1;padding:30px;overflow-y:auto;overflow-x:hidden}
+.page{display:none;animation:fadeIn .3s ease-out}
+.page.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);margin-bottom:24px;border:1px solid var(--border)}
+h3{margin-top:0;margin-bottom:20px;font-size:18px;color:#111827;font-weight:700}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px;margin-bottom:24px}
+.stat-card{background:#fff;padding:24px;border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);display:flex;align-items:center;justify-content:space-between;border:1px solid var(--border)}
+.stat-info .val{font-size:28px;font-weight:800;color:#111827;line-height:1.2}
+.stat-info .lbl{color:#6b7280;font-size:13px;font-weight:500;margin-top:4px}
+.stat-icon{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:24px}
+table{width:100%;border-collapse:separate;border-spacing:0}
+th{text-align:left;padding:12px 16px;color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;background:#f9fafb;border-bottom:1px solid var(--border)}
+td{padding:16px;border-bottom:1px solid var(--border);font-size:14px;color:#374151}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#f9fafb}
+.badge{padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#d1fae5;color:#065f46;display:inline-block}
+.badge-danger{background:#fee2e2;color:#991b1b}
+input,select{padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;width:100%;box-sizing:border-box;font-size:14px;transition:.2s;outline:none}
+input:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79, 70, 229, 0.1)}
+button{background:var(--primary);color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500;transition:.2s}
+button:hover{background:#4338ca;transform:translateY(-1px)}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn-del{background:#fff;border:1px solid #e5e7eb;color:#dc2626}
+.btn-del:hover{background:#fee2e2;border-color:#fecaca}
+.form-g{margin-bottom:15px}label{display:block;font-size:13px;font-weight:500;margin-bottom:6px;color:#374151}
+.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:15px;align-items:end}
+.prog-container{width:100%;background:#e5e7eb;border-radius:99px;height:8px;margin-top:8px;overflow:hidden}
+.prog-bar{height:100%;background:var(--primary);border-radius:99px;transition:width .4s ease}
+.prog-limit{font-size:12px;color:#6b7280;margin-top:4px;display:flex;justify-content:space-between}
+.modal{display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);backdrop-filter:blur(2px)}
+.modal-content{background:#fff;margin:5vh auto;padding:30px;border-radius:16px;width:90%;max-width:500px;position:relative;box-shadow:0 20px 25px -5px rgba(0,0,0,0.1)}
+.close{position:absolute;right:20px;top:20px;font-size:24px;cursor:pointer;color:#9ca3af;transition:.2s}
+.close:hover{color:#111827}
+pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:monospace;font-size:13px;line-height:1.6;overflow-x:auto;border:1px solid #374151}
 </style>
 </head>
 <body>
 <div class="sidebar">
-    <div class="brand">GoRelay Pro</div>
+    <div class="brand">🚀 GoRelay Pro</div>
     <div class="menu">
-        <a class="item active" onclick="nav('dashboard',this)">📊 仪表盘监控</a>
-        <a class="item" onclick="nav('deploy',this)">🚀 部署节点</a>
-        <a class="item" onclick="nav('rules',this)">🔗 转发管理</a>
-        <a class="item" onclick="nav('settings',this)">⚙️ 系统设置</a>
+        <a class="item active" onclick="nav('dashboard',this)"><span class="icon">📊</span> 仪表盘</a>
+        <a class="item" onclick="nav('deploy',this)"><span class="icon">⚡</span> 节点部署</a>
+        <a class="item" onclick="nav('rules',this)"><span class="icon">🔗</span> 转发规则</a>
+        <a class="item" onclick="nav('settings',this)"><span class="icon">⚙️</span> 系统设置</a>
     </div>
-    <div class="user"><div>{{.User}}</div><a href="/logout" class="logout">安全退出</a></div>
+    <div class="user">
+        <div class="user-info">👤 {{.User}}</div>
+        <a href="/logout" class="logout">安全退出</a>
+    </div>
 </div>
 <div class="main">
     <div id="dashboard" class="page active">
         <div class="stats">
-            <div class="stat-card" style="border-left:4px solid #0d6efd"><div><div class="stat-n">{{formatBytes .TotalTraffic}}</div><div class="stat-l">累计消耗流量</div></div><div style="font-size:24px">📶</div></div>
-            <div class="stat-card" style="border-left:4px solid #198754"><div><div class="stat-n">{{len .Agents}}</div><div class="stat-l">在线节点</div></div><div style="font-size:24px">📡</div></div>
-            <div class="stat-card" style="border-left:4px solid #ffc107"><div><div class="stat-n">{{len .Rules}}</div><div class="stat-l">活跃规则</div></div><div style="font-size:24px">⚡</div></div>
+            <div class="stat-card">
+                <div class="stat-info"><div class="val">{{formatBytes .TotalTraffic}}</div><div class="lbl">累计消耗流量</div></div>
+                <div class="stat-icon" style="background:#e0e7ff;color:#4f46e5">📶</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-info"><div class="val">{{len .Agents}}</div><div class="lbl">在线节点数量</div></div>
+                <div class="stat-icon" style="background:#dcfce7;color:#16a34a">📡</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-info"><div class="val">{{len .Rules}}</div><div class="lbl">运行中规则</div></div>
+                <div class="stat-icon" style="background:#fef3c7;color:#d97706">⚡</div>
+            </div>
         </div>
         <div class="card">
-            <h3 style="margin-top:0">在线节点状态</h3>
+            <h3>节点状态监控</h3>
             {{if .Agents}}
-            <table><thead><tr><th>节点名称</th><th>IP地址</th><th>状态</th></tr></thead><tbody>
-            {{range .Agents}}<tr><td><b>{{.Name}}</b></td><td>{{.RemoteIP}}</td><td><span class="badge">运行中</span></td></tr>{{end}}
+            <table><thead><tr><th>节点名称</th><th>IP 地址</th><th>连接状态</th></tr></thead><tbody>
+            {{range .Agents}}<tr><td><b>{{.Name}}</b></td><td>{{.RemoteIP}}</td><td><span class="badge">运行正常</span></td></tr>{{end}}
             </tbody></table>
-            {{else}}<p style="text-align:center;color:#999">暂无节点在线</p>{{end}}
+            {{else}}<div style="text-align:center;padding:40px;color:#9ca3af">暂无在线节点，请先前往部署页面添加节点</div>{{end}}
         </div>
     </div>
-
     <div id="deploy" class="page">
         <div class="card">
-            <h3 style="margin-top:0">生成部署命令</h3>
-            <p style="color:#666;font-size:13px">在 B/C 机器上执行此命令，即可自动下载、授权、开机自启。</p>
-            <div style="display:flex;gap:10px;margin-top:15px">
-                <input id="agentName" placeholder="节点名称 (如: HK-Node)" value="Node-1" style="max-width:300px">
-                <button onclick="genCmd()">生成部署命令</button>
+            <h3>节点部署向导</h3>
+            <div style="background:#f9fafb;padding:20px;border-radius:8px;border:1px solid #e5e7eb">
+                <div style="display:flex;gap:10px;margin-bottom:15px;align-items:end">
+                    <div style="flex:1"><label>节点名称</label><input id="agentName" placeholder="例如: HK-Node-1" value="Node-1"></div>
+                    <div style="flex:1"><label>连接地址类型</label><select id="addrType"><option value="domain">使用域名 (推荐)</option><option value="v4">使用 IPv4</option><option value="v6">使用 IPv6</option></select></div>
+                    <div><button onclick="genCmd()">生成安装命令</button></div>
+                    <div><button onclick="copyCmd()" style="background:#fff;border:1px solid #d1d5db;color:#374151">📋 复制</button></div>
+                </div>
+                <pre id="cmdText">等待生成命令...</pre>
+                <div style="margin-top:10px;font-size:12px;color:#6b7280">提示：请在被控机 root 权限下执行此命令。</div>
             </div>
-            <div class="cmd-box"><div id="cmdText">...</div></div>
-            <div style="text-align:right;margin-top:10px"><button onclick="copyCmd()" style="background:#555">复制命令</button></div>
         </div>
     </div>
-
     <div id="rules" class="page">
         <div class="card">
-            <h3 style="margin-top:0">添加转发规则</h3>
+            <h3>新建转发规则</h3>
             <form action="/add" method="POST">
                 <div class="grid-form">
-                    <div class="form-g"><label>入口 (B)</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                    <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" required></div>
-                    <div style="text-align:center;padding-bottom:12px">➜</div>
-                    <div class="form-g"><label>出口 (C)</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                    <div class="form-g"><label>目标IP</label><input name="target_ip" placeholder="1.1.1.1 或 [::1]" required></div>
+                    <div class="form-g"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                    <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" placeholder="1000-65535" required></div>
+                    <div class="form-g"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                    <div class="form-g"><label>目标地址 (IP/域名)</label><input name="target_ip" required></div>
                     <div class="form-g"><label>目标端口</label><input type="number" name="target_port" required></div>
-                    <div class="form-g"><label>协议</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-                    <div class="form-g"><button>添加</button></div>
+                    <div class="form-g"><label>流量限制 (GB, 0为不限)</label><input type="number" step="0.1" name="traffic_limit" value="0"></div>
+                    <div class="form-g"><label>转发协议</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
+                    <div class="form-g"><button>立即创建</button></div>
                 </div>
             </form>
         </div>
         <div class="card">
-            <h3 style="margin-top:0">规则列表</h3>
-            <table><thead><tr><th>链路 (B ➜ C)</th><th>最终目标</th><th>协议</th><th>流量 (Tx / Rx)</th><th>操作</th></tr></thead><tbody>
-            {{range .Rules}}<tr>
-                <td>{{.EntryAgent}}:{{.EntryPort}} ➜ {{.ExitAgent}}</td>
-                <td>{{.TargetIP}}:{{.TargetPort}}</td>
-                <td><span style="background:#eee;padding:2px 6px;border-radius:4px;font-size:12px">{{.Protocol}}</span></td>
-                <td style="font-family:monospace;font-size:13px;color:#555">↑{{formatBytes .TotalTx}} &nbsp; ↓{{formatBytes .TotalRx}}</td>
+            <h3>规则列表</h3>
+            <table><thead><tr><th>转发链路</th><th>最终目标</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead><tbody>
+            {{range .Rules}}
+            <tr>
                 <td>
-                    <button style="background:#6c757d;padding:4px 8px;font-size:12px" onclick="openEdit('{{.ID}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}')">编辑</button>
-                    <a href="/delete?id={{.ID}}" style="color:#dc3545;text-decoration:none;margin-left:8px;font-size:14px">删除</a>
+                    <div style="font-weight:600">{{.EntryAgent}} : {{.EntryPort}}</div>
+                    <div style="color:#9ca3af;font-size:12px">⬇</div>
+                    <div style="font-weight:600">{{.ExitAgent}}</div>
                 </td>
-            </tr>{{end}}
+                <td style="color:#4b5563">{{.TargetIP}}:{{.TargetPort}}</td>
+                <td style="width:220px">
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
+                        <span>↑ {{formatBytes .TotalTx}}</span>
+                        <span>↓ {{formatBytes .TotalRx}}</span>
+                    </div>
+                    {{if gt .TrafficLimit 0}}
+                    <div class="prog-container">
+                        <div class="prog-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%; background:{{if ge (percent .TotalTx .TotalRx .TrafficLimit) 90.0}}#dc2626{{else}}#4f46e5{{end}}"></div>
+                    </div>
+                    <div class="prog-limit">
+                        <span>共: {{formatBytes (add .TotalTx .TotalRx)}}</span>
+                        <span>限: {{formatBytes .TrafficLimit}}</span>
+                    </div>
+                    {{else}}
+                    <div class="prog-container" style="background:#f3f4f6"><div style="width:100%;background:#10b981;height:100%"></div></div>
+                    <div class="prog-limit"><span>无流量限制</span><span>∞</span></div>
+                    {{end}}
+                </td>
+                <td>
+                    {{if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}
+                    <span class="badge badge-danger">流量耗尽</span>
+                    {{else}}<span class="badge">转发中</span>{{end}}
+                </td>
+                <td>
+                    <button class="btn-sm" style="background:#fff;border:1px solid #d1d5db;color:#374151" onclick="openEdit('{{.ID}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}')">编辑</button>
+                    <a href="/delete?id={{.ID}}" class="btn-del" style="padding:5px 10px;border-radius:6px;text-decoration:none;font-size:12px;margin-left:5px" onclick="return confirm('确定删除此规则？')">删除</a>
+                </td>
+            </tr>
+            {{end}}
             </tbody></table>
         </div>
     </div>
-
     <div id="settings" class="page">
-        <div class="card" style="max-width:400px">
-            <h3 style="margin-top:0">系统设置</h3>
+        <div class="card" style="max-width:500px">
+            <h3>系统设置</h3>
             <form action="/update_settings" method="POST">
-                <div class="form-g"><label>修改密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
-                <div class="form-g"><label>Agent Token</label><input name="token" value="{{.Token}}"></div>
-                <div class="form-g"><label>面板公网IP (用于生成命令)</label><input name="master_ip" value="{{.MasterIP}}" placeholder="例如 1.2.3.4"></div>
-                <button style="margin-top:10px">保存设置</button>
+                <div class="form-g"><label>修改登录密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
+                <div class="form-g"><label>Agent 通信 Token</label><input name="token" value="{{.Token}}"></div>
+                <div class="form-g"><label>面板域名 (生成命令用)</label><input name="master_domain" value="{{.MasterDomain}}"></div>
+                <div class="form-g"><label>面板 IPv4</label><input name="master_ip" value="{{.MasterIP}}"></div>
+                <div class="form-g"><label>面板 IPv6</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
+                <button>保存配置</button>
             </form>
         </div>
     </div>
 </div>
-
 <div id="editModal" class="modal">
     <div class="modal-content">
         <span class="close" onclick="closeEdit()">&times;</span>
-        <h3>编辑规则</h3>
+        <h3>修改转发规则</h3>
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
-            <div class="form-g"><label>入口 (B)</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+            <div class="form-g"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
             <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
-            <div class="form-g"><label>出口 (C)</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-            <div class="form-g"><label>目标IP</label><input name="target_ip" id="e_tip" required></div>
+            <div class="form-g"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+            <div class="form-g"><label>目标地址</label><input name="target_ip" id="e_tip" required></div>
             <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
+            <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
             <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-            <button style="width:100%;margin-top:15px">保存修改</button>
+            <button style="width:100%;margin-top:10px">保存修改</button>
         </form>
     </div>
 </div>
-
 <script>
-    var host="{{.MasterIP}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
-    if (!host) host = location.hostname; 
-    if (host.indexOf(':') > -1 && host.indexOf('[') === -1) { host = '[' + host + ']'; }
-
+    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
     function nav(id, el) {
         window.location.hash = id;
         document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
-        if(el){ 
-            document.querySelectorAll('.item').forEach(e=>e.classList.remove('active')); 
-            el.classList.add('active'); 
-        } else {
-             document.querySelectorAll('.item').forEach(e=>e.classList.remove('active'));
-             var targetBtn = document.querySelector('a[onclick*="'+id+'"]');
-             if(targetBtn) targetBtn.classList.add('active');
-        }
+        document.querySelectorAll('.item').forEach(e=>e.classList.remove('active')); 
+        if(el) el.classList.add('active');
     }
-
-    if(location.hash) { nav(location.hash.substring(1)); }
-
     function genCmd() {
         var n = document.getElementById('agentName').value;
+        var t = document.getElementById('addrType').value;
+        var host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
+        if(!host || host === "[]") { alert("请在设置中配置Master地址"); return; }
         var cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
         document.getElementById('cmdText').innerText = cmd;
     }
-
     function copyCmd() {
         var t = document.getElementById('cmdText').innerText;
-        if(navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(t).then(()=>alert('已复制'));
-        else { var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('已复制'); }
+        if (!t || t.indexOf("curl") === -1) { alert('请先生成命令'); return; }
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(t).then(() => alert('复制成功'));
+        } else {
+            var ta = document.createElement("textarea");
+            ta.value = t;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); alert('复制成功'); } catch (e) { alert('复制失败'); }
+            document.body.removeChild(ta);
+        }
     }
-
-    // Modal Logic
-    var modal = document.getElementById("editModal");
-    function openEdit(id, entry, eport, exit, tip, tport, proto) {
+    function openEdit(id, entry, eport, exit, tip, tport, proto, limit) {
+        if(!id) { alert('错误：未获取到规则ID，请刷新页面重试'); return; }
         document.getElementById('e_id').value = id;
         document.getElementById('e_entry').value = entry;
         document.getElementById('e_eport').value = eport;
@@ -996,15 +1151,13 @@ button{background:var(--c);color:#fff;border:none;padding:8px 15px;border-radius
         document.getElementById('e_tip').value = tip;
         document.getElementById('e_tport').value = tport;
         document.getElementById('e_proto').value = proto;
-        modal.style.display = "block";
+        document.getElementById('e_limit').value = (parseFloat(limit) / (1024*1024*1024)).toFixed(2);
+        document.getElementById('editModal').style.display = "block";
     }
-    function closeEdit() { modal.style.display = "none"; }
-    window.onclick = function(event) { if (event.target == modal) { closeEdit(); } }
-
-    setInterval(()=>{ 
-        if(document.querySelector('.page.active').id === 'dashboard' && modal.style.display !== "block") {
-            if(document.activeElement.tagName !== "INPUT") location.reload();
-        }
-    }, 5000);
-</script></body></html>
-`
+    function closeEdit() { document.getElementById('editModal').style.display = "none"; }
+    window.onclick = function(e) { if(e.target.className === 'modal') closeEdit(); }
+    if(location.hash) nav(location.hash.substring(1));
+    setInterval(() => { 
+        if(document.querySelector('.page.active').id === 'dashboard' && document.activeElement.tagName !== 'INPUT') location.reload(); 
+    }, 10000);
+</script></body></html>`
