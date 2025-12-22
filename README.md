@@ -1,18 +1,79 @@
-🚀 GoRelay Pro - 高性能分布式端口转发系统
+🚀 GoRelay Pro - 高性能分布式流量转发管理系统
+GoRelay Pro 是一个基于 Go 语言（Golang）开发的轻量级、高性能多节点流量转发与中转管理平台。它采用 Master-Agent（主控-被控） 分布式架构，允许用户通过一个中心化的 Web 仪表盘，轻松管理分散在全球各地的服务器节点，构建灵活的 TCP/UDP 转发链路。
 
-GoRelay Pro 是一款专为极客和运维人员设计的现代化、高性能、分布式 TCP/UDP 端口转发与反向代理工具。
+该项目特别针对大流量传输、中转加速、端口映射等场景进行了深度优化，具备毫秒级热更新、流量自动熔断和可视化监控等企业级特性。
 
-它采用 Master (控制面板) + Agent (转发节点) 的架构，通过一个单文件二进制程序即可完成所有角色的部署。无需繁琐的配置文件，所有操作均可在其精美的 Web 控制台中完成。
+🛠️ 系统架构
+GoRelay Pro 分为两个核心组件：
 
-✨ 核心特性
- * ⚡ 极致性能：基于 Go 语言编写，底层采用内存池 (Buffer Pool) 和 Zero-Copy 技术，支持 TCP Nodelay 与 KeepAlive，轻松应对数万并发连接。 * 
- * 🎨 星云美学 UI：拥有“流体极光”风格的现代化登录界面与响应式仪表盘，支持深色/浅色模式自动切换，提供极佳的用户体验。 * 
- * 🛡️ 安全可靠：Master 与 Agent 之间采用 Token 鉴权机制，防止未授权连接。所有配置数据本地持久化保存 (config.json)，重启不丢失。 * 
- * 📦 单文件部署：无任何第三方依赖，一个二进制文件走天下。内置 自安装 (Self-Install) 功能，一条命令即可自动配置 Systemd 或 OpenRC 开机自启。 * 
- * 🌐 全协议支持：完美支持 TCP、UDP 以及 TCP+UDP 混合转发。原生支持 IPv6 网络环境。 * 
- * 📊 实时监控：仪表盘提供精确到字节的实时流量监控与速率计算。
+Master（主控端）：
 
- 
+提供 Web 管理界面（仪表盘）。
+
+负责存储配置、调度任务、统计流量。
+
+监听 Control Port，等待 Agent 主动连接（支持内网穿透）。
+
+Agent（节点端）：
+
+部署在实际转发流量的服务器上。
+
+主动连接 Master，接收转发指令。
+
+执行高效的流量转发（TCP/UDP）并上报统计数据。
+
+✨ 核心功能亮点
+1. 📊 可视化仪表盘
+概览监控：实时显示在线节点数量、活跃规则数、累计总流量消耗。
+
+精美 UI：采用现代化的卡片式布局，支持状态颜色预警，操作直观便捷。
+
+一键部署：自动生成 Agent 安装命令，支持 IP/域名切换，一键复制即可在服务器上部署。
+
+2. 🔗 灵活的转发规则管理
+多节点链路：支持定义 入口节点 -> 出口节点 -> 目标地址 的完整转发链路。
+
+全协议支持：支持 TCP、UDP 以及 TCP+UDP 双协议同时转发。
+
+毫秒级热更新：修改规则或目标 IP 后，Agent 端会自动检测变更并平滑重启相关任务，无需重启整个服务。
+
+3. 🛡️ 智能流量控制与熔断
+流量配额：可以为每条规则设置总流量限制（单位：GB）。
+
+自动熔断：当规则的 (上传 + 下载) 流量达到设定的阈值时，系统会自动切断该链路，防止流量超标。
+
+实时统计：精确到字节的流量统计，并自动持久化保存到磁盘，服务重启数据不丢失。
+
+4. ⚡ 极致性能优化
+内存池技术：使用 sync.Pool 复用 64KB 缓冲区，大幅降低垃圾回收（GC）压力。
+
+内核级调优：强制设置 Socket 读写缓冲区为 8MB-16MB，完美适配千兆/万兆高带宽及高延迟网络环境。
+
+异步 I/O：配置保存与流量统计采用异步写入机制，杜绝磁盘 I/O 阻塞转发线程。
+
+秒级断流：当删除规则或流量耗尽时，不仅关闭监听端口，还会强制切断所有活跃的 TCP/UDP 连接，杜绝“偷跑”流量。
+
+💻 技术栈与实现细节
+编程语言：Go (Golang) - 利用其原生的高并发特性（Goroutines）。
+
+数据存储：轻量级 JSON 文件存储 (config.json)，无外部数据库依赖，迁移方便。
+
+通信协议：Master 与 Agent 之间使用自定义的 JSON 协议通过 TCP 长连接通信，包含心跳保活机制。
+
+并发模型：
+
+sync.Map 处理高并发下的数据读写安全。
+
+atomic 原子操作处理流量计数，确保统计准确且高效。
+
+🚀 适用场景
+游戏加速中转：通过优质线路的中转节点，降低游戏连接延迟。
+
+业务端口映射：将内网服务器的端口映射到公网出口。
+
+流量配额管理：为不同用户或业务分配固定的流量包，用完即停。
+
+跨国网络优化：利用 IPLC/IEPL 或优质线路节点进行流量中继。
 # 📚 部署教程
 # 第一步：准备工作
 您需要准备：
@@ -93,9 +154,11 @@ Master (面板) 维护：
  * UDP 优化：如果您主要用于转发 UDP 流量（如游戏），建议在服务器上优化 sysctl 参数以获得最佳性能。
  * 安全性：请务必保管好您的 通信 Token，任何拥有 Token 的人都可以接入您的网络。
 # 界面效果
-<img width="1625" height="1088" alt="image" src="https://github.com/user-attachments/assets/54a6c46e-75bc-4f3a-8ab5-1f964e44a283" />
-<img width="1634" height="1014" alt="image" src="https://github.com/user-attachments/assets/6f7bf704-2c27-4a15-8b0a-529f9ad47684" />
-<img width="1637" height="999" alt="image" src="https://github.com/user-attachments/assets/6fbc3129-2603-45f3-912a-1b1aaf2f3868" />
-<img width="1631" height="1003" alt="image" src="https://github.com/user-attachments/assets/c7ebe3c5-1ba8-488d-9ef3-ad46afbb997f" />
-<img width="1640" height="1004" alt="image" src="https://github.com/user-attachments/assets/906c5bc4-c972-4953-931a-3463d0a54dc8" />
+<img width="1628" height="1080" alt="image" src="https://github.com/user-attachments/assets/8ff33329-ba11-499e-a856-a1caf4ab6efc" />
+<img width="1632" height="1009" alt="image" src="https://github.com/user-attachments/assets/0b60bfea-c29a-486f-b5b8-2cdc55cd4dc3" />
+<img width="1627" height="1003" alt="image" src="https://github.com/user-attachments/assets/1b548384-96cb-4640-aa50-80e8348c24b5" />
+<img width="1638" height="1016" alt="f1593b89-d6f0-4f59-9dc6-5b71deea47d6" src="https://github.com/user-attachments/assets/4c0c3ada-2c65-4b04-b330-ef0ad1d78206" />
+<img width="1633" height="1007" alt="image" src="https://github.com/user-attachments/assets/5b4c081d-aeb4-4c55-9f7e-ab3feecf8bf9" />
+
+
 
