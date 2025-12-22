@@ -6,7 +6,7 @@
 # =========================================================
 
 # --- 基础配置 ---
-DOWNLOAD_URL="https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
+DOWNLOAD_URL="https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 BIN_PATH="/usr/local/bin/relay"
 SERVICE_NAME="relay"
 
