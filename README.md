@@ -87,7 +87,7 @@ curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go
 
 ## 2.Docker
 ```
-mkdir relay && cd relay
+mkdir gorelay && cd gorelay
 docker run -d --name relay-master --restart=always --net=host -v $(pwd):/data jhtone/relay -mode master
 ```
 ## 3.编译与安装 (Master端方式)
