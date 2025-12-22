@@ -31,18 +31,22 @@ const (
 	ConfigFile  = "config.json"
 	ControlPort = ":9999"
 	WebPort     = ":8888"
-	DownloadURL = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
+	DownloadURL = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/download/1.0/relay"
 
-	// --- 🚀 性能调优参数 ---
+	// --- 性能调优 ---
+	
+	// TCP KeepAlive 探测间隔
 	TCPKeepAlive = 60 * time.Second
-	// 针对千兆/万兆网络优化缓冲区
-	UDPBufferSize  = 16 * 1024 * 1024 // 16MB
-	SocketBufSize  = 8 * 1024 * 1024  // 8MB
-	// 64KB 是多数操作系统的管道大小，对于大流量传输效率更高
-	CopyBufferSize = 64 * 1024 
+
+	// UDP 缓冲区：4MB (平衡内存占用与抗丢包能力)
+	UDPBufferSize = 4 * 1024 * 1024
+
+	// 应用层拷贝缓冲区：32KB
+	// 这是 Go 标准库 io.Copy 的默认大小，也是大多数 CPU L1 缓存的 sweet spot。
+	// 既能保证吞吐量，又能保证流量统计的实时性平滑。
+	CopyBufferSize = 32 * 1024
 )
 
-// 使用 sync.Pool 复用 buffer，大幅减少 GC 压力
 var bufPool = sync.Pool{
 	New: func() interface{} {
 		b := make([]byte, CopyBufferSize)
@@ -54,6 +58,7 @@ var bufPool = sync.Pool{
 
 type LogicalRule struct {
 	ID           string `json:"id"`
+	Note         string `json:"note"`
 	EntryAgent   string `json:"entry_agent"`
 	EntryPort    string `json:"entry_port"`
 	ExitAgent    string `json:"exit_agent"`
@@ -62,8 +67,10 @@ type LogicalRule struct {
 	Protocol     string `json:"protocol"`
 	BridgePort   string `json:"bridge_port"`
 	TrafficLimit int64  `json:"traffic_limit"`
-	TotalTx      int64  `json:"total_tx"`
-	TotalRx      int64  `json:"total_rx"`
+
+	TotalTx   int64 `json:"total_tx"`
+	TotalRx   int64 `json:"total_rx"`
+	UserCount int64 `json:"user_count"` // 在线用户数(独立IP)
 }
 
 type AppConfig struct {
@@ -85,9 +92,10 @@ type ForwardTask struct {
 }
 
 type TrafficReport struct {
-	TaskID  string `json:"task_id"`
-	TxDelta int64  `json:"tx"`
-	RxDelta int64  `json:"rx"`
+	TaskID    string `json:"task_id"`
+	TxDelta   int64  `json:"tx"`
+	RxDelta   int64  `json:"rx"`
+	UserCount int64  `json:"uc"` // 上报独立IP数
 }
 
 type AgentInfo struct {
@@ -121,6 +129,7 @@ var (
 	runningListeners sync.Map
 	activeTargets    sync.Map
 	agentTraffic     sync.Map
+	agentUserCounts  sync.Map // 记录每个任务的独立IP数
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
 )
@@ -158,12 +167,11 @@ func main() {
 	}
 }
 
-// 提升文件描述符限制，支持高并发连接
 func setRLimit() {
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		var rLimit syscall.Rlimit
 		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
-			rLimit.Cur = 1000000 // 提升到 100万
+			rLimit.Cur = 1000000
 			rLimit.Max = 1000000
 			syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 		}
@@ -223,7 +231,6 @@ func handleService(op, mode, name, connect, token string) {
 // ================= MASTER =================
 
 func runMaster() {
-	// 异步持久化配置，避免磁盘 IO 阻塞转发线程
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
@@ -312,7 +319,8 @@ func handleStatsReport(payload interface{}) {
 				if rules[i].ID == rid {
 					rules[i].TotalTx += rep.TxDelta
 					rules[i].TotalRx += rep.RxDelta
-					// 标记配置变动，但不立即写入磁盘
+					rules[i].UserCount = rep.UserCount // 更新在线人数
+
 					atomic.StoreInt32(&configDirty, 1)
 					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
 						limitTriggered = true
@@ -322,7 +330,6 @@ func handleStatsReport(payload interface{}) {
 			}
 		}
 	}
-	// 只有触发熔断时才立即保存并推送，保证实时性
 	if limitTriggered {
 		saveConfig()
 		go pushConfigToAll()
@@ -367,9 +374,7 @@ func pushConfigToAll() {
 // ================= WEB HANDLERS =================
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
+	w.Header().Set("Cache-Control", "no-cache")
 
 	mu.Lock()
 	al := make([]AgentInfo, 0)
@@ -489,6 +494,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	rules = append(rules, LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
+		Note:         r.FormValue("note"),
 		EntryAgent:   r.FormValue("entry_agent"),
 		EntryPort:    r.FormValue("entry_port"),
 		ExitAgent:    r.FormValue("exit_agent"),
@@ -515,6 +521,7 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	found := false
 	for i := range rules {
 		if rules[i].ID == id {
+			rules[i].Note = r.FormValue("note")
 			rules[i].EntryAgent = r.FormValue("entry_agent")
 			rules[i].EntryPort = r.FormValue("entry_port")
 			rules[i].ExitAgent = r.FormValue("exit_agent")
@@ -595,8 +602,13 @@ func runAgent(name, masterAddr, token string) {
 					agentTraffic.Range(func(k, v interface{}) bool {
 						c := v.(*TrafficCounter)
 						tx, rx := atomic.SwapInt64(&c.Tx, 0), atomic.SwapInt64(&c.Rx, 0)
-						if tx > 0 || rx > 0 {
-							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx})
+						var uc int64 = 0
+						if val, ok := agentUserCounts.Load(k); ok {
+							uc = atomic.LoadInt64(val.(*int64))
+						}
+
+						if tx > 0 || rx > 0 || uc > 0 {
+							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
 						}
 						return true
 					})
@@ -633,6 +645,7 @@ func runAgent(name, masterAddr, token string) {
 								closeFunc.(func())()
 								runningListeners.Delete(t.ID)
 								agentTraffic.Delete(t.ID)
+								agentUserCounts.Delete(t.ID)
 								activeTargets.Delete(t.ID)
 								time.Sleep(1 * time.Second)
 							}
@@ -642,6 +655,8 @@ func runAgent(name, masterAddr, token string) {
 						continue
 					}
 					agentTraffic.Store(t.ID, &TrafficCounter{})
+					var uz int64 = 0
+					agentUserCounts.Store(t.ID, &uz)
 					activeTargets.Store(t.ID, t.Target)
 					startProxy(t)
 				}
@@ -650,6 +665,7 @@ func runAgent(name, masterAddr, token string) {
 						v.(func())()
 						runningListeners.Delete(k)
 						agentTraffic.Delete(k)
+						agentUserCounts.Delete(k)
 						activeTargets.Delete(k)
 					}
 					return true
@@ -657,6 +673,33 @@ func runAgent(name, masterAddr, token string) {
 			}
 		}
 		time.Sleep(3 * time.Second)
+	}
+}
+
+// 辅助结构体：用于跟踪独立IP
+type IpTracker struct {
+	mu    sync.Mutex
+	refs  map[string]int
+	count *int64
+}
+
+func (t *IpTracker) Add(addr string) {
+	host, _, _ := net.SplitHostPort(addr)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.refs[host]++
+	if t.refs[host] == 1 {
+		atomic.AddInt64(t.count, 1)
+	}
+}
+func (t *IpTracker) Remove(addr string) {
+	host, _, _ := net.SplitHostPort(addr)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.refs[host]--
+	if t.refs[host] <= 0 {
+		delete(t.refs, host)
+		atomic.AddInt64(t.count, -1)
 	}
 }
 
@@ -676,18 +719,20 @@ func startProxy(t ForwardTask) {
 		for _, f := range closers {
 			f()
 		}
-		// 强制关闭所有连接，实现瞬间断流
 		for c := range activeConns {
 			c.Close()
 		}
 	}
 	runningListeners.Store(t.ID, closeAll)
 
+	v, _ := agentUserCounts.Load(t.ID)
+	userCountPtr := v.(*int64)
+	ipTracker := &IpTracker{refs: make(map[string]int), count: userCountPtr}
+
 	if t.Protocol == "tcp" || t.Protocol == "both" {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen)
 			if err != nil {
-				// 监听失败清理状态
 				runningListeners.Delete(t.ID)
 				activeTargets.Delete(t.ID)
 				agentTraffic.Delete(t.ID)
@@ -701,13 +746,11 @@ func startProxy(t ForwardTask) {
 				if e != nil {
 					break
 				}
+				// 性能调优：让操作系统内核自动管理 TCP 窗口大小
 				if tc, ok := c.(*net.TCPConn); ok {
-					// 性能关键：开启 KeepAlive 并设置大缓冲
 					tc.SetKeepAlive(true)
 					tc.SetKeepAlivePeriod(TCPKeepAlive)
 					tc.SetNoDelay(true)
-					tc.SetReadBuffer(SocketBufSize)
-					tc.SetWriteBuffer(SocketBufSize)
 				}
 				l.Lock()
 				if closed {
@@ -717,11 +760,15 @@ func startProxy(t ForwardTask) {
 				}
 				activeConns[c] = struct{}{}
 				l.Unlock()
+
+				ipTracker.Add(c.RemoteAddr().String())
+
 				go func(conn net.Conn) {
 					pipeTCP(conn, t.Target, t.ID)
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
+					ipTracker.Remove(conn.RemoteAddr().String())
 				}(c)
 			}
 		}()
@@ -736,29 +783,30 @@ func startProxy(t ForwardTask) {
 				agentTraffic.Delete(t.ID)
 				return
 			}
+			// UDP 仍然保持 4MB 缓冲区以防止突发丢包
 			ln.SetReadBuffer(UDPBufferSize)
 			ln.SetWriteBuffer(UDPBufferSize)
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
-			handleUDP(ln, t.Target, t.ID)
+			handleUDP(ln, t.Target, t.ID, ipTracker)
 		}()
 	}
 }
 
 func pipeTCP(src net.Conn, target, tid string) {
 	defer src.Close()
-	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
+	// 连接超时设为5秒
+	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		return
 	}
 	defer dst.Close()
+	// 性能调优：让操作系统内核自动管理 TCP 窗口大小
 	if tc, ok := dst.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(TCPKeepAlive)
 		tc.SetNoDelay(true)
-		tc.SetReadBuffer(SocketBufSize)
-		tc.SetWriteBuffer(SocketBufSize)
 	}
 	v, _ := agentTraffic.Load(tid)
 	if v == nil {
@@ -769,7 +817,7 @@ func pipeTCP(src net.Conn, target, tid string) {
 	copyCount(src, dst, &cnt.Rx)
 }
 
-func handleUDP(ln *net.UDPConn, target, tid string) {
+func handleUDP(ln *net.UDPConn, target, tid string, tracker *IpTracker) {
 	udpSessions := &sync.Map{}
 	defer func() {
 		udpSessions.Range(func(key, value interface{}) bool {
@@ -792,16 +840,15 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 				if now.Sub(s.lastActive) > 60*time.Second {
 					s.conn.Close()
 					udpSessions.Delete(key)
+					tracker.Remove(key.(string)) // UDP会话超时移除IP
 				}
 				return true
 			})
 		}
 	}()
-	// 使用 sync.Pool 中的大缓冲
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
-	
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -821,19 +868,19 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 			}
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
+			tracker.Add(sAddr) // 新UDP会话增加IP
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
-				// UDP 响应也需要大缓冲
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
 				b := *bPtr
-				
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
 					if e != nil {
 						c.Close()
 						udpSessions.Delete(k)
+						tracker.Remove(k) // 异常关闭移除IP
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
@@ -844,20 +891,29 @@ func handleUDP(ln *net.UDPConn, target, tid string) {
 	}
 }
 
+// --- 核心优化：标准拷贝函数 (恢复实时统计) ---
+
 func copyCount(dst io.Writer, src io.Reader, c *int64) {
+	// 获取缓冲区
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
+
+	// 使用带缓冲的 Copy，确保每次读写的数据量适中 (32KB-64KB)
+	// 这样既能保证性能，又能让 CounterWriter.Write 被频繁调用，从而实时更新统计
 	cw := &CounterWriter{Writer: dst, Counter: c}
-	// 使用带缓冲区的大块复制，提升吞吐量
 	io.CopyBuffer(cw, src, buf)
 }
+
+// --- 计数器 (仅保留 Write 以支持实时统计) ---
 
 type CounterWriter struct {
 	io.Writer
 	Counter *int64
 }
 
+// Write 实现标准 io.Writer 接口
+// 每次数据包传输 (比如 32KB) 都会触发此函数，从而实时增加流量计数
 func (w *CounterWriter) Write(p []byte) (n int, err error) {
 	n, err = w.Writer.Write(p)
 	if n > 0 {
@@ -918,9 +974,9 @@ const dashboardHtml = `
 <meta charset="UTF-8"><title>GoRelay Pro</title>
 <style>
 :root{--w:240px;--primary:#4f46e5;--bg:#f3f4f6;--text:#1f2937;--border:#e5e7eb}
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;display:flex;height:100vh;background:var(--bg);color:var(--text)}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;height:100vh;background:var(--bg);color:var(--text)}
 .sidebar{width:var(--w);background:#111827;color:#fff;display:flex;flex-direction:column;flex-shrink:0}
-.brand{padding:24px;font-size:20px;font-weight:700;letter-spacing:0.5px;color:#fff;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:10px}
+.brand{padding:24px;font-size:20px;font-weight:700;color:#fff;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:10px}
 .menu{flex:1;padding:20px 10px;display:flex;flex-direction:column;gap:5px}
 .item{display:flex;align-items:center;padding:12px 16px;color:#9ca3af;text-decoration:none;cursor:pointer;border-radius:8px;transition:all .2s;font-size:14px;font-weight:500}
 .item:hover{background:#1f2937;color:#fff}
@@ -942,11 +998,10 @@ h3{margin-top:0;margin-bottom:20px;font-size:18px;color:#111827;font-weight:700}
 .stat-info .lbl{color:#6b7280;font-size:13px;font-weight:500;margin-top:4px}
 .stat-icon{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:24px}
 table{width:100%;border-collapse:separate;border-spacing:0}
-th{text-align:left;padding:12px 16px;color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;background:#f9fafb;border-bottom:1px solid var(--border)}
+th{text-align:left;padding:12px 16px;color:#6b7280;font-size:12px;font-weight:600;background:#f9fafb;border-bottom:1px solid var(--border)}
 td{padding:16px;border-bottom:1px solid var(--border);font-size:14px;color:#374151}
-tr:last-child td{border-bottom:none}
 tr:hover td{background:#f9fafb}
-.badge{padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#d1fae5;color:#065f46;display:inline-block}
+.badge{padding:4px 10px;border-radius:99px;font-size:12px;font-weight:600;background:#d1fae5;color:#065f46;display:inline-block}
 .badge-danger{background:#fee2e2;color:#991b1b}
 input,select{padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;width:100%;box-sizing:border-box;font-size:14px;transition:.2s;outline:none}
 input:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79, 70, 229, 0.1)}
@@ -961,7 +1016,7 @@ button:hover{background:#4338ca;transform:translateY(-1px)}
 .prog-bar{height:100%;background:var(--primary);border-radius:99px;transition:width .4s ease}
 .prog-limit{font-size:12px;color:#6b7280;margin-top:4px;display:flex;justify-content:space-between}
 .modal{display:none;position:fixed;z-index:999;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);backdrop-filter:blur(2px)}
-.modal-content{background:#fff;margin:5vh auto;padding:30px;border-radius:16px;width:90%;max-width:500px;position:relative;box-shadow:0 20px 25px -5px rgba(0,0,0,0.1)}
+.modal-content{background:#fff;margin:5vh auto;padding:30px;border-radius:16px;width:90%;max-width:550px;position:relative;box-shadow:0 20px 25px -5px rgba(0,0,0,0.1)}
 .close{position:absolute;right:20px;top:20px;font-size:24px;cursor:pointer;color:#9ca3af;transition:.2s}
 .close:hover{color:#111827}
 pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:monospace;font-size:13px;line-height:1.6;overflow-x:auto;border:1px solid #374151}
@@ -993,7 +1048,7 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
                 <div class="stat-icon" style="background:#dcfce7;color:#16a34a">📡</div>
             </div>
             <div class="stat-card">
-                <div class="stat-info"><div class="val">{{len .Rules}}</div><div class="lbl">运行中规则</div></div>
+                <div class="stat-info"><div class="val">{{len .Rules}}</div><div class="lbl">规则总数</div></div>
                 <div class="stat-icon" style="background:#fef3c7;color:#d97706">⚡</div>
             </div>
         </div>
@@ -1003,7 +1058,7 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
             <table><thead><tr><th>节点名称</th><th>IP 地址</th><th>连接状态</th></tr></thead><tbody>
             {{range .Agents}}<tr><td><b>{{.Name}}</b></td><td>{{.RemoteIP}}</td><td><span class="badge">运行正常</span></td></tr>{{end}}
             </tbody></table>
-            {{else}}<div style="text-align:center;padding:40px;color:#9ca3af">暂无在线节点，请先前往部署页面添加节点</div>{{end}}
+            {{else}}<div style="text-align:center;padding:40px;color:#9ca3af">暂无在线节点</div>{{end}}
         </div>
     </div>
     <div id="deploy" class="page">
@@ -1026,12 +1081,13 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
             <h3>新建转发规则</h3>
             <form action="/add" method="POST">
                 <div class="grid-form">
+                    <div class="form-g"><label>备注名称</label><input name="note" placeholder="例如: 公司RDP" required></div>
                     <div class="form-g"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                     <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" placeholder="1000-65535" required></div>
                     <div class="form-g"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                     <div class="form-g"><label>目标地址 (IP/域名)</label><input name="target_ip" required></div>
                     <div class="form-g"><label>目标端口</label><input type="number" name="target_port" required></div>
-                    <div class="form-g"><label>流量限制 (GB, 0为不限)</label><input type="number" step="0.1" name="traffic_limit" value="0"></div>
+                    <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" value="0"></div>
                     <div class="form-g"><label>转发协议</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
                     <div class="form-g"><button>立即创建</button></div>
                 </div>
@@ -1039,41 +1095,40 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
         </div>
         <div class="card">
             <h3>规则列表</h3>
-            <table><thead><tr><th>转发链路</th><th>最终目标</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead><tbody>
+            <table><thead><tr><th>备注 / 链路</th><th>目标</th><th>监控 (在线人数 | 流量)</th><th>状态</th><th>操作</th></tr></thead><tbody>
             {{range .Rules}}
             <tr>
                 <td>
-                    <div style="font-weight:600">{{.EntryAgent}} : {{.EntryPort}}</div>
-                    <div style="color:#9ca3af;font-size:12px">⬇</div>
-                    <div style="font-weight:600">{{.ExitAgent}}</div>
+                    <div style="font-weight:600;color:#111827">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
+                    <div style="color:#6b7280;font-size:12px;margin-top:2px">{{.EntryAgent}}:{{.EntryPort}} ➜ {{.ExitAgent}}</div>
                 </td>
                 <td style="color:#4b5563">{{.TargetIP}}:{{.TargetPort}}</td>
-                <td style="width:220px">
+                <td style="width:240px">
                     <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
-                        <span>↑ {{formatBytes .TotalTx}}</span>
-                        <span>↓ {{formatBytes .TotalRx}}</span>
+                        <span style="font-weight:600;color:#4f46e5">👥 {{.UserCount}} 人在线</span>
+                        <span>{{formatBytes (add .TotalTx .TotalRx)}} 用量</span>
                     </div>
                     {{if gt .TrafficLimit 0}}
                     <div class="prog-container">
                         <div class="prog-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%; background:{{if ge (percent .TotalTx .TotalRx .TrafficLimit) 90.0}}#dc2626{{else}}#4f46e5{{end}}"></div>
                     </div>
-                    <div class="prog-limit">
-                        <span>共: {{formatBytes (add .TotalTx .TotalRx)}}</span>
-                        <span>限: {{formatBytes .TrafficLimit}}</span>
-                    </div>
+                    <div class="prog-limit"><span>限额: {{formatBytes .TrafficLimit}}</span></div>
                     {{else}}
                     <div class="prog-container" style="background:#f3f4f6"><div style="width:100%;background:#10b981;height:100%"></div></div>
-                    <div class="prog-limit"><span>无流量限制</span><span>∞</span></div>
                     {{end}}
                 </td>
                 <td>
                     {{if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}
                     <span class="badge badge-danger">流量耗尽</span>
-                    {{else}}<span class="badge">转发中</span>{{end}}
+                    {{else}}
+                    <span class="badge">转发中</span>
+                    {{end}}
                 </td>
                 <td>
-                    <button class="btn-sm" style="background:#fff;border:1px solid #d1d5db;color:#374151" onclick="openEdit('{{.ID}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}')">编辑</button>
-                    <a href="/delete?id={{.ID}}" class="btn-del" style="padding:5px 10px;border-radius:6px;text-decoration:none;font-size:12px;margin-left:5px" onclick="return confirm('确定删除此规则？')">删除</a>
+                    <div style="display:flex;gap:5px">
+                        <button class="btn-sm" style="background:#fff;border:1px solid #d1d5db;color:#374151" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}')">编辑</button>
+                        <a href="/delete?id={{.ID}}" class="btn-del" style="padding:5px 10px;border-radius:6px;text-decoration:none;font-size:12px" onclick="return confirm('确定删除？')">🗑️</a>
+                    </div>
                 </td>
             </tr>
             {{end}}
@@ -1100,14 +1155,17 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
         <h3>修改转发规则</h3>
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
-            <div class="form-g"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-            <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
-            <div class="form-g"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-            <div class="form-g"><label>目标地址</label><input name="target_ip" id="e_tip" required></div>
-            <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
-            <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
-            <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-            <button style="width:100%;margin-top:10px">保存修改</button>
+            <div class="grid-form">
+                <div class="form-g"><label>备注名称</label><input name="note" id="e_note" required></div>
+                <div class="form-g"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
+                <div class="form-g"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                <div class="form-g"><label>目标地址</label><input name="target_ip" id="e_tip" required></div>
+                <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
+                <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
+                <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
+                <div class="form-g"><button>保存修改</button></div>
+            </div>
         </form>
     </div>
 </div>
@@ -1142,9 +1200,9 @@ pre{background:#111827;color:#e5e7eb;padding:20px;border-radius:8px;font-family:
             document.body.removeChild(ta);
         }
     }
-    function openEdit(id, entry, eport, exit, tip, tport, proto, limit) {
-        if(!id) { alert('错误：未获取到规则ID，请刷新页面重试'); return; }
+    function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit) {
         document.getElementById('e_id').value = id;
+        document.getElementById('e_note').value = note;
         document.getElementById('e_entry').value = entry;
         document.getElementById('e_eport').value = eport;
         document.getElementById('e_exit').value = exit;
