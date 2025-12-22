@@ -84,7 +84,13 @@ atomic 原子操作处理流量计数，确保统计准确且高效。
 ```
 curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go_relay.sh && chmod +x go_relay.sh && ./go_relay.sh
 ```
-## 2.编译与安装 (Master端方式)
+
+## 2.Docker
+```
+mkdir relay && cd relay
+docker run -d --name relay-master --restart=always --net=host -v $(pwd):/data jhtone/relay -mode master
+```
+## 3.编译与安装 (Master端方式)
 
 假设您已经在 Master 服务器上。
 
