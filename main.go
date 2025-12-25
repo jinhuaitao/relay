@@ -1310,9 +1310,9 @@ button:hover { background: var(--primary-hover); transform: translateY(-1px); bo
 pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; border: 1px solid var(--border); margin-top: 10px; position: relative; }
 .code-box { position: relative; }
 
-/* 弹窗 */
+/* 弹窗 - 已修改 max-height */
 .modal { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); animation: fadeIn .2s; }
-.modal-content { background: var(--bg-card); margin: 5vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 600px; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); animation: scaleIn .3s cubic-bezier(0.16, 1, 0.3, 1); border: 1px solid var(--border); }
+.modal-content { background: var(--bg-card); margin: 5vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 600px; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); animation: scaleIn .3s cubic-bezier(0.16, 1, 0.3, 1); border: 1px solid var(--border); max-height: 70vh; overflow-y: auto; }
 @keyframes scaleIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .close { position: absolute; right: 24px; top: 24px; font-size: 24px; cursor: pointer; color: var(--text-sub); transition: .2s; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--bg-body); }
 .close:hover { color: var(--text-main); background: var(--border); }
@@ -1476,7 +1476,7 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                         <div class="form-g"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" placeholder="1000-65535" required></div>
                         <div class="form-g"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-g"><label>目标地址 (IP/域名)</label><input name="target_ip" required></div>
+                        <div class="form-g"><label>目标地址 (IP/域名)</label><input name="target_ip" placeholder="例如: 1.2.3.4 或 [2001::1]" required></div>
                         <div class="form-g"><label>目标端口</label><input type="number" name="target_port" required></div>
                         <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" value="0"></div>
                         <div class="form-g"><label>转发协议</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
@@ -1596,7 +1596,7 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                 <div class="form-g"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
                 <div class="form-g"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                <div class="form-g"><label>目标地址</label><input name="target_ip" id="e_tip" required></div>
+                <div class="form-g"><label>目标地址</label><input name="target_ip" id="e_tip" placeholder="例如: 1.2.3.4 或 [2001::1]" required></div>
                 <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
                 <div class="form-g"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
                 <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
