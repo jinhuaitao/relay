@@ -225,8 +225,7 @@ EOF
     echo -e " 运行状态: ${GREEN}Active${PLAIN}"
     echo -e " 程序路径: ${CYAN}$BIN_PATH${PLAIN}"
     echo -e " 证书路径: ${CYAN}$WORK_DIR/server.crt${PLAIN}"
-    echo -e " ${ICON_GLOBE} 访问地址: ${CYAN}${BOLD}https://${SERVER_IP}:443${PLAIN}"
-    echo -e " ${ICON_KEY} 提示: 使用自签名证书，浏览器提示不安全请忽略。"
+    echo -e " ${ICON_GLOBE} 访问地址: ${CYAN}${BOLD}http://${SERVER_IP}:8888${PLAIN}"
     print_line
     echo ""
     read -p "按回车键返回主菜单..."
