@@ -78,6 +78,15 @@ curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go
 mkdir gorelay && cd gorelay
 docker run -d --name relay-master --restart=always --net=host -v $(pwd):/data jhtone/relay -mode master
 ```
+开启：TLS
+# 生成私钥
+```
+openssl genrsa -out server.key 2048
+```
+# 生成自签名证书 (有效期 10 年)
+```
+openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650 -subj "/C=CN/ST=State/L=City/O=GoRelay/CN=IP 或域名"
+```
 ## 3.编译与安装 (Master端方式)
 
 假设您已经在 Master 服务器上。
