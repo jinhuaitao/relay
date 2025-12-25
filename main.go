@@ -24,6 +24,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	// ⚠️ 必须执行: go get github.com/gorilla/websocket
+	"github.com/gorilla/websocket"
 )
 
 // --- 配置与常量 ---
@@ -60,6 +63,7 @@ type LogicalRule struct {
 	Protocol     string `json:"protocol"`
 	BridgePort   string `json:"bridge_port"`
 	TrafficLimit int64  `json:"traffic_limit"`
+	Disabled     bool   `json:"disabled"`
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -94,9 +98,10 @@ type TrafficReport struct {
 }
 
 type AgentInfo struct {
-	Name     string   `json:"name"`
-	RemoteIP string   `json:"remote_ip"`
-	Conn     net.Conn `json:"-"`
+	Name      string   `json:"name"`
+	RemoteIP  string   `json:"remote_ip"`
+	Conn      net.Conn `json:"-"`
+	SysStatus string   `json:"sys_status"`
 }
 
 type Message struct {
@@ -114,6 +119,31 @@ type udpSession struct {
 	lastActive time.Time
 }
 
+// --- WebSocket 数据结构 ---
+type WSMessage struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
+}
+
+type WSDashboardData struct {
+	TotalTraffic int64             `json:"total_traffic"`
+	CurrentSpeed int64             `json:"current_speed"` // 新增: 实时速度 (B/s)
+	Agents       []AgentStatusData `json:"agents"`
+	Rules        []RuleStatusData  `json:"rules"`
+}
+
+type AgentStatusData struct {
+	Name      string `json:"name"`
+	SysStatus string `json:"sys_status"`
+}
+
+type RuleStatusData struct {
+	ID        string `json:"id"`
+	Total     int64  `json:"total"`
+	UserCount int64  `json:"uc"`
+	Limit     int64  `json:"limit"`
+}
+
 // --- 全局变量 ---
 
 var (
@@ -127,6 +157,10 @@ var (
 	agentUserCounts  sync.Map
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
+
+	wsUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	wsClients  = make(map[*websocket.Conn]bool)
+	wsMu       sync.Mutex
 )
 
 // --- 主程序 ---
@@ -173,8 +207,23 @@ func setRLimit() {
 	}
 }
 
-// ================= 服务管理 =================
+func getSysStatus() string {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memStr := fmt.Sprintf("Mem: %dMB", m.Alloc/1024/1024)
+	cpuStr := fmt.Sprintf("Go: %d", runtime.NumGoroutine())
+	if runtime.GOOS == "linux" {
+		if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+			parts := strings.Fields(string(data))
+			if len(parts) > 0 {
+				cpuStr = "Load: " + parts[0]
+			}
+		}
+	}
+	return fmt.Sprintf("%s | %s", cpuStr, memStr)
+}
 
+// ================= 服务管理 =================
 func handleService(op, mode, name, connect, token string) {
 	if os.Geteuid() != 0 {
 		log.Fatal("需 root 权限")
@@ -209,7 +258,6 @@ func handleService(op, mode, name, connect, token string) {
 			log.Println("已通过 nohup 启动")
 		}
 	} else {
-		// 手动卸载：标准流程
 		if isSys {
 			exec.Command("systemctl", "disable", "gorelay").Run()
 			exec.Command("systemctl", "stop", "gorelay").Run()
@@ -225,11 +273,8 @@ func handleService(op, mode, name, connect, token string) {
 	}
 }
 
-// doSelfUninstall 核心修复：避免被系统信号杀死，确保先删文件
 func doSelfUninstall() {
 	log.Println("开始执行自毁程序...")
-
-	// 1. 移除系统服务配置 (但不要调用 STOP，否则会被 kill 掉)
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		exec.Command("systemctl", "disable", "gorelay").Run()
 		os.Remove("/etc/systemd/system/gorelay.service")
@@ -238,38 +283,19 @@ func doSelfUninstall() {
 		exec.Command("rc-update", "del", "gorelay", "default").Run()
 		os.Remove("/etc/init.d/gorelay")
 	}
-
-	// 2. 核心逻辑：先删除文件，再退出
 	exe, err := os.Executable()
 	if err == nil {
-		// 解析可能的软链接，找到真实文件路径
 		realPath, err := filepath.EvalSymlinks(exe)
 		if err != nil {
 			realPath = exe
 		}
 		absPath, _ := filepath.Abs(realPath)
-		log.Printf("正在删除文件: %s", absPath)
-
-		// 尝试直接删除 (Linux 允许删除运行中的文件)
-		errRemove := os.Remove(absPath)
-		if errRemove != nil {
-			log.Printf("直接删除失败 (%v)，尝试使用 Shell 强制删除...", errRemove)
-			// 备用方案：启动独立的 shell 进程在 1 秒后删除文件
-			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 1; rm -f \"%s\"", absPath))
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // 脱离父进程
-			cmd.Start()
-		} else {
-			log.Println("✅ 文件删除成功")
-		}
+		os.Remove(absPath)
 	}
-
-	// 3. 一切清理完毕，程序主动退出
-	log.Println("清理完成，进程退出。")
 	os.Exit(0)
 }
 
 // ================= TG 通知 =================
-
 func sendTelegram(text string) {
 	if config.TgBotToken == "" || config.TgChatID == "" {
 		return
@@ -278,7 +304,6 @@ func sendTelegram(text string) {
 	data := url.Values{}
 	data.Set("chat_id", config.TgChatID)
 	data.Set("text", text)
-
 	go func() {
 		resp, err := http.PostForm(api, data)
 		if err == nil {
@@ -301,6 +326,9 @@ func runMaster() {
 		}
 	}()
 
+	// 启动 WebSocket 广播
+	go broadcastLoop()
+
 	go func() {
 		ln, err := net.Listen("tcp", ControlPort)
 		if err != nil {
@@ -315,17 +343,97 @@ func runMaster() {
 	}()
 
 	http.HandleFunc("/", authMiddleware(handleDashboard))
+	http.HandleFunc("/ws", authMiddleware(handleWS))
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/setup", handleSetup)
 	http.HandleFunc("/add", authMiddleware(handleAddRule))
 	http.HandleFunc("/edit", authMiddleware(handleEditRule))
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
+	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
+}
+
+func handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	wsMu.Lock()
+	wsClients[conn] = true
+	wsMu.Unlock()
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			wsMu.Lock()
+			delete(wsClients, conn)
+			wsMu.Unlock()
+			conn.Close()
+			break
+		}
+	}
+}
+
+// --- WebSocket 广播核心逻辑 ---
+func broadcastLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	var lastTotalTraffic int64 = 0
+
+	for range ticker.C {
+		mu.Lock()
+		// 1. 计算总流量
+		var currentTotal int64
+		var agentData []AgentStatusData
+		var ruleData []RuleStatusData
+
+		for _, a := range agents {
+			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus})
+		}
+		for _, r := range rules {
+			t := r.TotalTx + r.TotalRx
+			currentTotal += t
+			ruleData = append(ruleData, RuleStatusData{ID: r.ID, Total: t, UserCount: r.UserCount, Limit: r.TrafficLimit})
+		}
+		mu.Unlock()
+
+		// 2. 计算实时速度 (Speed = Delta)
+		var speed int64 = 0
+		if lastTotalTraffic != 0 {
+			speed = currentTotal - lastTotalTraffic
+		}
+		if speed < 0 { // 避免逻辑错误或重启导致的负数
+			speed = 0
+		}
+		lastTotalTraffic = currentTotal
+
+		// 3. 如果没有客户端连接，跳过发送，但需要保持 lastTotalTraffic 更新以便下次计算
+		wsMu.Lock()
+		if len(wsClients) == 0 {
+			wsMu.Unlock()
+			continue
+		}
+
+		msg := WSMessage{
+			Type: "stats",
+			Data: WSDashboardData{
+				TotalTraffic: currentTotal,
+				CurrentSpeed: speed,
+				Agents:       agentData,
+				Rules:        ruleData,
+			},
+		}
+
+		for client := range wsClients {
+			if err := client.WriteJSON(msg); err != nil {
+				client.Close()
+				delete(wsClients, client)
+			}
+		}
+		wsMu.Unlock()
+	}
 }
 
 func handleAgentConn(conn net.Conn) {
@@ -335,12 +443,10 @@ func handleAgentConn(conn net.Conn) {
 	if dec.Decode(&msg) != nil || msg.Type != "auth" {
 		return
 	}
-
 	data, ok := msg.Payload.(map[string]interface{})
 	if !ok || data["token"].(string) != config.AgentToken {
 		return
 	}
-
 	name := data["name"].(string)
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -364,6 +470,15 @@ func handleAgentConn(conn net.Conn) {
 		if m.Type == "stats" {
 			handleStatsReport(m.Payload)
 		}
+		if m.Type == "ping" {
+			if status, ok := m.Payload.(string); ok {
+				mu.Lock()
+				if agent, exists := agents[name]; exists {
+					agent.SysStatus = status
+				}
+				mu.Unlock()
+			}
+		}
 		if m.Type == "uninstalling" {
 			log.Printf("Agent [%s] 正在卸载...", name)
 		}
@@ -386,7 +501,6 @@ func handleStatsReport(payload interface{}) {
 
 	mu.Lock()
 	defer mu.Unlock()
-
 	limitTriggered := false
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_entry") {
@@ -396,7 +510,6 @@ func handleStatsReport(payload interface{}) {
 					rules[i].TotalTx += rep.TxDelta
 					rules[i].TotalRx += rep.RxDelta
 					rules[i].UserCount = rep.UserCount
-
 					atomic.StoreInt32(&configDirty, 1)
 					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
 						limitTriggered = true
@@ -416,6 +529,9 @@ func pushConfigToAll() {
 	mu.Lock()
 	tasksMap := make(map[string][]ForwardTask)
 	for _, r := range rules {
+		if r.Disabled {
+			continue
+		}
 		if r.TrafficLimit > 0 && (r.TotalTx+r.TotalRx) >= r.TrafficLimit {
 			continue
 		}
@@ -451,7 +567,6 @@ func pushConfigToAll() {
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
-
 	mu.Lock()
 	al := make([]AgentInfo, 0)
 	for _, a := range agents {
@@ -580,6 +695,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		Protocol:     r.FormValue("protocol"),
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		BridgePort:   fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
+		Disabled:     false,
 	})
 	saveConfig()
 	mu.Unlock()
@@ -593,7 +709,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
-
 	mu.Lock()
 	found := false
 	for i := range rules {
@@ -606,6 +721,27 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
+			found = true
+			break
+		}
+	}
+	if found {
+		saveConfig()
+	}
+	mu.Unlock()
+	if found {
+		go pushConfigToAll()
+	}
+	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+}
+
+func handleToggleRule(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	mu.Lock()
+	found := false
+	for i := range rules {
+		if rules[i].ID == id {
+			rules[i].Disabled = !rules[i].Disabled
 			found = true
 			break
 		}
@@ -645,7 +781,6 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		}(agent.Conn)
 	}
 	mu.Unlock()
-
 	sendTelegram(fmt.Sprintf("🗑️ 节点删除指令已发送\n目标: %s\n正在等待节点响应...", name))
 	http.Redirect(w, r, "/#dashboard", http.StatusSeeOther)
 }
@@ -699,7 +834,6 @@ func runAgent(name, masterAddr, token string) {
 						if val, ok := agentUserCounts.Load(k); ok {
 							uc = atomic.LoadInt64(val.(*int64))
 						}
-
 						if tx > 0 || rx > 0 || uc > 0 {
 							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
 						}
@@ -710,7 +844,8 @@ func runAgent(name, masterAddr, token string) {
 						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
 						conn.SetWriteDeadline(time.Time{})
 					} else {
-						json.NewEncoder(conn).Encode(Message{Type: "ping"})
+						status := getSysStatus()
+						json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: status})
 					}
 				}
 			}
@@ -724,7 +859,6 @@ func runAgent(name, masterAddr, token string) {
 				conn.Close()
 				break
 			}
-
 			if msg.Type == "uninstall" {
 				log.Println("收到卸载指令，正在执行自毁程序...")
 				json.NewEncoder(conn).Encode(Message{Type: "uninstalling"})
@@ -734,13 +868,11 @@ func runAgent(name, masterAddr, token string) {
 				doSelfUninstall()
 				return
 			}
-
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
 				json.Unmarshal(d, &tasks)
 				active := make(map[string]bool)
-
 				for _, t := range tasks {
 					active[t.ID] = true
 					if lastTarget, loaded := activeTargets.Load(t.ID); loaded {
@@ -811,7 +943,6 @@ func startProxy(t ForwardTask) {
 	var l sync.Mutex
 	activeConns := make(map[net.Conn]struct{})
 	closed := false
-
 	closeAll := func() {
 		l.Lock()
 		defer l.Unlock()
@@ -827,7 +958,6 @@ func startProxy(t ForwardTask) {
 		}
 	}
 	runningListeners.Store(t.ID, closeAll)
-
 	v, _ := agentUserCounts.Load(t.ID)
 	userCountPtr := v.(*int64)
 	ipTracker := &IpTracker{refs: make(map[string]int), count: userCountPtr}
@@ -862,9 +992,7 @@ func startProxy(t ForwardTask) {
 				}
 				activeConns[c] = struct{}{}
 				l.Unlock()
-
 				ipTracker.Add(c.RemoteAddr().String())
-
 				go func(conn net.Conn) {
 					pipeTCP(conn, t.Target, t.ID)
 					l.Lock()
@@ -1127,17 +1255,16 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(99, 102, 
 button { width: 100%; padding: 14px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .2s; box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.3); }
 button:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.4); }
 
-/* 纯图标悬浮按钮 */
 .theme-toggle {
     position: absolute;
     top: 30px;
     right: 30px;
     width: 40px;
     height: 40px;
-    background: transparent; /* 无背景 */
-    border: none;            /* 无边框 */
+    background: transparent;
+    border: none;
     color: var(--text-main);
-    font-size: 22px;         /* 图标大小 */
+    font-size: 22px;
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -1173,7 +1300,6 @@ button:hover { background: var(--primary-hover); transform: translateY(-1px); bo
         html.setAttribute('data-theme', next);
         localStorage.setItem('theme', next);
     }
-    // Init Theme
     const saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', saved);
 </script>
@@ -1189,6 +1315,7 @@ const dashboardHtml = `
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#1e293b" media="(prefers-color-scheme: dark)">
 <title>GoRelay Pro</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 /* --- 全局变量与重置 --- */
 :root {
@@ -1251,7 +1378,6 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Ro
     transition: background .3s;
 }
 .header-title { font-weight: 700; font-size: 18px; }
-.menu-btn { display: none; } /* 已废弃侧边栏按钮 */
 .theme-btn { font-size: 20px; cursor: pointer; background: var(--bg-body); border: 1px solid var(--border); width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: .2s; }
 .theme-btn:hover { background: var(--border); }
 
@@ -1310,7 +1436,7 @@ button:hover { background: var(--primary-hover); transform: translateY(-1px); bo
 pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; border: 1px solid var(--border); margin-top: 10px; position: relative; }
 .code-box { position: relative; }
 
-/* 弹窗 - 已修改 max-height */
+/* 弹窗 */
 .modal { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); animation: fadeIn .2s; }
 .modal-content { background: var(--bg-card); margin: 5vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 600px; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); animation: scaleIn .3s cubic-bezier(0.16, 1, 0.3, 1); border: 1px solid var(--border); max-height: 70vh; overflow-y: auto; }
 @keyframes scaleIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
@@ -1328,25 +1454,18 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
 
 /* Toast */
 .toast-box { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: .3s; z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }
-.toast-box.show { opacity: 1; visibility: visible; bottom: 80px; } /* 抬高避免挡到底部导航 */
+.toast-box.show { opacity: 1; visibility: visible; bottom: 80px; } 
 .toast-icon { font-size: 18px; }
 
 /* --- 移动端彻底重构 --- */
 @media (max-width: 768px) {
-    /* 隐藏 PC 侧边栏 */
     .sidebar { display: none; }
-
-    /* 顶部导航简化 */
     .header { padding-left: 16px; padding-right: 16px; }
     .header-title { display: block; font-size: 20px; }
-
-    /* 内容区优化 */
     .content { padding: 16px; padding-bottom: calc(var(--bot-nav-h) + var(--safe-bot) + 20px); }
     .stats { grid-template-columns: 1fr; gap: 12px; }
     .grid-form { grid-template-columns: 1fr; }
     .modal-content { margin: 10vh auto; width: 85%; padding: 24px; }
-
-    /* 底部导航栏 (App 风格) */
     .bottom-nav {
         display: flex;
         position: fixed;
@@ -1416,7 +1535,7 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
         <div id="dashboard" class="page active">
             <div class="stats">
                 <div class="stat-card">
-                    <div class="stat-info"><div class="val">{{formatBytes .TotalTraffic}}</div><div class="lbl">累计消耗流量</div></div>
+                    <div class="stat-info"><div class="val" id="stat-total-traffic">{{formatBytes .TotalTraffic}}</div><div class="lbl">累计消耗流量</div></div>
                     <div class="stat-icon" style="background:rgba(99, 102, 241, 0.1);color:var(--primary)">📶</div>
                 </div>
                 <div class="stat-card">
@@ -1428,16 +1547,29 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                     <div class="stat-icon" style="background:var(--warning-bg);color:var(--warning-text)">⚡</div>
                 </div>
             </div>
+
+            <div class="card">
+                <h3 style="display:flex;justify-content:space-between;">
+                    <span>📈 实时网络流量趋势</span>
+                    <span id="current-speed" style="font-size:14px;font-weight:600;color:var(--primary)">0 B/s</span>
+                </h3>
+                <div style="height:250px;width:100%;position:relative;">
+                    <canvas id="trafficChart"></canvas>
+                </div>
+            </div>
             
             <div class="card">
                 <h3>节点状态监控</h3>
                 <div class="table-responsive">
                     {{if .Agents}}
-                    <table><thead><tr><th>节点名称</th><th>IP 地址</th><th>连接状态</th><th>操作</th></tr></thead><tbody>
+                    <table><thead><tr><th>节点名称</th><th>IP 地址</th><th>连接状态 / 负载</th><th>操作</th></tr></thead><tbody>
                     {{range .Agents}}<tr>
                         <td><div style="font-weight:600;">{{.Name}}</div></td>
                         <td><span style="font-family:monospace;background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.RemoteIP}}</span></td>
-                        <td><span class="badge">运行正常</span></td>
+                        <td>
+                            <span class="badge">运行正常</span>
+                            <div id="agent-load-{{.Name}}" style="font-size:11px;color:var(--text-sub);margin-top:4px;font-family:monospace">{{if .SysStatus}}{{.SysStatus}}{{else}}Waiting...{{end}}</div>
+                        </td>
                         <td><button class="btn-sm btn-del" onclick="delAgent('{{.Name}}')">🗑️ 卸载</button></td>
                     </tr>{{end}}
                     </tbody></table>
@@ -1489,7 +1621,7 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                 <div class="table-responsive">
                     <table><thead><tr><th>备注 / 链路</th><th>目标地址</th><th>监控 (在线 | 流量)</th><th>状态</th><th>操作</th></tr></thead><tbody>
                     {{range .Rules}}
-                    <tr>
+                    <tr style="{{if .Disabled}}opacity:0.6;filter:grayscale(100%);{{end}}">
                         <td>
                             <div style="font-weight:700;color:var(--text-main);font-size:15px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
                             <div style="color:var(--text-sub);font-size:12px;margin-top:4px;display:flex;align-items:center;gap:4px">
@@ -1501,21 +1633,23 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                         <td style="color:var(--text-sub);font-family:monospace">{{.TargetIP}}:{{.TargetPort}}</td>
                         <td style="min-width:200px">
                             <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
-                                <span style="font-weight:600;color:var(--primary)">👥 {{.UserCount}}</span>
-                                <span>{{formatBytes (add .TotalTx .TotalRx)}}</span>
+                                <span style="font-weight:600;color:var(--primary)">👥 <span id="rule-uc-{{.ID}}">{{.UserCount}}</span></span>
+                                <span id="rule-traffic-{{.ID}}">{{formatBytes (add .TotalTx .TotalRx)}}</span>
                             </div>
                             {{if gt .TrafficLimit 0}}
                             <div class="prog-container">
-                                <div class="prog-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%; background:{{if ge (percent .TotalTx .TotalRx .TrafficLimit) 90.0}}var(--danger){{else}}var(--primary){{end}}"></div>
+                                <div id="rule-bar-{{.ID}}" class="prog-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%; background:{{if ge (percent .TotalTx .TotalRx .TrafficLimit) 90.0}}var(--danger){{else}}var(--primary){{end}}"></div>
                             </div>
-                            <div class="prog-limit"><span>已用 {{percent .TotalTx .TotalRx .TrafficLimit | printf "%.1f"}}%</span><span>限额: {{formatBytes .TrafficLimit}}</span></div>
+                            <div class="prog-limit"><span id="rule-limit-text-{{.ID}}">已用 {{percent .TotalTx .TotalRx .TrafficLimit | printf "%.1f"}}%</span><span>限额: {{formatBytes .TrafficLimit}}</span></div>
                             {{else}}
                             <div class="prog-container" style="background:var(--bg-body)"><div style="width:100%;background:var(--success);height:100%"></div></div>
                             <div class="prog-limit"><span>无限制</span></div>
                             {{end}}
                         </td>
                         <td>
-                            {{if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}
+                            {{if .Disabled}}
+                            <span class="badge" style="background:var(--border);color:var(--text-sub)">已暂停</span>
+                            {{else if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}
                             <span class="badge danger">流量耗尽</span>
                             {{else}}
                             <span class="badge">转发中</span>
@@ -1523,6 +1657,7 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
                         </td>
                         <td>
                             <div style="display:flex;gap:8px">
+                                <button class="btn-sm {{if .Disabled}}btn-sec{{end}}" style="{{if not .Disabled}}background:#10b981;{{end}}" onclick="toggleRule('{{.ID}}')">{{if .Disabled}}▶️{{else}}⏸{{end}}</button>
                                 <button class="btn-sm btn-sec" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}')">✎</button>
                                 <button class="btn-sm btn-del" onclick="delRule('{{.ID}}')">🗑️</button>
                             </div>
@@ -1621,35 +1756,24 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
 </div>
 
 <script>
-    // Config
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
     
-    // UI Helpers
     function nav(id, el) {
         window.location.hash = id;
-        
-        // Switch Page
         document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
-        
-        // Update Title
         var titleMap = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'settings':'系统设置'};
         document.querySelector('.header-title').innerText = titleMap[id] || 'GoRelay';
-
-        // Update Nav State (PC Sidebar)
         document.querySelectorAll('.sidebar .item').forEach(e => {
             if(e.onclick.toString().includes(id)) e.classList.add('active');
             else e.classList.remove('active');
         });
-
-        // Update Nav State (Mobile Bottom Bar)
         document.querySelectorAll('.bottom-nav .nav-item').forEach(e => {
             if(e.onclick.toString().includes(id)) e.classList.add('active');
             else e.classList.remove('active');
         });
     }
 
-    // Theme Logic
     function toggleTheme() {
         const html = document.documentElement;
         const current = html.getAttribute('data-theme');
@@ -1660,7 +1784,6 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
     const saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', saved);
 
-    // Toast Logic
     function showToast(msg, type) {
         var box = document.getElementById('toast');
         var icon = document.getElementById('t-icon');
@@ -1673,31 +1796,21 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
         setTimeout(() => { box.classList.remove('show'); }, 3000);
     }
 
-    // Confirm Logic
     function showConfirm(title, msg, type, callback) {
         document.getElementById('c_title').innerText = title;
         document.getElementById('c_msg').innerHTML = msg; 
         const icon = document.getElementById('c_icon');
         const btn = document.getElementById('c_btn');
-        
         if (type === 'danger') {
-            icon.innerText = '🚨';
-            btn.className = 'btn-del';
-            btn.innerText = '确认删除';
+            icon.innerText = '🚨'; btn.className = 'btn-del'; btn.innerText = '确认删除';
         } else {
-            icon.innerText = '🤔';
-            btn.className = ''; 
-            btn.innerText = '确认';
+            icon.innerText = '🤔'; btn.className = ''; btn.innerText = '确认';
         }
-        btn.onclick = function() {
-            closeConfirm();
-            if(callback) callback();
-        };
+        btn.onclick = function() { closeConfirm(); if(callback) callback(); };
         document.getElementById('confirmModal').style.display = 'block';
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
-    // Business Logic
     function genCmd() {
         var n = document.getElementById('agentName').value;
         var t = document.getElementById('addrType').value;
@@ -1735,6 +1848,8 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
         });
     }
 
+    function toggleRule(id) { location.href = "/toggle?id=" + id; }
+
     function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_note').value = note;
@@ -1750,25 +1865,107 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
     
     function closeEdit() { document.getElementById('editModal').style.display = "none"; }
     
-    window.onclick = function(e) { 
-        if(e.target.className === 'modal') { closeEdit(); closeConfirm(); } 
-    }
+    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); } }
+    if(location.hash) { nav(location.hash.substring(1)); }
     
-    // Init
-    if(location.hash) {
-        const id = location.hash.substring(1);
-        nav(id);
+    // --- Chart & WebSocket ---
+    function formatBytes(b) {
+        const u = 1024;
+        if (b < u) return b + " B";
+        var div = u, exp = 0;
+        while(b / u >= div) { div *= u; exp++; }
+        return (b / div).toFixed(2) + " " + "KMGTPE"[exp] + "B";
     }
-    
-    // Auto Refresh
-    setInterval(() => { 
-        if(document.querySelector('.page.active').id === 'dashboard' 
-            && document.activeElement.tagName !== 'INPUT' 
-            && document.getElementById('editModal').style.display !== 'block'
-            && document.getElementById('confirmModal').style.display !== 'block') {
-            location.reload(); 
+
+    // Chart Config
+    var ctx = document.getElementById('trafficChart').getContext('2d');
+    var chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: Array(60).fill(''),
+            datasets: [{
+                label: '实时速率',
+                data: Array(60).fill(0),
+                borderColor: '#6366f1',
+                backgroundColor: 'rgba(99, 102, 241, 0.1)',
+                borderWidth: 2,
+                pointRadius: 0,
+                fill: true,
+                tension: 0.4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+            scales: {
+                x: { display: false },
+                y: {
+                    beginAtZero: true,
+                    grid: { color: 'rgba(200, 200, 200, 0.1)' },
+                    ticks: { callback: function(val) { return formatBytes(val) + '/s'; } }
+                }
+            },
+            animation: { duration: 0 } // Disable animation for smooth realtime update
         }
-    }, 10000);
+    });
+
+    function connectWS() {
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var ws = new WebSocket(proto + '//' + location.host + '/ws');
+        ws.onmessage = function(event) {
+            try {
+                var msg = JSON.parse(event.data);
+                if (msg.type === 'stats' && msg.data) {
+                    var d = msg.data;
+                    
+                    // Update Texts
+                    var totalEl = document.getElementById('stat-total-traffic');
+                    if(totalEl) totalEl.innerText = formatBytes(d.total_traffic);
+                    
+                    var speedEl = document.getElementById('current-speed');
+                    if(speedEl) speedEl.innerText = formatBytes(d.current_speed) + '/s';
+
+                    // Update Chart
+                    chart.data.datasets[0].data.push(d.current_speed);
+                    chart.data.datasets[0].data.shift();
+                    chart.update();
+
+                    // Update Agents
+                    if(d.agents) {
+                        d.agents.forEach(function(a) {
+                            var el = document.getElementById('agent-load-' + a.name);
+                            if(el) el.innerText = a.sys_status;
+                        });
+                    }
+
+                    // Update Rules
+                    if(d.rules) {
+                        d.rules.forEach(function(r) {
+                            var trafEl = document.getElementById('rule-traffic-' + r.id);
+                            if(trafEl) trafEl.innerText = formatBytes(r.total);
+                            var ucEl = document.getElementById('rule-uc-' + r.id);
+                            if(ucEl) ucEl.innerText = r.uc;
+                            if(r.limit > 0) {
+                                var pct = (r.total / r.limit) * 100;
+                                if(pct > 100) pct = 100;
+                                var bar = document.getElementById('rule-bar-' + r.id);
+                                if(bar) {
+                                    bar.style.width = pct + '%';
+                                    if(pct >= 90) bar.style.background = 'var(--danger)';
+                                    else bar.style.background = 'var(--primary)';
+                                }
+                                var txt = document.getElementById('rule-limit-text-' + r.id);
+                                if(txt) txt.innerText = '已用 ' + pct.toFixed(1) + '%';
+                            }
+                        });
+                    }
+                }
+            } catch(e) {}
+        };
+        ws.onclose = function() { setTimeout(connectWS, 3000); };
+    }
+    connectWS();
 </script>
 </body>
 </html>`
