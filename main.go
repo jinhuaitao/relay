@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
+	"image/png"
 	"io"
 	"log"
 	"math/big"
@@ -26,7 +31,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/boombuler/barcode"
+	"github.com/boombuler/barcode/qr"
 	"github.com/gorilla/websocket"
+	"github.com/pquerna/otp/totp"
 )
 
 // --- 配置与常量 ---
@@ -65,7 +73,7 @@ type LogicalRule struct {
 	BridgePort   string `json:"bridge_port"`
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
-	SpeedLimit   int64  `json:"speed_limit"` // Bytes/s
+	SpeedLimit   int64  `json:"speed_limit"`
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -92,6 +100,10 @@ type AppConfig struct {
 	IsSetup      bool          `json:"is_setup"`
 	TgBotToken   string        `json:"tg_bot_token"`
 	TgChatID     string        `json:"tg_chat_id"`
+	
+	TwoFAEnabled bool   `json:"two_fa_enabled"`
+	TwoFASecret  string `json:"two_fa_secret"`
+
 	Rules        []LogicalRule `json:"saved_rules"`
 	Logs         []OpLog       `json:"logs"`
 }
@@ -145,7 +157,8 @@ type WSMessage struct {
 
 type WSDashboardData struct {
 	TotalTraffic int64             `json:"total_traffic"`
-	CurrentSpeed int64             `json:"current_speed"`
+	SpeedTx      int64             `json:"speed_tx"`
+	SpeedRx      int64             `json:"speed_rx"`
 	Agents       []AgentStatusData `json:"agents"`
 	Rules        []RuleStatusData  `json:"rules"`
 	Logs         []OpLog           `json:"logs"`
@@ -158,6 +171,7 @@ type AgentStatusData struct {
 
 type RuleStatusData struct {
 	ID        string `json:"id"`
+	Name      string `json:"name"`
 	Total     int64  `json:"total"`
 	UserCount int64  `json:"uc"`
 	Limit     int64  `json:"limit"`
@@ -173,8 +187,8 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	
-	activeTasks      sync.Map // 用于检测配置变更
-	activeTargets    sync.Map // 用于健康检查
+	activeTasks      sync.Map 
+	activeTargets    sync.Map 
 	
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
@@ -182,11 +196,59 @@ var (
 	
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
+	
+	loginAttempts = sync.Map{}
+	blockUntil    = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	wsClients  = make(map[*websocket.Conn]bool)
 	wsMu       sync.Mutex
+	
+	// TLS 状态
+	isMasterTLS bool = false
+	useTLS      bool = false
 )
+
+// --- 密码安全工具函数 ---
+
+func generateSalt() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func hashPassword(password, salt string) string {
+	h := sha256.New()
+	h.Write([]byte(salt + password))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func md5Hash(s string) string {
+	h := md5.New()
+	h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func checkLoginRateLimit(ip string) bool {
+	if t, ok := blockUntil.Load(ip); ok {
+		if time.Now().Before(t.(time.Time)) {
+			return false 
+		}
+		blockUntil.Delete(ip)
+		loginAttempts.Delete(ip)
+	}
+	return true
+}
+
+func recordLoginFail(ip string) {
+	v, _ := loginAttempts.LoadOrStore(ip, 0)
+	count := v.(int) + 1
+	loginAttempts.Store(ip, count)
+	if count >= 5 {
+		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
+		log.Printf("IP %s 因多次登录失败被封禁15分钟", ip)
+	}
+}
 
 // --- 主程序 ---
 
@@ -198,11 +260,12 @@ func main() {
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
 	serviceOp := flag.String("service", "", "install | uninstall")
+	tlsFlag := flag.Bool("tls", false, "使用 TLS 加密连接 (Agent模式)")
 
 	flag.Parse()
 
 	if *serviceOp != "" {
-		handleService(*serviceOp, *mode, *name, *connect, *token)
+		handleService(*serviceOp, *mode, *name, *connect, *token, *tlsFlag)
 		return
 	}
 
@@ -215,6 +278,7 @@ func main() {
 		if *name == "" || *connect == "" || *token == "" {
 			log.Fatal("Agent模式参数不足")
 		}
+		useTLS = *tlsFlag
 		runAgent(*name, *connect, *token)
 	} else {
 		log.Fatal("未知模式")
@@ -277,13 +341,19 @@ func addSystemLog(ip, action, msg string) {
 	mu.Unlock()
 }
 
-func handleService(op, mode, name, connect, token string) {
+func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if os.Geteuid() != 0 {
 		log.Fatal("需 root 权限")
 	}
 	exe, _ := os.Executable()
 	exe, _ = filepath.Abs(exe)
-	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"", mode, name, connect, token)
+	
+	tlsParam := ""
+	if useTLS {
+		tlsParam = " -tls"
+	}
+	
+	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
 	isSys := false
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		isSys = true
@@ -375,10 +445,32 @@ func runMaster() {
 	go broadcastLoop()
 
 	go func() {
-		ln, err := net.Listen("tcp", ControlPort)
-		if err != nil {
-			log.Fatal(err)
+		// 自动检测 TLS 证书
+		var ln net.Listener
+		var err error
+		
+		if _, errStat := os.Stat("server.crt"); errStat == nil {
+			if _, errStat := os.Stat("server.key"); errStat == nil {
+				cert, errLoad := tls.LoadX509KeyPair("server.crt", "server.key")
+				if errLoad == nil {
+					tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+					ln, err = tls.Listen("tcp", ControlPort, tlsConfig)
+					if err == nil {
+						log.Println("🔐 Master 已启用 TLS 加密模式 (端口:9999)")
+						isMasterTLS = true // 标记开启
+					}
+				}
+			}
 		}
+
+		if ln == nil {
+			ln, err = net.Listen("tcp", ControlPort)
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println("⚠️ Master 正在使用明文 TCP 模式")
+		}
+
 		for {
 			c, err := ln.Accept()
 			if err == nil {
@@ -401,6 +493,10 @@ func runMaster() {
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
+	// 2FA API
+	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
+	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
+	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -427,14 +523,16 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 
 func broadcastLoop() {
 	ticker := time.NewTicker(1 * time.Second)
-	var lastTotalTraffic int64 = 0
+	var lastTotalTx int64 = 0
+	var lastTotalRx int64 = 0
 
 	for range ticker.C {
 		mu.Lock()
-		var currentTotal int64
+		var currentTx, currentRx int64
 		var agentData []AgentStatusData
 		var ruleData []RuleStatusData
 		var logData []OpLog
+		
 		if len(opLogs) > 0 {
 			limit := 15
 			if len(opLogs) < limit {
@@ -448,11 +546,13 @@ func broadcastLoop() {
 			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus})
 		}
 		for _, r := range rules {
-			t := r.TotalTx + r.TotalRx
-			currentTotal += t
+			currentTx += r.TotalTx
+			currentRx += r.TotalRx
+			
 			ruleData = append(ruleData, RuleStatusData{
 				ID:        r.ID,
-				Total:     t,
+				Name:      r.Note, // For chart label
+				Total:     r.TotalTx + r.TotalRx,
 				UserCount: r.UserCount,
 				Limit:     r.TrafficLimit,
 				Status:    r.TargetStatus,
@@ -461,14 +561,19 @@ func broadcastLoop() {
 		}
 		mu.Unlock()
 
-		var speed int64 = 0
-		if lastTotalTraffic != 0 {
-			speed = currentTotal - lastTotalTraffic
+		var speedTx int64 = 0
+		var speedRx int64 = 0
+		
+		// Initial skip
+		if lastTotalTx != 0 || lastTotalRx != 0 {
+			speedTx = currentTx - lastTotalTx
+			speedRx = currentRx - lastTotalRx
 		}
-		if speed < 0 {
-			speed = 0
-		}
-		lastTotalTraffic = currentTotal
+		if speedTx < 0 { speedTx = 0 }
+		if speedRx < 0 { speedRx = 0 }
+		
+		lastTotalTx = currentTx
+		lastTotalRx = currentRx
 
 		wsMu.Lock()
 		if len(wsClients) == 0 {
@@ -479,8 +584,9 @@ func broadcastLoop() {
 		msg := WSMessage{
 			Type: "stats",
 			Data: WSDashboardData{
-				TotalTraffic: currentTotal,
-				CurrentSpeed: speed,
+				TotalTraffic: currentTx + currentRx,
+				SpeedTx:      speedTx,
+				SpeedRx:      speedRx,
 				Agents:       agentData,
 				Rules:        ruleData,
 				Logs:         logData,
@@ -697,6 +803,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	displayLogs := make([]OpLog, len(opLogs))
 	copy(displayLogs, opLogs)
 	
+	twoFA := config.TwoFAEnabled
 	mu.Unlock()
 
 	data := struct {
@@ -711,7 +818,9 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		MasterIPv6   string
 		MasterDomain string
 		Config       AppConfig
-	}{al, displayRules, displayLogs, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP, config.MasterIPv6, config.MasterDomain, config}
+		TwoFA        bool
+		IsTLS        bool
+	}{al, displayRules, displayLogs, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP, config.MasterIPv6, config.MasterDomain, config, twoFA, isMasterTLS}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -760,7 +869,11 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
-		config.WebPass = md5Hash(r.FormValue("password"))
+		
+		salt := generateSalt()
+		pwdHash := hashPassword(r.FormValue("password"), salt)
+		config.WebPass = salt + "$" + pwdHash
+		
 		config.AgentToken = r.FormValue("token")
 		config.IsSetup = true
 		saveConfig()
@@ -773,25 +886,75 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
+	if r.Method == "GET" {
 		mu.Lock()
-		u, p := config.WebUser, config.WebPass
+		isEnabled := config.TwoFAEnabled
 		mu.Unlock()
-		if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == p {
-			sid := make([]byte, 16)
-			rand.Read(sid)
-			sidStr := hex.EncodeToString(sid)
+		t, _ := template.New("l").Parse(loginHtml)
+		t.Execute(w, map[string]interface{}{"TwoFA": isEnabled})
+		return
+	}
+
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !checkLoginRateLimit(ip) {
+		http.Error(w, "尝试次数过多，请稍后再试", 429)
+		return
+	}
+
+	mu.Lock()
+	u, storedVal := config.WebUser, config.WebPass
+	twoFAEnabled := config.TwoFAEnabled
+	twoFASecret := config.TwoFASecret
+	mu.Unlock()
+	
+	passMatch := false
+	parts := strings.Split(storedVal, "$")
+	if len(parts) == 2 {
+		salt := parts[0]
+		hash := parts[1]
+		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), salt) == hash {
+			passMatch = true
+		}
+	} else {
+		if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
+			passMatch = true
+			newSalt := generateSalt()
+			newHash := hashPassword(r.FormValue("password"), newSalt)
 			mu.Lock()
-			sessions[sidStr] = time.Now().Add(12 * time.Hour)
+			config.WebPass = newSalt + "$" + newHash
+			saveConfig()
 			mu.Unlock()
-			http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true})
-			addLog(r, "登录成功", "管理员登录面板")
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+		}
+	}
+
+	if !passMatch {
+		recordLoginFail(ip)
+		t, _ := template.New("l").Parse(loginHtml)
+		t.Execute(w, map[string]interface{}{"TwoFA": false, "Error": "账号或密码错误"})
+		return
+	}
+
+	if twoFAEnabled {
+		code := r.FormValue("code")
+		if code == "" || !totp.Validate(code, twoFASecret) {
+			recordLoginFail(ip)
+			t, _ := template.New("l").Parse(loginHtml)
+			t.Execute(w, map[string]interface{}{"TwoFA": true, "Error": "两步验证码错误"})
 			return
 		}
 	}
-	t, _ := template.New("l").Parse(loginHtml)
-	t.Execute(w, nil)
+
+	sid := make([]byte, 16)
+	rand.Read(sid)
+	sidStr := hex.EncodeToString(sid)
+	mu.Lock()
+	sessions[sidStr] = time.Now().Add(12 * time.Hour)
+	mu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+	addLog(r, "登录成功", "管理员登录面板")
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -799,6 +962,60 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
+
+func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
+	key, err := totp.Generate(totp.GenerateOpts{
+		Issuer:      "GoRelay-Pro",
+		AccountName: config.WebUser,
+	})
+	if err != nil {
+		http.Error(w, "生成失败", 500)
+		return
+	}
+
+	var buf bytes.Buffer
+	img, _ := qr.Encode(key.URL(), qr.M, qr.Auto)
+	img, _ = barcode.Scale(img, 200, 200)
+	png.Encode(&buf, img)
+	
+	resp := map[string]string{
+		"secret": key.Secret(),
+		"qr":     "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()),
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Secret string `json:"secret"`
+		Code   string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if totp.Validate(req.Code, req.Secret) {
+		mu.Lock()
+		config.TwoFASecret = req.Secret
+		config.TwoFAEnabled = true
+		saveConfig()
+		mu.Unlock()
+		addLog(r, "安全设置", "开启双因素认证 (2FA)")
+		json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	} else {
+		json.NewEncoder(w).Encode(map[string]bool{"success": false})
+	}
+}
+
+func handle2FADisable(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	config.TwoFAEnabled = false
+	config.TwoFASecret = ""
+	saveConfig()
+	mu.Unlock()
+	addLog(r, "安全设置", "关闭双因素认证 (2FA)")
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// --- 原有 Handlers ---
 
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -950,7 +1167,8 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Lock()
 	if p := r.FormValue("password"); p != "" {
-		config.WebPass = md5Hash(p)
+		salt := generateSalt()
+		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
 	if t := r.FormValue("token"); t != "" {
 		config.AgentToken = t
@@ -987,16 +1205,27 @@ func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 
 func runAgent(name, masterAddr, token string) {
 	for {
-		conn, err := net.Dial("tcp", masterAddr)
+		// 自动探测 TLS
+		var conn net.Conn
+		var err error
+		
+		if useTLS {
+			conn, err = tls.Dial("tcp", masterAddr, &tls.Config{InsecureSkipVerify: true})
+		} else {
+			conn, err = net.Dial("tcp", masterAddr)
+		}
+
 		if err != nil {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		
 		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token}})
 
 		stop := make(chan struct{})
 		go func() {
-			t := time.NewTicker(3 * time.Second)
+			// *** 关键优化：将心跳同步为 1 秒 ***
+			t := time.NewTicker(1 * time.Second)
 			h := time.NewTicker(10 * time.Second) // 健康检查 10s
 			defer t.Stop()
 			defer h.Stop()
@@ -1258,12 +1487,10 @@ func startProxy(t ForwardTask) {
 	}
 }
 
-// --- [关键升级] 主动感知健康状态的 TCP 转发 ---
 func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 	defer src.Close()
 	allTargets := strings.Split(targetStr, ",")
 	
-	// 1. 筛选健康节点
 	var healthyTargets []string
 	for _, t := range allTargets {
 		t = strings.TrimSpace(t)
@@ -1273,7 +1500,6 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 		}
 	}
 
-	// 2. 如果没有健康节点，回退到尝试所有节点
 	candidates := healthyTargets
 	if len(candidates) == 0 {
 		candidates = []string{}
@@ -1282,13 +1508,11 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 		}
 	}
 
-	// 3. 随机选择一个开始尝试 (负载均衡)
 	var dst net.Conn
 	var err error
 	if len(candidates) > 0 {
 		startIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
 		idx := int(startIdx.Int64())
-		
 		for i := 0; i < len(candidates); i++ {
 			t := candidates[(idx+i)%len(candidates)]
 			dst, err = net.DialTimeout("tcp", t, 2*time.Second)
@@ -1340,7 +1564,6 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			now := time.Now()
 			udpSessions.Range(func(key, value interface{}) bool {
 				s := value.(*udpSession)
-				// UDP 会话超时更短一些，以便快速切换后端
 				if now.Sub(s.lastActive) > 45*time.Second {
 					s.conn.Close()
 					udpSessions.Delete(key)
@@ -1367,7 +1590,6 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			s.conn.Write(buf[:n])
 			throttle(n, limit, time.Now()) 
 		} else {
-			// 新会话：优先选健康的
 			var candidates []string
 			for _, t := range targets {
 				t = strings.TrimSpace(t)
@@ -1421,7 +1643,6 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 	}
 }
 
-// 核心限速算法 (Pacer)
 func throttle(n int, limit int64, start time.Time) {
 	if limit > 0 {
 		expectedDuration := time.Duration(1e9 * int64(n) / limit)
@@ -1490,12 +1711,6 @@ func saveConfig() {
 	json.NewEncoder(f).Encode(&config)
 }
 
-func md5Hash(s string) string {
-	h := md5.New()
-	h.Write([]byte(s))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -1516,388 +1731,431 @@ func formatBytes(b int64) string {
 }
 
 const setupHtml = `<!DOCTYPE html>
-<html lang="zh" data-theme="light">
+<html lang="zh">
 <head>
-<title>初始化配置 - GoRelay</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>初始化配置 - GoRelay Pro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <style>
-:root {
-    --primary: #6366f1; --primary-hover: #4f46e5;
-    --bg-body: #f8fafc; --bg-card: #ffffff;
-    --text-main: #1e293b; --text-sub: #64748b;
-    --border: #e2e8f0; --input-bg: #ffffff;
-    --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
-}
-[data-theme="dark"] {
-    --primary: #818cf8; --primary-hover: #6366f1;
-    --bg-body: #0f172a; --bg-card: #1e293b;
-    --text-main: #f1f5f9; --text-sub: #94a3b8;
-    --border: #334155; --input-bg: #0f172a;
-    --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-}
-body { background: var(--bg-body); color: var(--text-main); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; transition: background .3s, color .3s; }
-.card { background: var(--bg-card); padding: 40px; border-radius: 24px; box-shadow: var(--shadow); width: 100%; max-width: 400px; border: 1px solid var(--border); }
-h2 { text-align: center; margin-bottom: 30px; font-weight: 800; color: var(--text-main); }
-label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 600; color: var(--text-sub); }
-input { width: 100%; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg); color: var(--text-main); outline: none; transition: .2s; box-sizing: border-box; margin-bottom: 20px; font-size: 15px; }
-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2); }
-button { width: 100%; padding: 14px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .2s; }
-button:hover { background: var(--primary-hover); transform: translateY(-1px); }
+:root { --primary: #6366f1; --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --text-sub: #94a3b8; --border: #334155; }
+body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-image: radial-gradient(circle at top right, #1e1b4b, transparent 40%), radial-gradient(circle at bottom left, #312e81, transparent 40%); }
+.card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 40px; border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); width: 100%; max-width: 400px; border: 1px solid rgba(255,255,255,0.1); }
+h2 { text-align: center; margin: 0 0 10px 0; font-size: 24px; font-weight: 700; background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+p { text-align: center; color: var(--text-sub); margin-bottom: 30px; font-size: 14px; }
+.input-group { margin-bottom: 20px; position: relative; }
+.input-group i { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-sub); }
+input { width: 100%; padding: 14px 14px 14px 44px; border: 1px solid var(--border); border-radius: 12px; background: rgba(15, 23, 42, 0.6); color: var(--text); outline: none; transition: .3s; box-sizing: border-box; font-size: 14px; }
+input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); background: rgba(15, 23, 42, 0.8); }
+button { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .3s; box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.3); }
+button:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -5px rgba(99, 102, 241, 0.4); }
 </style>
 </head>
 <body>
 <form class="card" method="POST">
-    <h2>🚀 系统初始化</h2>
-    <label>设置管理员账号</label><input name="username" placeholder="Admin" required>
-    <label>设置管理员密码</label><input type="password" name="password" placeholder="Password" required>
-    <label>通信 Token (用于节点连接)</label><input name="token" placeholder="SecureToken123" required>
-    <button>完成设置并启动</button>
+    <h2>GoRelay Pro</h2>
+    <p>欢迎使用，请配置您的初始管理员账户</p>
+    <div class="input-group"><i class="ri-user-line"></i><input name="username" placeholder="设置管理员用户名" required autocomplete="off"></div>
+    <div class="input-group"><i class="ri-lock-password-line"></i><input type="password" name="password" placeholder="设置登录密码" required></div>
+    <div class="input-group"><i class="ri-key-2-line"></i><input name="token" placeholder="设置通信 Token (用于连接 Agent)" required></div>
+    <button>完成初始化 <i class="ri-arrow-right-line" style="vertical-align: middle; margin-left: 5px;"></i></button>
 </form>
 </body>
 </html>`
 
 const loginHtml = `<!DOCTYPE html>
-<html lang="zh" data-theme="light">
+<html lang="zh" data-theme="dark">
 <head>
 <title>登录 - GoRelay Pro</title>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <style>
-:root {
-    --primary: #6366f1; --primary-hover: #4f46e5;
-    --bg-body: #f8fafc; --bg-card: #ffffff;
-    --text-main: #1e293b; --text-sub: #64748b;
-    --border: #e2e8f0; --input-bg: #ffffff;
-    --shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
-}
-[data-theme="dark"] {
-    --primary: #818cf8; --primary-hover: #6366f1;
-    --bg-body: #0f172a; --bg-card: #1e293b;
-    --text-main: #f1f5f9; --text-sub: #94a3b8;
-    --border: #334155; --input-bg: #0f172a;
-    --shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-}
-body { background: var(--bg-body); color: var(--text-main); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; transition: background .3s, color .3s; position: relative; overflow: hidden; }
-.blob { position: absolute; width: 500px; height: 500px; background: var(--primary); opacity: 0.1; filter: blur(80px); border-radius: 50%; z-index: -1; animation: float 10s infinite ease-in-out; }
-@keyframes float { 0%,100%{transform:translate(0,0)} 50%{transform:translate(30px, -30px)} }
-.card { background: var(--bg-card); padding: 48px 40px; border-radius: 24px; box-shadow: var(--shadow); width: 100%; max-width: 360px; border: 1px solid var(--border); backdrop-filter: blur(10px); }
-.brand { text-align: center; margin-bottom: 30px; }
-.brand h2 { margin: 10px 0 5px; font-weight: 800; font-size: 28px; background: linear-gradient(135deg, var(--primary) 0%, #a855f7 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.brand p { margin: 0; color: var(--text-sub); font-size: 14px; }
-input { width: 100%; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg); color: var(--text-main); outline: none; transition: .2s; box-sizing: border-box; margin-bottom: 20px; font-size: 15px; }
-input:focus { border-color: var(--primary); box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
-button { width: 100%; padding: 14px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .2s; box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.3); }
-button:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.4); }
-.theme-toggle { position: absolute; top: 30px; right: 30px; width: 40px; height: 40px; background: transparent; border: none; color: var(--text-main); font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 10; outline: none; -webkit-tap-highlight-color: transparent; opacity: 0.8; }
-.theme-toggle:hover { opacity: 1; transform: scale(1.1); }
+:root { --primary: #6366f1; --bg: #0f172a; --text: #f8fafc; --text-sub: #94a3b8; }
+body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; position: relative; }
+.bg-glow { position: absolute; width: 600px; height: 600px; background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, rgba(0,0,0,0) 70%); top: -10%; left: -10%; z-index: -1; animation: float 10s infinite ease-in-out; }
+.bg-glow-2 { position: absolute; width: 500px; height: 500px; background: radial-gradient(circle, rgba(168,85,247,0.15) 0%, rgba(0,0,0,0) 70%); bottom: -10%; right: -10%; z-index: -1; animation: float 10s infinite ease-in-out reverse; }
+@keyframes float { 0%,100%{transform:translate(0,0)} 50%{transform:translate(30px, 30px)} }
+
+.card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); padding: 48px 40px; border-radius: 24px; width: 100%; max-width: 380px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }
+.header { text-align: center; margin-bottom: 32px; }
+.logo { font-size: 48px; margin-bottom: 10px; display: inline-block; background: linear-gradient(135deg, #818cf8, #c084fc); -webkit-background-clip: text; color: transparent; }
+.header h2 { margin: 0; font-size: 24px; font-weight: 700; color: #fff; }
+.header p { margin: 8px 0 0; color: var(--text-sub); font-size: 14px; }
+
+.input-box { margin-bottom: 20px; position: relative; }
+.input-box i { position: absolute; left: 16px; top: 15px; color: var(--text-sub); font-size: 18px; transition: .3s; }
+input { width: 100%; padding: 14px 14px 14px 48px; background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; color: #fff; font-size: 15px; outline: none; transition: .3s; box-sizing: border-box; }
+input:focus { border-color: var(--primary); background: rgba(15, 23, 42, 0.8); box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
+input:focus + i { color: var(--primary); }
+
+button { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .3s; margin-top: 10px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2); display: flex; align-items: center; justify-content: center; gap: 8px; }
+button:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.4); }
+.error-msg { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 10px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; text-align: center; border: 1px solid rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; gap: 6px; }
 </style>
 </head>
 <body>
-<button class="theme-toggle" onclick="toggleTheme()" id="themeBtn">🌗</button>
-<div class="blob" style="top:-100px;left:-100px;"></div>
-<div class="blob" style="bottom:-100px;right:-100px;animation-delay: -5s"></div>
+<div class="bg-glow"></div><div class="bg-glow-2"></div>
 <form class="card" method="POST">
-    <div class="brand"><h2>GoRelay Pro</h2><p>安全高效的内网穿透管理系统</p></div>
-    <input name="username" placeholder="账号 / Username" required>
-    <input type="password" name="password" placeholder="密码 / Password" required>
-    <button>立即登录</button>
+    <div class="header">
+        <i class="ri-globe-line logo"></i>
+        <h2>GoRelay Pro</h2>
+        <p>安全内网穿透管理系统</p>
+    </div>
+    {{if .Error}}<div class="error-msg"><i class="ri-error-warning-line"></i> {{.Error}}</div>{{end}}
+    
+    <div class="input-box"><input name="username" placeholder="管理员账号" required><i class="ri-user-3-line"></i></div>
+    <div class="input-box"><input type="password" name="password" placeholder="密码" required><i class="ri-lock-2-line"></i></div>
+    {{if .TwoFA}}
+    <div class="input-box"><input name="code" placeholder="两步验证码 (2FA)" required pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 2px; text-align: center; padding-left: 14px;"><i class="ri-shield-keyhole-line" style="left: auto; right: 16px;"></i></div>
+    {{end}}
+    <button>登录系统 <i class="ri-arrow-right-line"></i></button>
 </form>
-<script>
-    function toggleTheme() {
-        const html = document.documentElement;
-        const current = html.getAttribute('data-theme');
-        const next = current === 'dark' ? 'light' : 'dark';
-        html.setAttribute('data-theme', next);
-        localStorage.setItem('theme', next);
-    }
-    const saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    document.documentElement.setAttribute('data-theme', saved);
-</script>
 </body>
 </html>`
 
 const dashboardHtml = `
 <!DOCTYPE html>
-<html lang="zh" data-theme="light">
+<html lang="zh" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1e293b" media="(prefers-color-scheme: dark)">
-<title>GoRelay Pro</title>
+<title>GoRelay Pro 仪表盘</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-/* --- 全局变量与重置 --- */
+/* --- 现代 CSS 变量 --- */
 :root {
-    --primary: #6366f1; --primary-hover: #4f46e5;
-    --bg-body: #f1f5f9; --bg-sidebar: #0f172a;
-    --bg-card: #ffffff; --bg-hover: #f8fafc;
+    --primary: #6366f1; --primary-hover: #4f46e5; --primary-light: rgba(99, 102, 241, 0.15);
+    --bg-body: #f1f5f9; --bg-sidebar: #0f172a; --bg-card: #ffffff;
     --text-main: #0f172a; --text-sub: #64748b; --text-inv: #ffffff;
-    --border: #e2e8f0; --input-bg: #ffffff;
+    --border: #e2e8f0; --input-bg: #f8fafc;
     --success: #10b981; --success-bg: #d1fae5; --success-text: #065f46;
     --danger: #ef4444; --danger-bg: #fee2e2; --danger-text: #991b1b;
-    --warning: #f59e0b; --warning-bg: #fef3c7; --warning-text: #fef3c7;
-    --shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+    --warning: #f59e0b; --warning-bg: #fef3c7; --warning-text: #92400e;
     --radius: 16px;
+    --shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
     --sidebar-w: 260px;
-    --header-h: 60px;
-    --safe-top: env(safe-area-inset-top, 0px);
-    --safe-bot: env(safe-area-inset-bottom, 0px);
-    --bot-nav-h: 60px;
+    --trans: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 [data-theme="dark"] {
-    --primary: #818cf8; --primary-hover: #6366f1;
-    --bg-body: #020617; --bg-sidebar: #0f172a;
-    --bg-card: #1e293b; --bg-hover: #334155;
-    --text-main: #f8fafc; --text-sub: #94a3b8; --text-inv: #ffffff;
+    --bg-body: #020617; --bg-sidebar: #0f172a; --bg-card: #1e293b;
+    --text-main: #f8fafc; --text-sub: #94a3b8;
     --border: #334155; --input-bg: #0f172a;
-    --success: #34d399; --success-bg: #064e3b; --success-text: #d1fae5;
-    --danger: #f87171; --danger-bg: #7f1d1d; --danger-text: #fee2e2;
-    --warning: #fbbf24; --warning-bg: #78350f; --warning-text: #fef3c7;
+    --primary-light: rgba(99, 102, 241, 0.2);
+    --success-bg: rgba(16, 185, 129, 0.2); --success-text: #34d399;
+    --danger-bg: rgba(239, 68, 68, 0.2); --danger-text: #f87171;
+    --warning-bg: rgba(245, 158, 11, 0.2); --warning-text: #fbbf24;
     --shadow: 0 10px 15px -3px rgba(0,0,0,0.4);
 }
+
+/* --- 基础样式 --- */
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; transition: background .3s, color .3s; }
-.sidebar { width: var(--sidebar-w); background: var(--bg-sidebar); color: var(--text-inv); display: flex; flex-direction: column; flex-shrink: 0; z-index: 50; }
-.brand { height: var(--header-h); display: flex; align-items: center; padding: 0 24px; font-size: 20px; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.1); letter-spacing: -0.5px; }
-.brand span { color: var(--primary); margin-right: 8px; font-size: 24px; }
-.menu { flex: 1; padding: 24px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-.item { display: flex; align-items: center; padding: 12px 16px; color: #94a3b8; text-decoration: none; cursor: pointer; border-radius: 12px; transition: .2s; font-size: 14px; font-weight: 600; }
+body { margin: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; transition: var(--trans); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-sub); }
+
+/* --- 侧边栏 --- */
+.sidebar { width: var(--sidebar-w); background: var(--bg-sidebar); color: var(--text-inv); display: flex; flex-direction: column; flex-shrink: 0; z-index: 50; border-right: 1px solid rgba(255,255,255,0.05); }
+.brand { height: 70px; display: flex; align-items: center; padding: 0 24px; font-size: 20px; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.05); gap: 10px; background: linear-gradient(90deg, #6366f1, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.brand i { color: #818cf8; font-size: 24px; -webkit-text-fill-color: #818cf8; }
+.menu { flex: 1; padding: 20px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.item { display: flex; align-items: center; padding: 12px 16px; color: #94a3b8; cursor: pointer; border-radius: 12px; transition: var(--trans); font-size: 14px; font-weight: 500; }
 .item:hover { background: rgba(255,255,255,0.05); color: #fff; }
-.item.active { background: var(--primary); color: #fff; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4); }
-.item .icon { margin-right: 12px; font-size: 18px; width: 24px; text-align: center; }
-.user-panel { padding: 20px; background: rgba(0,0,0,0.2); border-top: 1px solid rgba(255,255,255,0.1); }
-.user-info { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: #e2e8f0; display: flex; align-items: center; gap: 8px; }
-.logout { display: block; text-align: center; background: rgba(255,255,255,0.1); color: #fff; text-decoration: none; padding: 10px; border-radius: 8px; font-size: 12px; transition: .2s; }
-.logout:hover { background: var(--danger); }
-.bottom-nav { display: none; }
-.main-wrapper { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; }
-.header { height: calc(var(--header-h) + var(--safe-top)); background: var(--bg-card); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: var(--safe-top) 24px 0 24px; flex-shrink: 0; transition: background .3s; }
-.header-title { font-weight: 700; font-size: 18px; }
-.theme-btn { font-size: 20px; cursor: pointer; background: var(--bg-body); border: 1px solid var(--border); width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: .2s; }
-.theme-btn:hover { background: var(--border); }
-.content { flex: 1; padding: 24px; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
-.page { display: none; animation: slideUp .3s ease-out; max-width: 1200px; margin: 0 auto; }
+.item.active { background: linear-gradient(90deg, var(--primary) 0%, rgba(99,102,241,0.8) 100%); color: #fff; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+.item i { margin-right: 12px; font-size: 18px; }
+
+.user-panel { padding: 20px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.1); }
+.user-card { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.avatar { width: 36px; height: 36px; background: linear-gradient(135deg, #a5b4fc, #6366f1); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.user-meta div:first-child { font-weight: 600; font-size: 14px; }
+.user-meta div:last-child { font-size: 12px; opacity: 0.6; }
+.btn-logout { display: flex; align-items: center; justify-content: center; width: 100%; padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: transparent; color: #f87171; cursor: pointer; font-size: 12px; gap: 6px; transition: var(--trans); text-decoration: none; }
+.btn-logout:hover { background: rgba(239,68,68,0.1); border-color: #ef4444; }
+
+/* --- 主内容区 --- */
+.main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; }
+.header { height: 70px; background: var(--bg-card); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; transition: var(--trans); }
+.page-title { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 10px; }
+.theme-toggle { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-body); color: var(--text-main); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: var(--trans); }
+.theme-toggle:hover { background: var(--border); }
+
+.content { flex: 1; padding: 24px; overflow-y: auto; overflow-x: hidden; }
+.page { display: none; animation: fadeIn 0.4s ease; max-width: 1400px; margin: 0 auto; }
 .page.active { display: block; }
-@keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-.card { background: var(--bg-card); padding: 24px; border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 24px; border: 1px solid var(--border); }
-h3 { margin: 0 0 20px 0; font-size: 18px; color: var(--text-main); font-weight: 700; display: flex; align-items: center; gap: 8px; }
-h3::before { content: ''; width: 4px; height: 18px; background: var(--primary); border-radius: 2px; display: inline-block; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 24px; }
-.stat-card { background: var(--bg-card); padding: 24px; border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; position: relative; overflow: hidden; }
-.stat-card::after { content: ''; position: absolute; right: -20px; top: -20px; width: 100px; height: 100px; background: var(--primary); opacity: 0.05; border-radius: 50%; pointer-events: none; }
-.stat-info .val { font-size: 28px; font-weight: 800; color: var(--text-main); line-height: 1.2; letter-spacing: -1px; }
-.stat-info .lbl { color: var(--text-sub); font-size: 13px; font-weight: 600; margin-top: 4px; }
-.stat-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
-.table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 12px; border: 1px solid var(--border); }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+/* --- 卡片与布局 --- */
+.card { background: var(--bg-card); padding: 24px; border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); margin-bottom: 24px; position: relative; overflow: hidden; }
+h3 { margin: 0 0 20px 0; font-size: 16px; color: var(--text-main); font-weight: 700; display: flex; align-items: center; gap: 8px; }
+h3 i { color: var(--primary); }
+
+.dashboard-grid { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; margin-bottom: 24px; }
+@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
+
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 24px; }
+.stat-item { padding: 24px; display: flex; align-items: center; justify-content: space-between; position: relative; overflow: hidden; }
+.stat-item::after { content: ''; position: absolute; right: -20px; top: -20px; width: 100px; height: 100px; background: var(--primary); opacity: 0.05; border-radius: 50%; filter: blur(20px); }
+.stat-val { font-size: 28px; font-weight: 800; color: var(--text-main); line-height: 1.2; letter-spacing: -0.5px; }
+.stat-label { color: var(--text-sub); font-size: 13px; font-weight: 500; margin-top: 4px; }
+.stat-icon { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 26px; background: var(--input-bg); color: var(--primary); border: 1px solid var(--border); }
+
+/* --- 表格 --- */
+.table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-card); }
 table { width: 100%; border-collapse: collapse; white-space: nowrap; }
-th { text-align: left; padding: 14px 20px; color: var(--text-sub); font-size: 12px; font-weight: 700; text-transform: uppercase; background: var(--bg-body); border-bottom: 1px solid var(--border); }
-td { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); }
+th { text-align: left; padding: 16px 24px; color: var(--text-sub); font-size: 12px; font-weight: 600; text-transform: uppercase; background: var(--input-bg); border-bottom: 1px solid var(--border); }
+td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; }
 tr:last-child td { border-bottom: none; }
-tr:hover td { background: var(--bg-hover); }
-.badge { padding: 4px 10px; border-radius: 99px; font-size: 12px; font-weight: 700; background: var(--success-bg); color: var(--success-text); display: inline-flex; align-items: center; gap: 4px; }
+tr:hover td { background: var(--input-bg); }
+
+.badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.badge.success { background: var(--success-bg); color: var(--success-text); }
 .badge.danger { background: var(--danger-bg); color: var(--danger-text); }
-.badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.prog-container { width: 100%; background: var(--border); border-radius: 99px; height: 6px; margin-top: 8px; overflow: hidden; }
-.prog-bar { height: 100%; background: var(--primary); border-radius: 99px; transition: width .4s ease; }
-.prog-limit { font-size: 12px; color: var(--text-sub); margin-top: 6px; display: flex; justify-content: space-between; font-weight: 500; }
-.grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; align-items: end; }
-.form-g { margin-bottom: 0; }
-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-main); }
-input, select { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: .2s; }
-input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
-button { background: var(--primary); color: #fff; border: none; padding: 11px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: .2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-button:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.15); }
-.btn-sec { background: var(--bg-body); color: var(--text-main); border: 1px solid var(--border); box-shadow: none; }
-.btn-sec:hover { background: var(--bg-hover); border-color: var(--text-sub); }
-.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 8px; }
-.btn-del { background: var(--danger-bg); color: var(--danger-text); border: 1px solid transparent; box-shadow: none; padding: 6px 10px; }
-.btn-del:hover { background: var(--danger); color: #fff; }
-pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; line-height: 1.6; overflow-x: auto; border: 1px solid var(--border); margin-top: 10px; position: relative; }
-.modal { display: none; position: fixed; z-index: 999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); animation: fadeIn .2s; }
-.modal-content { background: var(--bg-card); margin: 5vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 600px; position: relative; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); animation: scaleIn .3s cubic-bezier(0.16, 1, 0.3, 1); border: 1px solid var(--border); max-height: 70vh; overflow-y: auto; }
-@keyframes scaleIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-.close { position: absolute; right: 24px; top: 24px; font-size: 24px; cursor: pointer; color: var(--text-sub); transition: .2s; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--bg-body); }
-.close:hover { color: var(--text-main); background: var(--border); }
-.confirm-modal-body { text-align: center; }
-.confirm-icon { font-size: 48px; margin-bottom: 16px; animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275); display: inline-block; }
-@keyframes popIn { 0% { opacity: 0; transform: scale(0.5); } 100% { opacity: 1; transform: scale(1); } }
-.confirm-title { font-size: 20px; font-weight: 800; color: var(--text-main); margin-bottom: 10px; }
-.confirm-text { font-size: 14px; color: var(--text-sub); margin-bottom: 24px; line-height: 1.6; }
-.confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.confirm-actions button { width: 100%; padding: 12px; font-size: 14px; }
-.toast-box { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: .3s; z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); backdrop-filter: blur(5px); }
-.toast-box.show { opacity: 1; visibility: visible; bottom: 80px; } 
-.toast-icon { font-size: 18px; }
+.badge.warning { background: var(--warning-bg); color: var(--warning-text); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; position: relative; }
+.status-dot.pulse::after { content: ''; position: absolute; width: 100%; height: 100%; border-radius: 50%; background: inherit; animation: pulse 1.5s infinite; opacity: 0.6; transform: scale(1); }
+@keyframes pulse { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(2.5); opacity: 0; } }
+
+/* --- 按钮与表单 --- */
+.grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; align-items: end; }
+.form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-sub); }
+input, select { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: 0.2s; }
+input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-light); }
+
+.btn { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
+.btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } /* 保留部分次级按钮样式 */
+.btn.danger { background: var(--danger-bg); color: var(--danger-text); }
+.btn.danger:hover { background: var(--danger); color: #fff; }
+.btn.icon { padding: 8px; width: 34px; height: 34px; border-radius: 8px; }
+
+/* --- 进度条 --- */
+.progress { width: 100%; height: 6px; background: var(--border); border-radius: 10px; overflow: hidden; margin-top: 8px; }
+.progress-bar { height: 100%; background: var(--primary); border-radius: 10px; transition: width 0.5s ease; }
+
+/* --- 模态框 --- */
+.modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); animation: fadeIn 0.2s; }
+.modal-content { background: var(--bg-card); margin: 8vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 500px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border); transform: scale(0.95); animation: scaleIn 0.3s forwards; position: relative; max-height: 85vh; overflow-y: auto; }
+@keyframes scaleIn { to { transform: scale(1); opacity: 1; } }
+.close-modal { position: absolute; right: 20px; top: 20px; font-size: 24px; cursor: pointer; color: var(--text-sub); }
+.close-modal:hover { color: var(--text-main); }
+
+/* --- 移动端适配 --- */
+.mobile-nav { display: none; }
 @media (max-width: 768px) {
     .sidebar { display: none; }
-    .header { padding-left: 16px; padding-right: 16px; }
-    .header-title { display: block; font-size: 20px; }
-    .content { padding: 16px; padding-bottom: calc(var(--bot-nav-h) + var(--safe-bot) + 20px); }
-    .stats { grid-template-columns: 1fr; gap: 12px; }
-    .grid-form { grid-template-columns: 1fr; }
-    .modal-content { margin: 10vh auto; width: 85%; padding: 24px; }
-    .bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; height: calc(var(--bot-nav-h) + var(--safe-bot)); background: rgba(255,255,255,0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid rgba(0,0,0,0.05); z-index: 1000; padding-bottom: var(--safe-bot); box-shadow: 0 -5px 20px rgba(0,0,0,0.03); }
-    [data-theme="dark"] .bottom-nav { background: rgba(30, 41, 59, 0.85); border-top: 1px solid rgba(255,255,255,0.05); }
-    .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sub); font-size: 10px; font-weight: 500; cursor: pointer; transition: .2s; -webkit-tap-highlight-color: transparent; }
-    .nav-item.active { color: var(--primary); }
-    .nav-icon { font-size: 24px; margin-bottom: 2px; transition: .2s; }
-    .nav-item.active .nav-icon { transform: translateY(-2px); }
+    .header { padding: 0 16px; }
+    .content { padding: 16px; padding-bottom: 80px; }
+    .stats-grid { grid-template-columns: 1fr; }
+    .mobile-nav { display: flex; position: fixed; bottom: 0; left: 0; width: 100%; background: var(--bg-card); border-top: 1px solid var(--border); height: 60px; z-index: 100; justify-content: space-around; padding-bottom: env(safe-area-inset-bottom); }
+    .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sub); font-size: 10px; gap: 4px; }
+    .nav-btn.active { color: var(--primary); }
+    .nav-btn i { font-size: 20px; }
 }
+
+/* --- Toast --- */
+.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: rgba(15, 23, 42, 0.9); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: 0.3s; z-index: 2000; display: flex; align-items: center; gap: 8px; backdrop-filter: blur(10px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
+.toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 80px; }
 </style>
 </head>
 <body>
-<div id="toast" class="toast-box"><span id="t-icon" class="toast-icon"></span><span id="t-msg"></span></div>
+
+<div id="toast" class="toast"><i id="t-icon"></i><span id="t-msg"></span></div>
 
 <div class="sidebar">
-    <div class="brand"><span>⚡</span> GoRelay Pro</div>
+    <div class="brand"><i class="ri-globe-line"></i> GoRelay Pro</div>
     <div class="menu">
-        <a class="item active" onclick="nav('dashboard',this)"><span class="icon">📊</span> 仪表盘</a>
-        <a class="item" onclick="nav('deploy',this)"><span class="icon">🚀</span> 节点部署</a>
-        <a class="item" onclick="nav('rules',this)"><span class="icon">🔗</span> 转发规则</a>
-        <a class="item" onclick="nav('logs',this)"><span class="icon">🛡️</span> 操作日志</a>
-        <a class="item" onclick="nav('settings',this)"><span class="icon">⚙️</span> 系统设置</a>
+        <div class="item active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i> 概览</div>
+        <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发规则</div>
+        <div class="item" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i> 节点部署</div>
+        <div class="item" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i> 系统日志</div>
+        <div class="item" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i> 系统设置</div>
     </div>
     <div class="user-panel">
-        <div class="user-info">
-            <div style="width:32px;height:32px;background:var(--primary);border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:bold">A</div>
-            <div><div>{{.User}}</div><div style="font-size:10px;opacity:0.7;font-weight:400">管理员</div></div>
+        <div class="user-card">
+            <div class="avatar">{{printf "%.1s" .User}}</div>
+            <div class="user-meta">
+                <div>{{.User}}</div>
+                <div>管理员 (Admin)</div>
+            </div>
         </div>
-        <a href="/logout" class="logout">安全退出</a>
+        <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i> 安全退出</a>
     </div>
 </div>
 
-<div class="main-wrapper">
+<div class="main">
     <header class="header">
-        <div class="header-title">仪表盘</div>
-        <button class="theme-btn" onclick="toggleTheme()" id="themeIcon">🌗</button>
+        <div class="page-title"><i class="ri-dashboard-3-line" id="page-icon"></i> <span id="page-text">仪表盘</span></div>
+        <div class="theme-toggle" onclick="toggleTheme()"><i class="ri-moon-line" id="theme-icon"></i></div>
     </header>
 
     <div class="content">
         <div id="dashboard" class="page active">
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-info"><div class="val" id="stat-total-traffic">{{formatBytes .TotalTraffic}}</div><div class="lbl">累计消耗流量</div></div>
-                    <div class="stat-icon" style="background:rgba(99, 102, 241, 0.1);color:var(--primary)">📶</div>
+            <div class="stats-grid">
+                <div class="card stat-item">
+                    <div>
+                        <div class="stat-label">累计总流量</div>
+                        <div class="stat-val" id="stat-total-traffic">{{formatBytes .TotalTraffic}}</div>
+                    </div>
+                    <div class="stat-icon"><i class="ri-arrow-up-down-line"></i></div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-info"><div class="val">{{len .Agents}}</div><div class="lbl">在线节点数量</div></div>
-                    <div class="stat-icon" style="background:var(--success-bg);color:var(--success-text)">📡</div>
+                <div class="card stat-item">
+                    <div>
+                        <div class="stat-label">实时下载 (Rx)</div>
+                        <div class="stat-val" id="speed-rx" style="color:#06b6d4">0 B/s</div>
+                    </div>
+                    <div class="stat-icon" style="color:#06b6d4;background:rgba(6,182,212,0.1);border-color:rgba(6,182,212,0.2)"><i class="ri-download-2-line"></i></div>
                 </div>
-                <div class="stat-card">
-                    <div class="stat-info"><div class="val">{{len .Rules}}</div><div class="lbl">运行规则总数</div></div>
-                    <div class="stat-icon" style="background:var(--warning-bg);color:var(--warning-text)">⚡</div>
+                <div class="card stat-item">
+                    <div>
+                        <div class="stat-label">实时上传 (Tx)</div>
+                        <div class="stat-val" id="speed-tx" style="color:#8b5cf6">0 B/s</div>
+                    </div>
+                    <div class="stat-icon" style="color:#8b5cf6;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.2)"><i class="ri-upload-2-line"></i></div>
+                </div>
+                <div class="card stat-item">
+                    <div>
+                        <div class="stat-label">在线节点</div>
+                        <div class="stat-val">{{len .Agents}} <span style="font-size:14px;color:var(--text-sub);font-weight:500">/ {{len .Rules}} 规则</span></div>
+                    </div>
+                    <div class="stat-icon" style="color:#10b981;background:var(--success-bg);border-color:rgba(16,185,129,0.2)"><i class="ri-server-line"></i></div>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <div class="card">
+                    <h3><i class="ri-pulse-line"></i> 实时流量监控 (Tx/Rx)</h3>
+                    <div style="height:320px;width:100%;"><canvas id="trafficChart"></canvas></div>
+                </div>
+                <div class="card">
+                    <h3><i class="ri-pie-chart-line"></i> 流量分布 (Top 5)</h3>
+                    <div style="height:320px;width:100%;display:flex;justify-content:center"><canvas id="pieChart"></canvas></div>
                 </div>
             </div>
 
             <div class="card">
-                <h3 style="display:flex;justify-content:space-between;">
-                    <span>📈 实时网络流量趋势</span>
-                    <span id="current-speed" style="font-size:14px;font-weight:600;color:var(--primary)">0 B/s</span>
-                </h3>
-                <div style="height:250px;width:100%;position:relative;"><canvas id="trafficChart"></canvas></div>
-            </div>
-            
-            <div class="card">
-                <h3>节点状态监控</h3>
-                <div class="table-responsive">
+                <h3><i class="ri-server-line"></i> 节点状态监控</h3>
+                <div class="table-container">
                     {{if .Agents}}
-                    <table><thead><tr><th>节点名称</th><th>IP 地址</th><th>连接状态 / 负载</th><th>操作</th></tr></thead><tbody>
-                    {{range .Agents}}<tr>
-                        <td><div style="font-weight:600;">{{.Name}}</div></td>
-                        <td><span style="font-family:monospace;background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.RemoteIP}}</span></td>
-                        <td><span class="badge">运行正常</span><div id="agent-load-{{.Name}}" style="font-size:11px;color:var(--text-sub);margin-top:4px;font-family:monospace">{{if .SysStatus}}{{.SysStatus}}{{else}}Waiting...{{end}}</div></td>
-                        <td><button class="btn-sm btn-del" onclick="delAgent('{{.Name}}')">🗑️ 卸载</button></td>
-                    </tr>{{end}}
-                    </tbody></table>
-                    {{else}}<div style="text-align:center;padding:40px;color:var(--text-sub)">暂无在线节点</div>{{end}}
-                </div>
-            </div>
-        </div>
-
-        <div id="deploy" class="page">
-            <div class="card">
-                <h3>🛠️ 节点部署向导</h3>
-                <div style="background:var(--bg-hover);padding:20px;border-radius:12px;border:1px solid var(--border)">
-                    <p style="margin-top:0;font-size:14px;color:var(--text-sub)">在您的目标服务器上执行以下命令以安装 Agent。</p>
-                    <div class="grid-form" style="margin-bottom:15px">
-                        <div><label>节点名称</label><input id="agentName" placeholder="例如: HK-Node-1" value="Node-1"></div>
-                        <div><label>连接地址类型</label><select id="addrType"><option value="domain">使用域名 (推荐)</option><option value="v4">使用 IPv4</option><option value="v6">使用 IPv6</option></select></div>
-                    </div>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap">
-                        <button onclick="genCmd()">生成安装命令</button>
-                        <button onclick="copyCmd()" class="btn-sec">📋 复制命令</button>
-                    </div>
-                    <div class="code-box"><pre id="cmdText">等待生成命令...</pre></div>
+                    <table>
+                        <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
+                        <tbody>
+                        {{range .Agents}}
+                        <tr>
+                            <td><span class="status-dot pulse" style="background:#10b981"></span></td>
+                            <td><div style="font-weight:600">{{.Name}}</div></td>
+                            <td><span class="click-copy" onclick="copyText('{{.RemoteIP}}')" style="font-family:monospace;background:var(--bg-body);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer" title="点击复制">{{.RemoteIP}}</span></td>
+                            <td style="width:200px">
+                                <div style="display:flex;align-items:center;gap:10px">
+                                    <div class="progress" style="margin:0;flex:1"><div class="progress-bar" id="load-bar-{{.Name}}" style="width:0%"></div></div>
+                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:monospace;min-width:60px">0.0</span>
+                                </div>
+                            </td>
+                            <td><button class="btn danger icon" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button></td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                    {{else}}
+                    <div style="padding:40px;text-align:center;color:var(--text-sub)"><i class="ri-ghost-line" style="font-size:32px;margin-bottom:10px;display:block"></i>暂无在线节点</div>
+                    {{end}}
                 </div>
             </div>
         </div>
 
         <div id="rules" class="page">
             <div class="card">
-                <h3>➕ 新建转发规则</h3>
+                <h3><i class="ri-add-circle-line"></i> 新建转发规则</h3>
                 <form action="/add" method="POST">
                     <div class="grid-form">
-                        <div class="form-g"><label>备注名称</label><input name="note" placeholder="例如: 公司RDP" required></div>
-                        <div class="form-g"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" placeholder="1000-65535" required></div>
-                        <div class="form-g"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-g"><label>目标地址 (多IP用逗号分隔)</label><input name="target_ip" placeholder="例如: 1.2.3.4, 5.6.7.8" required></div>
-                        <div class="form-g"><label>目标端口</label><input type="number" name="target_port" required></div>
-                        
-                        <div class="form-g"><label>流量限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" value="0" placeholder="0为不限"></div>
-                        <div class="form-g"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" value="0" placeholder="0为不限"></div>
-                        
-                        <div class="form-g"><label>转发协议</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
-                        <div class="form-g" style="align-self:end"><button style="width:100%">立即创建</button></div>
+                        <div class="form-group"><label>备注名称</label><input name="note" placeholder="例如: 远程桌面" required></div>
+                        <div class="form-group"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                        <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" placeholder="1024-65535" required></div>
+                        <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                        <div class="form-group"><label>目标 IP (支持多IP/域名)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1, [ IPV6 ]" required></div>
+                        <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
+                        <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
+                        <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
+                        <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
+                        <div class="form-group"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
                     </div>
                 </form>
             </div>
+
             <div class="card">
-                <h3>📜 规则列表</h3>
-                <div class="table-responsive">
-                    <table><thead><tr><th>备注 / 链路</th><th>目标地址 / 健康状态</th><th>监控 (在线 | 流量)</th><th>状态 / 限速</th><th>操作</th></tr></thead><tbody>
-                    {{range .Rules}}
-                    <tr style="{{if .Disabled}}opacity:0.6;filter:grayscale(100%);{{end}}">
-                        <td>
-                            <div style="font-weight:700;color:var(--text-main);font-size:15px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
-                            <div style="color:var(--text-sub);font-size:12px;margin-top:4px;display:flex;align-items:center;gap:4px">
-                                <span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.EntryAgent}}:{{.EntryPort}}</span><span>➜</span><span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.ExitAgent}}</span>
-                            </div>
-                        </td>
-                        <td style="color:var(--text-sub)">
-                            <div style="font-family:monospace;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{.TargetIP}}:{{.TargetPort}}">{{.TargetIP}}:{{.TargetPort}}</div>
-                            <div style="font-size:11px;margin-top:4px;display:flex;align-items:center;gap:4px">
-                                <span id="rule-status-dot-{{.ID}}" style="width:8px;height:8px;border-radius:50%;background:{{if .Disabled}}#ccc{{else}}var(--warning){{end}}"></span>
-                                <span id="rule-latency-{{.ID}}" style="color:var(--text-sub)">检测中...</span>
-                            </div>
-                        </td>
-                        <td style="min-width:200px">
-                            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span style="font-weight:600;color:var(--primary)">👥 <span id="rule-uc-{{.ID}}">{{.UserCount}}</span></span><span id="rule-traffic-{{.ID}}">{{formatBytes (add .TotalTx .TotalRx)}}</span></div>
-                            {{if gt .TrafficLimit 0}}
-                            <div class="prog-container"><div id="rule-bar-{{.ID}}" class="prog-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%; background:{{if ge (percent .TotalTx .TotalRx .TrafficLimit) 90.0}}var(--danger){{else}}var(--primary){{end}}"></div></div>
-                            <div class="prog-limit"><span id="rule-limit-text-{{.ID}}">已用 {{percent .TotalTx .TotalRx .TrafficLimit | printf "%.1f"}}%</span><span>限额: {{formatBytes .TrafficLimit}}</span></div>
-                            {{else}}
-                            <div class="prog-container" style="background:var(--bg-body)"><div style="width:100%;background:var(--success);height:100%"></div></div><div class="prog-limit"><span>无限制</span></div>
-                            {{end}}
-                        </td>
-                        <td>
-                            <div style="margin-bottom:4px">
+                <h3><i class="ri-list-check"></i> 规则列表</h3>
+                <div class="table-container">
+                    <table>
+                        <thead><tr><th>链路信息</th><th>目标地址</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead>
+                        <tbody>
+                        {{range .Rules}}
+                        <tr style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
+                            <td>
+                                <div style="font-weight:700">{{if .Note}}{{.Note}}{{else}}未命名{{end}}</div>
+                                <div style="font-size:12px;color:var(--text-sub);margin-top:4px;display:flex;align-items:center;gap:5px">
+                                    <span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.EntryAgent}}:{{.EntryPort}}</span> <i class="ri-arrow-right-line"></i> <span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.ExitAgent}}</span>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="font-family:monospace;font-size:13px">{{.TargetIP}}:{{.TargetPort}}</div>
+                                <div style="font-size:11px;margin-top:2px" id="rule-latency-{{.ID}}"><i class="ri-pulse-line"></i> 检测中...</div>
+                            </td>
+                            <td style="min-width:180px">
+                                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+                                    <span><i class="ri-user-line"></i> <span id="rule-uc-{{.ID}}">{{.UserCount}}</span></span>
+                                    <span id="rule-traffic-{{.ID}}" style="font-family:monospace">{{formatBytes (add .TotalTx .TotalRx)}}</span>
+                                </div>
+                                {{if gt .TrafficLimit 0}}
+                                <div class="progress"><div id="rule-bar-{{.ID}}" class="progress-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%"></div></div>
+                                <div style="font-size:10px;color:var(--text-sub);margin-top:2px;display:flex;justify-content:space-between">
+                                    <span id="rule-limit-text-{{.ID}}">已用 {{percent .TotalTx .TotalRx .TrafficLimit | printf "%.1f"}}%</span>
+                                    <span>限额: {{formatBytes .TrafficLimit}}</span>
+                                </div>
+                                {{else}}
+                                <div class="progress"><div class="progress-bar" style="width:100%;background:var(--success)"></div></div>
+                                <div style="font-size:10px;color:var(--text-sub);margin-top:2px">无流量限制</div>
+                                {{end}}
+                            </td>
+                            <td>
                                 {{if .Disabled}}<span class="badge" style="background:var(--border);color:var(--text-sub)">已暂停</span>
                                 {{else if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}<span class="badge danger">流量耗尽</span>
-                                {{else}}<span class="badge">转发中</span>{{end}}
-                            </div>
-                            <div style="font-size:11px;color:var(--text-sub)">限速: {{formatSpeed .SpeedLimit}}</div>
-                        </td>
-                        <td>
-                            <div style="display:flex;gap:8px">
-                                <button class="btn-sm {{if .Disabled}}btn-sec{{end}}" style="{{if not .Disabled}}background:#10b981;{{end}}" onclick="toggleRule('{{.ID}}')">{{if .Disabled}}▶️{{else}}⏸{{end}}</button>
-                                <button class="btn-sm btn-sec" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')">✎</button>
-                                <button class="btn-sm btn-del" onclick="delRule('{{.ID}}')">🗑️</button>
-                                <button class="btn-sm btn-sec" style="padding:6px" onclick="resetTraffic('{{.ID}}')" title="重置流量">🔄</button>
-                            </div>
-                        </td>
-                    </tr>{{end}}
-                    </tbody></table>
+                                {{else}}<span class="badge success"><span class="badge-dot" id="rule-status-dot-{{.ID}}"></span> 运行中</span>{{end}}
+                                <div style="font-size:10px;color:var(--text-sub);margin-top:4px">限速: {{formatSpeed .SpeedLimit}}</div>
+                            </td>
+                            <td>
+                                <div style="display:flex;gap:6px">
+                                    <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置流量"><i class="ri-refresh-line"></i></button>
+                                    <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
+                                </div>
+                            </td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="deploy" class="page">
+            <div class="card">
+                <h3><i class="ri-install-line"></i> 节点安装向导</h3>
+                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。</p>
+                
+                <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);margin-top:20px">
+                    <div class="grid-form" style="margin-bottom:15px">
+                        <div class="form-group"><label>给节点起个名字</label><input id="agentName" value="Node-01"></div>
+                        <div class="form-group"><label>连接方式</label><select id="addrType"><option value="domain">使用域名 ({{.MasterDomain}})</option><option value="v4">使用 IPv4 ({{.MasterIP}})</option><option value="v6">使用 IPv6 ({{.MasterIPv6}})</option></select></div>
+                    </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px">
+                        <button class="btn" onclick="genCmd()"><i class="ri-magic-line"></i> 生成命令</button>
+                        <button class="btn secondary" onclick="copyCmd()"><i class="ri-file-copy-line"></i> 复制命令</button>
+                    </div>
+                    <div style="background:#1e293b;color:#f8fafc;padding:15px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;word-break:break-all;position:relative">
+                        <div id="cmdText" style="opacity:0.7">请先点击“生成命令”按钮...</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1905,176 +2163,225 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
         <div id="logs" class="page">
             <div class="card">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-                    <h3>🛡️ 系统操作日志 <span style="font-size:12px;color:var(--text-sub);font-weight:400;margin-left:10px">最近 200 条</span></h3>
-                    <button class="btn-sec btn-sm" onclick="location.href='/export_logs'">📥 导出日志</button>
+                    <h3><i class="ri-history-line"></i> 系统操作日志</h3>
+                    <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px"><i class="ri-download-line"></i> 导出日志</a>
                 </div>
-                <div class="table-responsive">
-                    <table><thead><tr><th>时间</th><th>操作来源 IP</th><th>动作类型</th><th>详情信息</th></tr></thead>
-                    <tbody id="log-table-body">
-                    {{range .Logs}}<tr>
-                        <td style="color:var(--text-sub);font-family:monospace">{{.Time}}</td>
-                        <td>{{.IP}}</td>
-                        <td><span class="badge" style="background:var(--bg-body);color:var(--text-main)">{{.Action}}</span></td>
-                        <td>{{.Msg}}</td>
-                    </tr>{{end}}
-                    </tbody></table>
+                <div class="table-container">
+                    <table>
+                        <thead><tr><th>时间</th><th>IP 来源</th><th>操作类型</th><th>详情</th></tr></thead>
+                        <tbody id="log-table-body">
+                        {{range .Logs}}
+                        <tr>
+                            <td style="font-family:monospace;color:var(--text-sub)">{{.Time}}</td>
+                            <td>{{.IP}}</td>
+                            <td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">{{.Action}}</span></td>
+                            <td style="color:var(--text-sub)">{{.Msg}}</td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
 
         <div id="settings" class="page">
-            <div class="card" style="max-width:600px">
-                <h3>⚙️ 系统设置</h3>
+            <div class="card" style="max-width:700px">
+                <h3><i class="ri-settings-line"></i> 系统全局设置</h3>
                 <form action="/update_settings" method="POST">
-                    <div style="display:grid;gap:20px">
-                        <div class="form-g"><label>修改登录密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
-                        <div class="form-g"><label>Agent 通信 Token</label><input name="token" value="{{.Token}}"></div>
-                        <div style="background:var(--bg-hover);padding:15px;border-radius:10px;border:1px solid var(--border)">
-                            <div style="margin-bottom:10px;font-weight:600;font-size:14px">📢 Telegram 通知配置</div>
-                            <div class="grid-form" style="grid-template-columns:1fr 1fr;gap:15px">
-                                <div class="form-g"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}" placeholder="123456:ABC-DEF..."></div>
-                                <div class="form-g"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}" placeholder="-100xxxxxxx"></div>
+                    <div class="grid-form" style="grid-template-columns: 1fr;">
+                        <div class="form-group"><label>修改登录密码</label><input type="password" name="password" placeholder="留空则保持不变"></div>
+                        <div class="form-group"><label>通信 Token (Agent 连接凭证)</label><input name="token" value="{{.Token}}"></div>
+                        
+                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border)">
+                            <h4 style="margin:0 0 15px 0;font-size:14px"><i class="ri-telegram-line"></i> Telegram 通知配置</h4>
+                            <div class="grid-form" style="gap:15px">
+                                <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}" placeholder="123456:ABC-DEF..."></div>
+                                <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}" placeholder="-100xxxxxxx"></div>
                             </div>
                         </div>
-                        <div class="form-g"><label>面板域名 (用于生成命令)</label><input name="master_domain" value="{{.MasterDomain}}" placeholder="例如: relay.example.com"></div>
-                        <div class="grid-form" style="grid-template-columns:1fr 1fr;gap:20px">
-                            <div class="form-g"><label>面板 IPv4</label><input name="master_ip" value="{{.MasterIP}}"></div>
-                            <div class="form-g"><label>面板 IPv6</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
+
+                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+                            <div>
+                                <h4 style="margin:0 0 5px 0;font-size:14px"><i class="ri-shield-keyhole-line"></i> 双因素认证 (2FA)</h4>
+                                <div style="font-size:12px;color:var(--text-sub)">增加账户安全性，登录时需验证 OTP 动态码</div>
+                            </div>
+                            <div>
+                                {{if .Config.TwoFAEnabled}}
+                                <button type="button" class="btn danger" onclick="disable2FA()">关闭 2FA</button>
+                                {{else}}
+                                <button type="button" class="btn" onclick="enable2FA()">开启 2FA</button>
+                                {{end}}
+                            </div>
                         </div>
-                        <div style="display:flex;gap:15px">
-                            <button style="flex:1">💾 保存配置</button>
-                            <button type="button" class="btn-sec" style="flex:1" onclick="location.href='/download_config'">📂 导出备份</button>
+
+                        <div class="grid-form" style="gap:15px">
+                            <div class="form-group"><label>面板域名</label><input name="master_domain" value="{{.MasterDomain}}"></div>
+                            <div class="form-group"><label>面板 IP (IPv4)</label><input name="master_ip" value="{{.MasterIP}}"></div>
+                            <div class="form-group"><label>面板 IP (IPv6)</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
+                        </div>
+
+                        <div style="display:flex;gap:15px;margin-top:10px">
+                            <button class="btn" style="flex:1"><i class="ri-save-3-line"></i> 保存配置</button>
+                            <a href="/download_config" class="btn" style="flex:1"><i class="ri-download-cloud-2-line"></i> 备份配置</a>
                         </div>
                     </div>
                 </form>
-                <div style="margin-top:30px;padding-top:20px;border-top:1px solid var(--border);text-align:center">
-                     <a href="/logout" style="color:var(--danger);text-decoration:none;font-size:14px;font-weight:600">退出登录</a>
-                </div>
             </div>
         </div>
     </div>
 </div>
 
-<div class="bottom-nav">
-    <div class="nav-item active" onclick="nav('dashboard',this)"><div class="nav-icon">📊</div><div>概览</div></div>
-    <div class="nav-item" onclick="nav('deploy',this)"><div class="nav-icon">🚀</div><div>部署</div></div>
-    <div class="nav-item" onclick="nav('rules',this)"><div class="nav-icon">🔗</div><div>规则</div></div>
-    <div class="nav-item" onclick="nav('logs',this)"><div class="nav-icon">🛡️</div><div>日志</div></div>
-    <div class="nav-item" onclick="nav('settings',this)"><div class="nav-icon">⚙️</div><div>设置</div></div>
+<div class="mobile-nav">
+    <div class="nav-btn active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i><span>概览</span></div>
+    <div class="nav-btn" onclick="nav('rules',this)"><i class="ri-route-line"></i><span>规则</span></div>
+    <div class="nav-btn" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i><span>部署</span></div>
+    <div class="nav-btn" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i><span>日志</span></div>
+    <div class="nav-btn" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i><span>设置</span></div>
 </div>
 
 <div id="editModal" class="modal">
     <div class="modal-content">
-        <span class="close" onclick="closeEdit()">&times;</span><h3>修改转发规则</h3>
+        <span class="close-modal" onclick="closeEdit()">&times;</span>
+        <h3 style="margin-top:0">修改规则</h3>
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
-            <div class="grid-form">
-                <div class="form-g"><label>备注名称</label><input name="note" id="e_note" required></div>
-                <div class="form-g"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                <div class="form-g"><label>入口端口</label><input type="number" name="entry_port" id="e_eport" required></div>
-                <div class="form-g"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                <div class="form-g"><label>目标地址 (多IP用逗号分隔)</label><input name="target_ip" id="e_tip" placeholder="例如: 1.2.3.4, 5.6.7.8" required></div>
-                <div class="form-g"><label>目标端口</label><input type="number" name="target_port" id="e_tport" required></div>
-                
-                <div class="form-g"><label>流量限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
-                <div class="form-g"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
-                
-                <div class="form-g"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-                <div class="form-g" style="grid-column: 1 / -1"><button style="width:100%">保存修改</button></div>
+            <div class="grid-form" style="grid-template-columns: 1fr 1fr;">
+                <div class="form-group" style="grid-column: 1/-1"><label>备注</label><input name="note" id="e_note"></div>
+                <div class="form-group"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" id="e_eport"></div>
+                <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
+                <div class="form-group" style="grid-column: 1/-1"><label>目标地址</label><input name="target_ip" id="e_tip"></div>
+                <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
+                <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
+                <div class="form-group"><label>流量限额</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
+                <div class="form-group"><label>带宽限速</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
+                <div class="form-group" style="grid-column: 1/-1;margin-top:10px"><button class="btn" style="width:100%">保存修改</button></div>
             </div>
         </form>
     </div>
 </div>
 
 <div id="confirmModal" class="modal">
-    <div class="modal-content" style="max-width: 400px;">
-        <div class="confirm-modal-body">
-            <div class="confirm-icon" id="c_icon">⚠️</div>
-            <div class="confirm-title" id="c_title">确认操作</div>
-            <div class="confirm-text" id="c_msg">您确定要继续吗？</div>
-            <div class="confirm-actions"><button class="btn-sec" onclick="closeConfirm()">取消</button><button id="c_btn" class="btn-del">确认删除</button></div>
+    <div class="modal-content" style="max-width:360px;text-align:center;padding-top:40px">
+        <div style="font-size:48px;margin-bottom:16px" id="c_icon">⚠️</div>
+        <h3 style="justify-content:center;margin-bottom:10px" id="c_title">确认操作</h3>
+        <p style="color:var(--text-sub);margin-bottom:24px;line-height:1.5" id="c_msg"></p>
+        <div style="display:flex;gap:10px">
+            <button class="btn secondary" style="flex:1" onclick="closeConfirm()">取消</button>
+            <button id="c_btn" class="btn danger" style="flex:1">确认</button>
         </div>
     </div>
 </div>
 
+<div id="twoFAModal" class="modal">
+    <div class="modal-content" style="text-align:center;max-width:350px">
+        <span class="close-modal" onclick="document.getElementById('twoFAModal').style.display='none'">&times;</span>
+        <h3 style="justify-content:center">绑定 2FA</h3>
+        <p style="font-size:13px;color:var(--text-sub)">请使用 Google Authenticator 扫描下方二维码</p>
+        <img id="qrImage" style="width:200px;height:200px;border-radius:12px;margin:10px 0 20px 0;border:1px solid var(--border)">
+        <input id="twoFACode" placeholder="输入 6 位验证码" style="text-align:center;letter-spacing:4px;font-size:18px;margin-bottom:15px">
+        <button class="btn" onclick="verify2FA()" style="width:100%">验证并开启</button>
+    </div>
+</div>
+
 <script>
-    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}";
-    
+    // --- 核心逻辑 ---
+    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+
     function nav(id, el) {
-        window.location.hash = id;
-        document.querySelectorAll('.page').forEach(e=>e.classList.remove('active'));
+        document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
-        var titleMap = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'settings':'系统设置', 'logs':'操作日志'};
-        document.querySelector('.header-title').innerText = titleMap[id] || 'GoRelay';
-        document.querySelectorAll('.sidebar .item').forEach(e => {
-            if(e.onclick.toString().includes(id)) e.classList.add('active'); else e.classList.remove('active');
-        });
-        document.querySelectorAll('.bottom-nav .nav-item').forEach(e => {
-            if(e.onclick.toString().includes(id)) e.classList.add('active'); else e.classList.remove('active');
-        });
+        
+        const titles = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'logs':'系统日志', 'settings':'系统设置'};
+        const icons = {'dashboard':'ri-dashboard-3-line', 'deploy':'ri-rocket-2-line', 'rules':'ri-route-line', 'logs':'ri-file-list-3-line', 'settings':'ri-settings-4-line'};
+        document.getElementById('page-text').innerText = titles[id];
+        document.getElementById('page-icon').className = icons[id];
+        
+        document.querySelectorAll('.sidebar .item').forEach(i => i.classList.remove('active'));
+        if (el) el.classList.add('active');
+        else { const t = document.querySelector('.sidebar .item[onclick*="'+id+'"]'); if(t) t.classList.add('active'); }
+        
+        document.querySelectorAll('.mobile-nav .nav-btn').forEach(b => b.classList.remove('active'));
+        const mBtn = document.querySelector('.mobile-nav .nav-btn[onclick*="'+id+'"]');
+        if(mBtn) mBtn.classList.add('active');
+
+        if(location.hash !== '#'+id) { if(history.pushState) history.pushState(null,null,'#'+id); else location.hash = '#'+id; }
+    }
+    
+    function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
+    initTab();
+
+    // 复制文本
+    function copyText(txt) {
+        if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制: "+txt, "success"));
+        else {
+            const ta = document.createElement("textarea"); ta.value = txt; ta.style.position="fixed"; ta.style.left="-9999px";
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            try { document.execCommand('copy'); showToast("已复制", "success"); } catch(e) { showToast("复制失败", "warn"); }
+            document.body.removeChild(ta);
+        }
     }
 
+    // 主题切换
     function toggleTheme() {
         const html = document.documentElement;
-        const current = html.getAttribute('data-theme');
-        const next = current === 'dark' ? 'light' : 'dark';
+        const curr = html.getAttribute('data-theme');
+        const next = curr === 'dark' ? 'light' : 'dark';
         html.setAttribute('data-theme', next);
         localStorage.setItem('theme', next);
+        updateChartTheme(next);
+        document.getElementById('theme-icon').className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     }
-    const saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    document.documentElement.setAttribute('data-theme', saved);
+    const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
 
+    // Toast 提示
     function showToast(msg, type) {
-        var box = document.getElementById('toast');
-        var icon = document.getElementById('t-icon');
+        const box = document.getElementById('toast');
+        const icon = document.getElementById('t-icon');
         document.getElementById('t-msg').innerText = msg;
-        if(msg.includes('✅') || msg.includes('📋')) icon.innerText = ''; else if(msg.includes('🚀')) icon.innerText = '';
-        box.classList.add('show');
-        if(type === 'warn') box.style.background = 'rgba(245, 158, 11, 0.9)'; else box.style.background = 'rgba(0,0,0,0.8)';
-        setTimeout(() => { box.classList.remove('show'); }, 3000);
+        box.className = 'toast show';
+        if(type === 'warn') { icon.className = 'ri-error-warning-line'; box.style.background = 'var(--warning-bg)'; box.style.color = 'var(--warning-text)'; }
+        else if(type === 'success') { icon.className = 'ri-checkbox-circle-line'; box.style.background = '#10b981'; box.style.color = '#fff'; }
+        else { icon.className = 'ri-information-line'; box.style.background = '#0f172a'; box.style.color = '#fff'; }
+        setTimeout(() => box.className = 'toast', 3000);
     }
 
-    function showConfirm(title, msg, type, callback) {
+    // 确认框
+    function showConfirm(title, msg, type, cb) {
         document.getElementById('c_title').innerText = title;
-        document.getElementById('c_msg').innerHTML = msg; 
-        const icon = document.getElementById('c_icon'); const btn = document.getElementById('c_btn');
-        if (type === 'danger') { icon.innerText = '🚨'; btn.className = 'btn-del'; btn.innerText = '确认删除'; } 
-        else { icon.innerText = '🤔'; btn.className = ''; btn.innerText = '确认'; }
-        btn.onclick = function() { closeConfirm(); if(callback) callback(); };
+        document.getElementById('c_msg').innerHTML = msg;
+        const btn = document.getElementById('c_btn');
+        const icon = document.getElementById('c_icon');
+        if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
+        else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '🤔'; }
+        btn.onclick = function() { closeConfirm(); cb(); };
         document.getElementById('confirmModal').style.display = 'block';
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
+    // 部署命令逻辑
     function genCmd() {
-        var n = document.getElementById('agentName').value;
-        var t = document.getElementById('addrType').value;
-        var host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
-        if(!host || host === "[]") { alert("请在设置中配置 Master 地址"); return; }
-        var cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
+        const n = document.getElementById('agentName').value;
+        const t = document.getElementById('addrType').value;
+        const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
+        if(!host || host === "[]") { showToast("请先配置 Master 地址", "warn"); return; }
+        let cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
+        if(is_tls) cmd += ' -tls';
         document.getElementById('cmdText').innerText = cmd;
+        document.getElementById('cmdText').style.opacity = '1';
+        showToast("命令已生成", "success");
     }
-    
-    function copyCmd() {
-        var t = document.getElementById('cmdText').innerText;
-        if (!t || t.indexOf("curl") === -1) { showToast('⚠️ 请先点击生成命令'); return; }
-        if (navigator.clipboard && window.isSecureContext) {
-            navigator.clipboard.writeText(t).then(()=>showToast('✅ 命令已复制'), ()=>showToast('❌ 复制失败'));
-        } else {
-            try { var ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); showToast('✅ 命令已复制'); } catch (e) { showToast('❌ 复制失败'); }
-        }
-    }
+    function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
-    function delAgent(name) {
-        showConfirm("卸载节点确认", "即将卸载节点 <b>"+name+"</b>。<br>此操作无法恢复。", "danger", function() {
-            showToast('🚀 发送自毁指令...', 'warn');
-            setTimeout(function(){ location.href = "/delete_agent?name=" + name; }, 800);
-        });
-    }
+    // 规则操作
+    function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，确定吗？", "danger", () => location.href="/delete?id="+id); }
+    function toggleRule(id) { location.href="/toggle?id="+id; }
+    function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的流量统计吗？", "normal", () => location.href="/reset_traffic?id="+id); }
+    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>这将向节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
-    function delRule(id) { showConfirm("删除规则确认", "确定删除此规则吗？<br>端口将立即停止转发。", "danger", function() { location.href = "/delete?id=" + id; }); }
-    function toggleRule(id) { location.href = "/toggle?id=" + id; }
-    function resetTraffic(id) { showConfirm("重置流量", "确定清零此规则的统计流量吗？", "normal", function() { location.href = "/reset_traffic?id=" + id; }); }
-
+    // 编辑
     function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_note').value = note;
@@ -2084,93 +2391,191 @@ pre { background: #1e293b; color: #f8fafc; padding: 20px; border-radius: 12px; f
         document.getElementById('e_tip').value = tip;
         document.getElementById('e_tport').value = tport;
         document.getElementById('e_proto').value = proto;
-        document.getElementById('e_limit').value = (parseFloat(limit) / (1024*1024*1024)).toFixed(2);
-        document.getElementById('e_speed').value = (parseFloat(speed) / (1024*1024)).toFixed(1);
-        document.getElementById('editModal').style.display = "block";
+        document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
+        document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
+        document.getElementById('editModal').style.display = 'block';
     }
-    function closeEdit() { document.getElementById('editModal').style.display = "none"; }
-    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); } }
-    if(location.hash) { nav(location.hash.substring(1)); }
-    
-    function formatBytes(b) {
-        const u = 1024;
-        if (b < u) return b + " B";
-        var div = u, exp = 0;
-        while(b / u >= div) { div *= u; exp++; }
-        return (b / div).toFixed(2) + " " + "KMGTPE"[exp] + "B";
-    }
+    function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
+    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); document.getElementById('twoFAModal').style.display='none'; } }
 
+    // 2FA
+    var tempSecret = "";
+    function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
+    function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else alert("验证码错误"); }); }
+    function disable2FA() { showConfirm("关闭 2FA", "关闭后账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
+
+    // --- Chart.js: 实时流量 (双线: Tx, Rx) ---
     var ctx = document.getElementById('trafficChart').getContext('2d');
+    
+    // 创建渐变
+    var txGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.4)'); // Violet
+    txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
+    
+    var rxGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.4)'); // Cyan
+    rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
+
     var chart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: Array(60).fill(''),
-            datasets: [{ label: '实时速率', data: Array(60).fill(0), borderColor: '#6366f1', backgroundColor: 'rgba(99, 102, 241, 0.1)', borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 }]
+            labels: Array(30).fill(''),
+            datasets: [
+                {
+                    label: '上传 (Tx)',
+                    data: Array(30).fill(0),
+                    borderColor: '#8b5cf6',
+                    backgroundColor: txGrad,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                },
+                {
+                    label: '下载 (Rx)',
+                    data: Array(30).fill(0),
+                    borderColor: '#06b6d4',
+                    backgroundColor: rxGrad,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                }
+            ]
         },
         options: {
-            responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
-            scales: { x: { display: false }, y: { beginAtZero: true, grid: { color: 'rgba(200, 200, 200, 0.1)' }, ticks: { callback: function(val) { return formatBytes(val) + '/s'; } } } },
-            animation: { duration: 0 }
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: true }, tooltip: { mode: 'index', intersect: false } },
+            scales: {
+                x: { display: false },
+                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.1)', borderDash: [5, 5] }, ticks: { callback: v => formatBytes(v)+'/s', color: '#94a3b8' } }
+            },
+            animation: { duration: 0 },
+            interaction: { mode: 'nearest', axis: 'x', intersect: false }
         }
     });
 
-    function connectWS() {
-        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var ws = new WebSocket(proto + '//' + location.host + '/ws');
-        ws.onmessage = function(event) {
-            try {
-                var msg = JSON.parse(event.data);
-                if (msg.type === 'stats' && msg.data) {
-                    var d = msg.data;
-                    var totalEl = document.getElementById('stat-total-traffic'); if(totalEl) totalEl.innerText = formatBytes(d.total_traffic);
-                    var speedEl = document.getElementById('current-speed'); if(speedEl) speedEl.innerText = formatBytes(d.current_speed) + '/s';
+    // --- Chart.js: 流量占比饼图 ---
+    var ctxPie = document.getElementById('pieChart').getContext('2d');
+    var pieChart = new Chart(ctxPie, {
+        type: 'doughnut',
+        data: {
+            labels: [],
+            datasets: [{
+                data: [],
+                backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { position: 'right', labels: { color: '#94a3b8', boxWidth: 12 } } },
+            cutout: '70%'
+        }
+    });
 
-                    chart.data.datasets[0].data.push(d.current_speed);
+    function updateChartTheme(theme) {
+        chart.options.scales.y.grid.color = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        chart.update();
+    }
+
+    // --- WS 数据处理 ---
+    function formatBytes(b) {
+        if(b==0) return "0 B";
+        const u = 1024, i = Math.floor(Math.log(b)/Math.log(u));
+        return parseFloat((b / Math.pow(u, i)).toFixed(2)) + " " + ["B","KB","MB","GB","TB"][i];
+    }
+
+    function connectWS() {
+        const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
+        ws.onmessage = function(e) {
+            try {
+                const msg = JSON.parse(e.data);
+                if(msg.type === 'stats' && msg.data) {
+                    const d = msg.data;
+                    document.getElementById('stat-total-traffic').innerText = formatBytes(d.total_traffic);
+                    
+                    // 实时速度
+                    document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
+                    document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
+                    
+                    // 更新线图
+                    chart.data.datasets[0].data.push(d.speed_tx);
                     chart.data.datasets[0].data.shift();
+                    chart.data.datasets[1].data.push(d.speed_rx);
+                    chart.data.datasets[1].data.shift();
                     chart.update();
 
-                    if(d.agents) { d.agents.forEach(function(a) { var el = document.getElementById('agent-load-' + a.name); if(el) el.innerText = a.sys_status; }); }
+                    // 更新饼图 (Top 5 流量规则)
+                    if (d.rules) {
+                        const sortedRules = [...d.rules].sort((a,b) => b.total - a.total).slice(0, 5);
+                        pieChart.data.labels = sortedRules.map(r => r.name || '未命名');
+                        pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
+                        pieChart.update();
+                    }
+
+                    // 更新节点负载
+                    if(d.agents) d.agents.forEach(a => {
+                        const loadText = document.getElementById('load-text-'+a.name);
+                        const loadBar = document.getElementById('load-bar-'+a.name);
+                        if(loadText && loadBar) {
+                            let loadStr = a.sys_status; 
+                            // 简单解析 Load: 0.05 | Mem ...
+                            let loadVal = 0;
+                            if(loadStr.includes("Load:")) {
+                                let parts = loadStr.split("|");
+                                loadVal = parseFloat(parts[0].replace("Load:", "").trim()) || 0;
+                            }
+                            loadText.innerText = loadVal.toFixed(2);
+                            let pct = loadVal * 20; // 假设 Load 5 = 100%
+                            if (pct > 100) pct = 100;
+                            loadBar.style.width = pct + "%";
+                            loadBar.style.background = pct > 80 ? "#ef4444" : "#6366f1";
+                        }
+                    });
+                    
+                    // 更新规则列表状态
                     if(d.rules) {
-                        d.rules.forEach(function(r) {
-                            var trafEl = document.getElementById('rule-traffic-' + r.id); if(trafEl) trafEl.innerText = formatBytes(r.total);
-                            var ucEl = document.getElementById('rule-uc-' + r.id); if(ucEl) ucEl.innerText = r.uc;
+                        d.rules.forEach(r => {
+                            const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
+                            const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
+                            const lat = document.getElementById('rule-latency-'+r.id);
+                            const dot = document.getElementById('rule-status-dot-'+r.id);
                             
-                            var dot = document.getElementById('rule-status-dot-' + r.id);
-                            var lat = document.getElementById('rule-latency-' + r.id);
-                            if(dot && lat) {
+                            if(lat && dot) {
                                 if(r.status) {
-                                    dot.style.background = '#10b981';
-                                    lat.innerText = r.latency + ' ms';
-                                    lat.style.color = 'var(--text-sub)';
+                                    lat.innerHTML = '<i class="ri-pulse-line" style="color:#10b981"></i> ' + r.latency + ' ms';
+                                    dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="badge-dot"></span> 正常';
                                 } else {
-                                    dot.style.background = '#ef4444';
-                                    lat.innerText = '离线';
-                                    lat.style.color = '#ef4444';
+                                    lat.innerHTML = '<i class="ri-error-warning-line" style="color:#ef4444"></i> 离线';
+                                    dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="badge-dot"></span> 异常';
                                 }
                             }
-
                             if(r.limit > 0) {
-                                var pct = (r.total / r.limit) * 100; if(pct > 100) pct = 100;
-                                var bar = document.getElementById('rule-bar-' + r.id); if(bar) { bar.style.width = pct + '%'; if(pct >= 90) bar.style.background = 'var(--danger)'; else bar.style.background = 'var(--primary)'; }
-                                var txt = document.getElementById('rule-limit-text-' + r.id); if(txt) txt.innerText = '已用 ' + pct.toFixed(1) + '%';
+                                let pct = (r.total / r.limit) * 100; if(pct > 100) pct = 100;
+                                const bar = document.getElementById('rule-bar-'+r.id);
+                                if(bar) { bar.style.width = pct + '%'; bar.style.background = pct > 90 ? '#ef4444' : '#6366f1'; }
+                                const txt = document.getElementById('rule-limit-text-'+r.id);
+                                if(txt) txt.innerText = '已用 ' + pct.toFixed(1) + '%';
                             }
                         });
                     }
+
                     if(d.logs && document.getElementById('logs').classList.contains('active')) {
-                        var tbody = document.getElementById('log-table-body');
-                        var html = '';
-                        d.logs.forEach(function(l) {
-                            html += '<tr><td style="color:var(--text-sub);font-family:monospace">' + l.time + '</td>' +
-                                    '<td>' + l.ip + '</td>' +
-                                    '<td><span class="badge" style="background:var(--bg-body);color:var(--text-main)">' + l.action + '</span></td>' +
-                                    '<td>' + l.msg + '</td></tr>';
+                        const tbody = document.getElementById('log-table-body');
+                        let html = '';
+                        d.logs.forEach(l => {
+                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td>'+
+                                    '<td>'+l.ip+'</td>'+
+                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td>'+
+                                    '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
                     }
                 }
-            } catch(e) {}
+            } catch(err) { console.log(err); }
         };
-        ws.onclose = function() { setTimeout(connectWS, 3000); };
+        ws.onclose = () => setTimeout(connectWS, 3000);
     }
     connectWS();
 </script>
