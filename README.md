@@ -162,6 +162,7 @@ Master (面板) 维护：
  * 安全性：请务必保管好您的 通信 Token，任何拥有 Token 的人都可以接入您的网络。
 # 界面效果
 <img width="1634" height="995" alt="b73ed6c5-d7af-4288-8b56-a0ccfea7b05e" src="https://github.com/user-attachments/assets/a68cf8f3-d5e0-4197-a546-45ed30a2f479" />
-<img width="1640" height="986" alt="dff4dfaf-a2ca-4fa5-a00f-8ecb845fbcb2" src="https://github.com/user-attachments/assets/09b45ae1-c775-4843-9be3-a4b0bddc0f16" />
+<img width="1640" height="986" alt="78ed34f0-ec0a-4668-aff5-f181fcf7d586" src="https://github.com/user-attachments/assets/af387dc1-509e-4710-b5c5-77804b7e4f7e" />
+
 
 
