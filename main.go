@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
@@ -47,16 +46,16 @@ import (
 // --- 配置与常量 ---
 
 const (
-	DBFile      = "data.db"
-	ConfigFile  = "config.json"
-	ControlPort = ":9999"
-	WebPort     = ":8888"
-	DownloadURL = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
-
-	TCPKeepAlive   = 60 * time.Second
-	UDPBufferSize  = 4 * 1024 * 1024
-	CopyBufferSize = 32 * 1024
-	MaxLogEntries  = 200
+	DBFile          = "data.db"
+	ConfigFile      = "config.json"
+	ControlPort     = ":9999"
+	WebPort         = ":8888"
+	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
+	TCPKeepAlive    = 60 * time.Second
+	UDPBufferSize   = 4 * 1024 * 1024
+	CopyBufferSize  = 32 * 1024
+	MaxLogEntries   = 200
+	MaxLogRetention = 1000 // 自动清理：最多保留 1000 条日志
 )
 
 var bufPool = sync.Pool{
@@ -109,8 +108,8 @@ type AppConfig struct {
 	TgChatID     string        `json:"tg_chat_id"`
 	TwoFAEnabled bool          `json:"two_fa_enabled"`
 	TwoFASecret  string        `json:"two_fa_secret"`
-	Rules        []LogicalRule `json:"saved_rules"` 
-	Logs         []OpLog       `json:"logs"`        
+	Rules        []LogicalRule `json:"saved_rules"`
+	Logs         []OpLog       `json:"logs"`
 }
 
 type ForwardTask struct {
@@ -189,7 +188,6 @@ var (
 	config           AppConfig
 	agents           = make(map[string]*AgentInfo)
 	rules            = make([]LogicalRule, 0)
-	opLogs           = make([]OpLog, 0)
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
@@ -211,7 +209,7 @@ var (
 	useTLS      bool = false
 )
 
-// --- 数据库初始化与迁移逻辑 ---
+// --- 数据库初始化与优化 ---
 
 const dbSchema = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -249,6 +247,15 @@ func initDB() {
 		log.Fatalf("❌ 无法打开数据库文件: %v", err)
 	}
 
+	// 优化：设置连接池上限
+	db.SetMaxOpenConns(1)
+
+	// 优化：WAL 模式与文件大小管理
+	db.Exec("PRAGMA journal_mode=WAL;")
+	db.Exec("PRAGMA journal_size_limit = 10485760;") // 限制 WAL 文件为 10MB
+	db.Exec("PRAGMA wal_autocheckpoint = 100;")      // 每 100 页尝试自动检查点
+	db.Exec("PRAGMA synchronous = NORMAL;")          // WAL 模式下的最佳平衡设置
+
 	if _, err := db.Exec(dbSchema); err != nil {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
@@ -263,7 +270,7 @@ func initDB() {
 }
 
 func migrateOldData() {
-	log.Println("🚚 检测到旧配置文件，正在执行无感迁移至 SQLite...")
+	log.Println("🚚 执行旧配置迁移...")
 	data, err := os.ReadFile(ConfigFile)
 	if err != nil {
 		return
@@ -295,13 +302,7 @@ func migrateOldData() {
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
 	}
-
-	for _, l := range old.Logs {
-		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", l.Time, l.IP, l.Action, l.Msg)
-	}
-
 	_ = os.Rename(ConfigFile, ConfigFile+".bak")
-	log.Println("✅ 迁移成功。旧文件已备份。")
 }
 
 // --- 基础工具函数 ---
@@ -341,7 +342,6 @@ func recordLoginFail(ip string) {
 	loginAttempts.Store(ip, count)
 	if count >= 5 {
 		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
-		log.Printf("IP %s 因多次登录失败被封禁15分钟", ip)
 	}
 }
 
@@ -351,7 +351,6 @@ func autoGenerateCert() error {
 			return nil
 		}
 	}
-	log.Println("🛠️ 未检测到 SSL 证书，正在自动生成自签证书...")
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
@@ -374,13 +373,6 @@ func autoGenerateCert() error {
 		BasicConstraintsValid: true,
 	}
 	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
-	if addrs, err := net.InterfaceAddrs(); err == nil {
-		for _, addr := range addrs {
-			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-				template.IPAddresses = append(template.IPAddresses, ipnet.IP)
-			}
-		}
-	}
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
 		return err
@@ -391,7 +383,6 @@ func autoGenerateCert() error {
 	keyOut, _ := os.OpenFile("server.key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 	keyOut.Close()
-	log.Println("✅ 自签证书已成功生成 (server.crt & server.key)")
 	return nil
 }
 
@@ -404,7 +395,7 @@ func main() {
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
 	serviceOp := flag.String("service", "", "install | uninstall")
-	tlsFlag := flag.Bool("tls", false, "使用 TLS 加密连接 (Agent模式)")
+	tlsFlag := flag.Bool("tls", false, "使用 TLS 加密连接")
 	flag.Parse()
 
 	if *serviceOp != "" {
@@ -526,7 +517,7 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 }
 
 func doSelfUninstall() {
-	log.Println("开始执行自毁程序...")
+	log.Println("执行自毁程序...")
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		exec.Command("systemctl", "disable", "gorelay").Run()
 		os.Remove("/etc/systemd/system/gorelay.service")
@@ -569,9 +560,14 @@ func runMaster() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
+			// 定时刷盘
 			if atomic.CompareAndSwapInt32(&configDirty, 1, 0) {
 				saveConfig()
 			}
+			// 定时清理旧日志
+			cleanOldLogs()
+			// 强制截断并重置 WAL 文件大小
+			db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		}
 	}()
 	go broadcastLoop()
@@ -585,7 +581,7 @@ func runMaster() {
 					tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
 					ln, err = tls.Listen("tcp", ControlPort, tlsConfig)
 					if err == nil {
-						log.Println("🔐 Master 已启用 TLS 加密模式 (端口:9999)")
+						log.Println("🔐 Master 已启用 TLS 模式 (端口:9999)")
 						isMasterTLS = true
 					}
 				}
@@ -596,7 +592,7 @@ func runMaster() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			log.Println("⚠️ Master 正在使用明文 TCP 模式")
+			log.Println("⚠️ Master 已启用 TCP 模式")
 		}
 		for {
 			c, err := ln.Accept()
@@ -676,12 +672,16 @@ func broadcastLoop() {
 		}
 		mu.Unlock()
 
+		// 修复：必须 rows.Close()，否则 Web 掉线
 		var logData []OpLog
-		lRows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
-		for lRows.Next() {
-			var l OpLog
-			lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-			logData = append(logData, l)
+		lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+		if err == nil {
+			for lRows.Next() {
+				var l OpLog
+				lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				logData = append(logData, l)
+			}
+			lRows.Close()
 		}
 
 		var speedTx int64 = 0
@@ -729,17 +729,24 @@ func handleAgentConn(conn net.Conn) {
 	defer conn.Close()
 	dec := json.NewDecoder(conn)
 	var msg Message
-	if dec.Decode(&msg) != nil || msg.Type != "auth" {
+	if err := dec.Decode(&msg); err != nil || msg.Type != "auth" {
 		return
 	}
+
 	data, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		return
+	}
+	reqToken, _ := data["token"].(string)
+	name, _ := data["name"].(string)
+
 	mu.Lock()
 	tk := config.AgentToken
 	mu.Unlock()
-	if !ok || data["token"].(string) != tk {
+	if reqToken != tk || name == "" {
 		return
 	}
-	name := data["name"].(string)
+
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	mu.Lock()
 	if old, exists := agents[name]; exists {
@@ -747,10 +754,11 @@ func handleAgentConn(conn net.Conn) {
 	}
 	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn}
 	mu.Unlock()
-	log.Printf("Agent上线: %s (%s)", name, remoteIP)
+	log.Printf("Agent上线: %s", name)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
-	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s\nIP: %s\n时间: %s", name, remoteIP, time.Now().Format("15:04:05")))
+	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s", name))
 	pushConfigToAll()
+
 	for {
 		var m Message
 		if dec.Decode(&m) != nil {
@@ -771,18 +779,12 @@ func handleAgentConn(conn net.Conn) {
 				mu.Unlock()
 			}
 		}
-		if m.Type == "uninstalling" {
-			log.Printf("Agent [%s] 正在卸载...", name)
-			addSystemLog(remoteIP, "Agent 卸载", fmt.Sprintf("节点 %s 正在执行自毁", name))
-		}
 	}
 	mu.Lock()
 	if curr, ok := agents[name]; ok && curr.Conn == conn {
 		delete(agents, name)
 		mu.Unlock()
-		log.Printf("Agent下线: %s", name)
-		addSystemLog(remoteIP, "Agent 下线", fmt.Sprintf("节点 %s 连接断开", name))
-		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s\n时间: %s", name, time.Now().Format("15:04:05")))
+		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", name))
 	} else {
 		mu.Unlock()
 	}
@@ -792,8 +794,9 @@ func handleStatsReport(payload interface{}) {
 	d, _ := json.Marshal(payload)
 	var reports []TrafficReport
 	json.Unmarshal(d, &reports)
-	
+
 	mu.Lock()
+	defer mu.Unlock()
 	limitTriggered := false
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_entry") {
@@ -803,7 +806,8 @@ func handleStatsReport(payload interface{}) {
 					rules[i].TotalTx += rep.TxDelta
 					rules[i].TotalRx += rep.RxDelta
 					rules[i].UserCount = rep.UserCount
-					atomic.StoreInt32(&configDirty, 1)
+					atomic.StoreInt32(&configDirty, 1) // 标记脏数据
+
 					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
 						limitTriggered = true
 					}
@@ -812,10 +816,6 @@ func handleStatsReport(payload interface{}) {
 			}
 		}
 	}
-	// 在锁内保存，使用 NoLock 版本
-	saveConfigNoLock()
-	mu.Unlock()
-
 	if limitTriggered {
 		go pushConfigToAll()
 	}
@@ -832,13 +832,8 @@ func handleHealthReport(payload interface{}) {
 			rid := strings.TrimSuffix(rep.TaskID, "_exit")
 			for i := range rules {
 				if rules[i].ID == rid {
-					if rep.Latency >= 0 {
-						rules[i].TargetStatus = true
-						rules[i].TargetLatency = rep.Latency
-					} else {
-						rules[i].TargetStatus = false
-						rules[i].TargetLatency = 0
-					}
+					rules[i].TargetStatus = (rep.Latency >= 0)
+					rules[i].TargetLatency = rep.Latency
 					break
 				}
 			}
@@ -897,7 +892,6 @@ func pushConfigToAll() {
 // ================= WEB HANDLERS =================
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-cache")
 	mu.Lock()
 	al := make([]AgentInfo, 0)
 	for _, a := range agents {
@@ -912,11 +906,14 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	var displayLogs []OpLog
-	rows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
-	for rows.Next() {
-		var l OpLog
-		rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-		displayLogs = append(displayLogs, l)
+	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var l OpLog
+			rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+			displayLogs = append(displayLogs, l)
+		}
 	}
 
 	mu.Lock()
@@ -997,7 +994,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		config.WebPass = salt + "$" + pwdHash
 		config.AgentToken = r.FormValue("token")
 		config.IsSetup = true
-		saveConfigNoLock() // 修正：在锁内调用不带锁的保存函数
+		saveConfigNoLock()
 		mu.Unlock()
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -1017,7 +1014,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if !checkLoginRateLimit(ip) {
-		http.Error(w, "尝试次数过多，请稍后再试", 429)
+		http.Error(w, "尝试次数过多", 429)
 		return
 	}
 	mu.Lock()
@@ -1025,55 +1022,42 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	twoFAEnabled := config.TwoFAEnabled
 	twoFASecret := config.TwoFASecret
 	mu.Unlock()
+
 	passMatch := false
 	parts := strings.Split(storedVal, "$")
 	if len(parts) == 2 {
-		salt := parts[0]
-		hash := parts[1]
-		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), salt) == hash {
+		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-	} else {
-		if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
-			passMatch = true
-			newSalt := generateSalt()
-			newHash := hashPassword(r.FormValue("password"), newSalt)
-			mu.Lock()
-			config.WebPass = newSalt + "$" + newHash
-			saveConfigNoLock()
-			mu.Unlock()
-		}
+	} else if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
+		passMatch = true
 	}
+
 	if !passMatch {
 		recordLoginFail(ip)
-		t, _ := template.New("l").Parse(loginHtml)
-		t.Execute(w, map[string]interface{}{"TwoFA": twoFAEnabled, "Error": "账号或密码错误"})
+		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
 		return
 	}
+
 	if twoFAEnabled {
-		code := r.FormValue("code")
-		if code == "" || !totp.Validate(code, twoFASecret) {
+		if !totp.Validate(r.FormValue("code"), twoFASecret) {
 			recordLoginFail(ip)
-			t, _ := template.New("l").Parse(loginHtml)
-			t.Execute(w, map[string]interface{}{"TwoFA": true, "Error": "两步验证码错误"})
+			http.Redirect(w, r, "/login?err=2", http.StatusSeeOther)
 			return
 		}
 	}
+
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
 	sessions[sidStr] = time.Now().Add(12 * time.Hour)
 	mu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
-	})
-	addLog(r, "登录成功", "管理员登录面板")
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
-	addLog(r, "退出登录", "管理员退出面板")
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -1082,30 +1066,17 @@ func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	u := config.WebUser
 	mu.Unlock()
-	key, err := totp.Generate(totp.GenerateOpts{
-		Issuer:      "GoRelay-Pro",
-		AccountName: u,
-	})
-	if err != nil {
-		http.Error(w, "生成失败", 500)
-		return
-	}
+	key, _ := totp.Generate(totp.GenerateOpts{Issuer: "GoRelay-Pro", AccountName: u})
 	var buf bytes.Buffer
 	img, _ := qr.Encode(key.URL(), qr.M, qr.Auto)
 	img, _ = barcode.Scale(img, 200, 200)
 	png.Encode(&buf, img)
-	resp := map[string]string{
-		"secret": key.Secret(),
-		"qr":     "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()),
-	}
+	resp := map[string]string{"secret": key.Secret(), "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())}
 	json.NewEncoder(w).Encode(resp)
 }
 
 func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Secret string `json:"secret"`
-		Code   string `json:"code"`
-	}
+	var req struct{ Secret, Code string }
 	json.NewDecoder(r.Body).Decode(&req)
 	if totp.Validate(req.Code, req.Secret) {
 		mu.Lock()
@@ -1113,7 +1084,6 @@ func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 		config.TwoFAEnabled = true
 		saveConfigNoLock()
 		mu.Unlock()
-		addLog(r, "安全设置", "开启双因素认证 (2FA)")
 		json.NewEncoder(w).Encode(map[string]bool{"success": true})
 	} else {
 		json.NewEncoder(w).Encode(map[string]bool{"success": false})
@@ -1126,18 +1096,14 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	config.TwoFASecret = ""
 	saveConfigNoLock()
 	mu.Unlock()
-	addLog(r, "安全设置", "关闭双因素认证 (2FA)")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		return
-	}
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	mu.Lock()
-	newRule := LogicalRule{
+	rules = append(rules, LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
 		Note:         r.FormValue("note"),
 		EntryAgent:   r.FormValue("entry_agent"),
@@ -1149,25 +1115,18 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
 		BridgePort:   fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
-		Disabled:     false,
-	}
-	rules = append(rules, newRule)
+	})
 	saveConfigNoLock()
 	mu.Unlock()
-	addLog(r, "新建规则", fmt.Sprintf("添加转发: %s -> %s:%s", newRule.Note, newRule.TargetIP, newRule.TargetPort))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
 func handleEditRule(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		return
-	}
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	mu.Lock()
-	found := false
 	for i := range rules {
 		if rules[i].ID == id {
 			rules[i].Note = r.FormValue("note")
@@ -1179,69 +1138,41 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].Protocol = r.FormValue("protocol")
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
-			found = true
 			break
 		}
 	}
-	if found {
-		saveConfigNoLock()
-	}
+	saveConfigNoLock()
 	mu.Unlock()
-	if found {
-		addLog(r, "修改规则", fmt.Sprintf("更新规则 ID: %s", id))
-		go pushConfigToAll()
-	}
+	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
 func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	mu.Lock()
-	found := false
-	state := ""
 	for i := range rules {
 		if rules[i].ID == id {
 			rules[i].Disabled = !rules[i].Disabled
-			found = true
-			if rules[i].Disabled {
-				state = "暂停"
-			} else {
-				state = "启用"
-			}
 			break
 		}
 	}
-	if found {
-		saveConfigNoLock()
-	}
+	saveConfigNoLock()
 	mu.Unlock()
-	if found {
-		addLog(r, "切换状态", fmt.Sprintf("%s 规则 ID: %s", state, id))
-		go pushConfigToAll()
-	}
+	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
 func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	mu.Lock()
-	found := false
 	for i := range rules {
 		if rules[i].ID == id {
-			rules[i].TotalTx = 0
-			rules[i].TotalRx = 0
-			found = true
+			rules[i].TotalTx, rules[i].TotalRx = 0, 0
 			break
 		}
 	}
-	if found {
-		saveConfigNoLock()
-	}
+	saveConfigNoLock()
 	mu.Unlock()
-	if found {
-		addLog(r, "重置流量", fmt.Sprintf("重置规则 ID: %s 流量统计", id))
-		go pushConfigToAll()
-	}
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
@@ -1257,7 +1188,6 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	rules = nr
 	saveConfigNoLock()
 	mu.Unlock()
-	addLog(r, "删除规则", fmt.Sprintf("移除规则 ID: %s", id))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
@@ -1265,29 +1195,20 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	mu.Lock()
-	if agent, ok := agents[name]; ok {
-		go func(c net.Conn) {
-			json.NewEncoder(c).Encode(Message{Type: "uninstall"})
-		}(agent.Conn)
+	if a, ok := agents[name]; ok {
+		json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
 	}
 	mu.Unlock()
-	addLog(r, "卸载节点", fmt.Sprintf("发送卸载指令给: %s", name))
-	sendTelegram(fmt.Sprintf("🗑️ 节点删除指令已发送\n目标: %s\n正在等待节点响应...", name))
 	http.Redirect(w, r, "/#dashboard", http.StatusSeeOther)
 }
 
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		return
-	}
 	mu.Lock()
 	if p := r.FormValue("password"); p != "" {
 		salt := generateSalt()
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
-	if t := r.FormValue("token"); t != "" {
-		config.AgentToken = t
-	}
+	config.AgentToken = r.FormValue("token")
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
@@ -1295,30 +1216,28 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.TgChatID = r.FormValue("tg_chat_id")
 	saveConfigNoLock()
 	mu.Unlock()
-	addLog(r, "系统设置", "更新系统配置参数")
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
 }
 
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename=data.db")
-	w.Header().Set("Content-Type", "application/x-sqlite3")
 	http.ServeFile(w, r, DBFile)
-	addLog(r, "数据备份", "下载数据库 data.db")
 }
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
-	rows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
-	for rows.Next() {
-		var l OpLog
-		rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-		logs = append(logs, l)
+	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var l OpLog
+			rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+			logs = append(logs, l)
+		}
 	}
 	b, _ := json.MarshalIndent(logs, "", "  ")
 	w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
-	w.Header().Set("Content-Type", "application/json")
 	w.Write(b)
-	addLog(r, "日志导出", "导出系统操作日志")
 }
 
 // ================= AGENT CORE =================
@@ -1362,12 +1281,9 @@ func runAgent(name, masterAddr, token string) {
 						return true
 					})
 					if len(reps) > 0 {
-						conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
-						conn.SetWriteDeadline(time.Time{})
 					} else {
-						status := getSysStatus()
-						json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: status})
+						json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
 					}
 				case <-h.C:
 					checkTargetHealth(conn)
@@ -1383,11 +1299,7 @@ func runAgent(name, masterAddr, token string) {
 				break
 			}
 			if msg.Type == "uninstall" {
-				log.Println("收到卸载指令，正在执行自毁程序...")
 				json.NewEncoder(conn).Encode(Message{Type: "uninstalling"})
-				time.Sleep(200 * time.Millisecond)
-				close(stop)
-				conn.Close()
 				doSelfUninstall()
 				return
 			}
@@ -1398,36 +1310,11 @@ func runAgent(name, masterAddr, token string) {
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
-					restart := false
-					if oldTaskVal, loaded := activeTasks.Load(t.ID); loaded {
-						oldTask := oldTaskVal.(ForwardTask)
-						if oldTask.Target != t.Target || oldTask.SpeedLimit != t.SpeedLimit {
-							restart = true
-						}
-					} else {
-						restart = true
-					}
-					if restart {
-						if closeFunc, ok := runningListeners.Load(t.ID); ok {
-							closeFunc.(func())()
-							runningListeners.Delete(t.ID)
-							agentTraffic.Delete(t.ID)
-							agentUserCounts.Delete(t.ID)
-							if oldTaskVal, loaded := activeTasks.Load(t.ID); loaded {
-								oldTargets := strings.Split(oldTaskVal.(ForwardTask).Target, ",")
-								for _, ot := range oldTargets {
-									targetHealthMap.Delete(strings.TrimSpace(ot))
-								}
-							}
-							activeTasks.Delete(t.ID)
-							activeTargets.Delete(t.ID)
-							time.Sleep(200 * time.Millisecond)
-						}
+					if _, loaded := activeTasks.LoadOrStore(t.ID, t); !loaded {
 						agentTraffic.Store(t.ID, &TrafficCounter{})
 						var uz int64 = 0
 						agentUserCounts.Store(t.ID, &uz)
 						activeTargets.Store(t.ID, t.Target)
-						activeTasks.Store(t.ID, t)
 						startProxy(t)
 					}
 				}
@@ -1451,14 +1338,10 @@ func runAgent(name, masterAddr, token string) {
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
-		targetsStr := value.(string)
-		targets := strings.Split(targetsStr, ",")
+		targets := strings.Split(value.(string), ",")
 		var bestLat int64 = -1
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
-			if target == "" {
-				continue
-			}
 			start := time.Now()
 			c, err := net.DialTimeout("tcp", target, 2*time.Second)
 			if err == nil {
@@ -1476,9 +1359,7 @@ func checkTargetHealth(conn net.Conn) {
 		return true
 	})
 	if len(results) > 0 {
-		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
-		conn.SetWriteDeadline(time.Time{})
 	}
 }
 
@@ -1531,6 +1412,7 @@ func startProxy(t ForwardTask) {
 	v, _ := agentUserCounts.Load(t.ID)
 	userCountPtr := v.(*int64)
 	ipTracker := &IpTracker{refs: make(map[string]int), count: userCountPtr}
+
 	if t.Protocol == "tcp" || t.Protocol == "both" {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen)
@@ -1544,11 +1426,6 @@ func startProxy(t ForwardTask) {
 				c, e := ln.Accept()
 				if e != nil {
 					break
-				}
-				if tc, ok := c.(*net.TCPConn); ok {
-					tc.SetKeepAlive(true)
-					tc.SetKeepAlivePeriod(TCPKeepAlive)
-					tc.SetNoDelay(true)
 				}
 				l.Lock()
 				if closed {
@@ -1576,8 +1453,6 @@ func startProxy(t ForwardTask) {
 			if err != nil {
 				return
 			}
-			ln.SetReadBuffer(UDPBufferSize)
-			ln.SetWriteBuffer(UDPBufferSize)
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
@@ -1589,51 +1464,23 @@ func startProxy(t ForwardTask) {
 func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 	defer src.Close()
 	allTargets := strings.Split(targetStr, ",")
-	var healthyTargets []string
+	var candidates []string
 	for _, t := range allTargets {
 		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
 		if status, ok := targetHealthMap.Load(t); ok && status.(bool) {
-			healthyTargets = append(healthyTargets, t)
+			candidates = append(candidates, t)
 		}
 	}
-	candidates := healthyTargets
 	if len(candidates) == 0 {
-		candidates = []string{}
-		for _, t := range allTargets {
-			if strings.TrimSpace(t) != "" {
-				candidates = append(candidates, strings.TrimSpace(t))
-			}
-		}
+		candidates = allTargets
 	}
-	var dst net.Conn
-	var err error
-	if len(candidates) > 0 {
-		startIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
-		idx := int(startIdx.Int64())
-		for i := 0; i < len(candidates); i++ {
-			t := candidates[(idx+i)%len(candidates)]
-			dst, err = net.DialTimeout("tcp", t, 2*time.Second)
-			if err == nil {
-				break
-			}
-		}
-	}
-	if dst == nil {
+	randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
+	dst, err := net.DialTimeout("tcp", strings.TrimSpace(candidates[randIdx.Int64()]), 2*time.Second)
+	if err != nil {
 		return
 	}
 	defer dst.Close()
-	if tc, ok := dst.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(TCPKeepAlive)
-		tc.SetNoDelay(true)
-	}
 	v, _ := agentTraffic.Load(tid)
-	if v == nil {
-		return
-	}
 	cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx, limit)
 	copyCount(src, dst, &cnt.Rx, limit)
@@ -1642,17 +1489,9 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker, limit int64) {
 	targets := strings.Split(targetStr, ",")
 	udpSessions := &sync.Map{}
-	defer func() {
-		udpSessions.Range(func(key, value interface{}) bool {
-			value.(*udpSession).conn.Close()
-			return true
-		})
-	}()
 	v, _ := agentTraffic.Load(tid)
-	if v == nil {
-		return
-	}
 	cnt := v.(*TrafficCounter)
+
 	go func() {
 		for {
 			time.Sleep(30 * time.Second)
@@ -1668,6 +1507,7 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			})
 		}
 	}()
+
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -1683,34 +1523,9 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			s := val.(*udpSession)
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
-			throttle(n, limit, time.Now())
 		} else {
-			var candidates []string
-			for _, t := range targets {
-				t = strings.TrimSpace(t)
-				if t == "" {
-					continue
-				}
-				if status, ok := targetHealthMap.Load(t); ok && status.(bool) {
-					candidates = append(candidates, t)
-				}
-			}
-			if len(candidates) == 0 {
-				for _, t := range targets {
-					if strings.TrimSpace(t) != "" {
-						candidates = append(candidates, strings.TrimSpace(t))
-					}
-				}
-			}
-			if len(candidates) == 0 {
-				continue
-			}
-			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
-			t := candidates[randIdx.Int64()]
-			dstAddr, _ := net.ResolveUDPAddr("udp", t)
-			if dstAddr == nil {
-				continue
-			}
+			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(targets))))
+			dstAddr, _ := net.ResolveUDPAddr("udp", strings.TrimSpace(targets[randIdx.Int64()]))
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				continue
@@ -1719,7 +1534,6 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
-			throttle(n, limit, time.Now())
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
@@ -1735,19 +1549,8 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 					}
 					ln.WriteToUDP(b[:m], sa)
 					atomic.AddInt64(&cnt.Rx, int64(m))
-					throttle(m, limit, time.Now())
 				}
 			}(newConn, srcAddr, sAddr)
-		}
-	}
-}
-
-func throttle(n int, limit int64, start time.Time) {
-	if limit > 0 {
-		expectedDuration := time.Duration(1e9 * int64(n) / limit)
-		actualDuration := time.Since(start)
-		if expectedDuration > actualDuration {
-			time.Sleep(expectedDuration - actualDuration)
 		}
 	}
 }
@@ -1760,14 +1563,16 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 		nr, err := src.Read(buf)
 		if nr > 0 {
 			start := time.Now()
-			nw, ew := dst.Write(buf[0:nr])
+			nw, _ := dst.Write(buf[0:nr])
 			if nw > 0 {
 				atomic.AddInt64(c, int64(nw))
 			}
-			if ew != nil || nr != nw {
-				break
+			if limit > 0 {
+				exp := time.Duration(1e9 * int64(nr) / limit)
+				if act := time.Since(start); exp > act {
+					time.Sleep(exp - act)
+				}
 			}
-			throttle(nr, limit, start)
 		}
 		if err != nil {
 			break
@@ -1780,56 +1585,65 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 func loadConfig() {
 	mu.Lock()
 	defer mu.Unlock()
-	rows, _ := db.Query("SELECT key, value FROM settings")
-	for rows.Next() {
-		var k, v string
-		rows.Scan(&k, &v)
-		switch k {
-		case "web_user": config.WebUser = v
-		case "web_pass": config.WebPass = v
-		case "agent_token": config.AgentToken = v
-		case "master_ip": config.MasterIP = v
-		case "master_ipv6": config.MasterIPv6 = v
-		case "master_domain": config.MasterDomain = v
-		case "is_setup": config.IsSetup = (v == "true")
-		case "tg_bot_token": config.TgBotToken = v
-		case "tg_chat_id": config.TgChatID = v
-		case "two_fa_enabled": config.TwoFAEnabled = (v == "true")
-		case "two_fa_secret": config.TwoFASecret = v
+	rows, err := db.Query("SELECT key, value FROM settings")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var k, v string
+			rows.Scan(&k, &v)
+			switch k {
+			case "web_user":
+				config.WebUser = v
+			case "web_pass":
+				config.WebPass = v
+			case "agent_token":
+				config.AgentToken = v
+			case "master_ip":
+				config.MasterIP = v
+			case "master_ipv6":
+				config.MasterIPv6 = v
+			case "master_domain":
+				config.MasterDomain = v
+			case "is_setup":
+				config.IsSetup = (v == "true")
+			case "tg_bot_token":
+				config.TgBotToken = v
+			case "tg_chat_id":
+				config.TgChatID = v
+			case "two_fa_enabled":
+				config.TwoFAEnabled = (v == "true")
+			case "two_fa_secret":
+				config.TwoFASecret = v
+			}
 		}
 	}
+
 	rules = []LogicalRule{}
-	rRows, _ := db.Query("SELECT id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
-	for rRows.Next() {
-		var r LogicalRule
-		var disabled int
-		rRows.Scan(&r.ID, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &disabled, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
-		r.Disabled = (disabled == 1)
-		rules = append(rules, r)
+	rRows, err := db.Query("SELECT id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
+	if err == nil {
+		defer rRows.Close()
+		for rRows.Next() {
+			var r LogicalRule
+			var d int
+			rRows.Scan(&r.ID, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
+			r.Disabled = (d == 1)
+			rules = append(rules, r)
+		}
 	}
 }
 
-// saveConfig 是一个外部调用的安全函数，它会自动获取锁。
 func saveConfig() {
 	mu.Lock()
 	defer mu.Unlock()
 	saveConfigNoLock()
 }
 
-// saveConfigNoLock 是核心保存逻辑，它【不获取锁】，由已经持有锁的函数调用，防止死锁。
 func saveConfigNoLock() {
 	conf := config
-	localRules := make([]LogicalRule, len(rules))
-	copy(localRules, rules)
+	lRules := make([]LogicalRule, len(rules))
+	copy(lRules, rules)
 
-	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		log.Printf("❌ 开启数据库事务失败: %v", err)
-		return
-	}
-	defer tx.Rollback()
-
+	tx, _ := db.Begin()
 	setS := func(k, v string) { _, _ = tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
 	setS("web_user", conf.WebUser)
 	setS("web_pass", conf.WebPass)
@@ -1844,28 +1658,41 @@ func saveConfigNoLock() {
 	setS("two_fa_secret", conf.TwoFASecret)
 
 	_, _ = tx.Exec("DELETE FROM rules")
-	for _, r := range localRules {
-		disabled := 0
+	for _, r := range lRules {
+		d := 0
 		if r.Disabled {
-			disabled = 1
+			d = 1
 		}
-		_, err := tx.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
-		if err != nil {
-			log.Printf("❌ 插入规则失败: %v", err)
-		}
+		_, _ = tx.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx)
 	}
-	
-	if err := tx.Commit(); err != nil {
-		log.Printf("❌ 提交事务失败: %v", err)
+	_ = tx.Commit()
+}
+
+func cleanOldLogs() {
+	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
+	if err != nil {
+		log.Printf("⚠️ 清理日志失败: %v", err)
 	}
 }
 
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() { <-c; os.Exit(0) }()
+	go func() {
+		<-c
+		log.Println("📢 正在安全关闭服务...")
+		mu.Lock()
+		for _, a := range agents {
+			a.Conn.Close()
+		}
+		saveConfigNoLock()
+		mu.Unlock()
+		if db != nil {
+			db.Close()
+		}
+		os.Exit(0)
+	}()
 }
 
 func formatBytes(b int64) string {
