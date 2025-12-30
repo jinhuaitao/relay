@@ -2076,7 +2076,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
 .btn { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
 .btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
-.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } 
+.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } /* 保留部分次级按钮样式 */
 .btn.danger { background: var(--danger-bg); color: var(--danger-text); }
 .btn.danger:hover { background: var(--danger); color: #fff; }
 .btn.icon { padding: 8px; width: 34px; height: 34px; border-radius: 8px; }
@@ -2298,7 +2298,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         <div id="deploy" class="page">
             <div class="card">
                 <h3><i class="ri-install-line"></i> 节点安装向导</h3>
-                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器上执行以下命令以安装 Agent 客户端。</p>
+                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。</p>
                 
                 <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);margin-top:20px">
                     <div class="grid-form" style="margin-bottom:15px">
@@ -2441,26 +2441,33 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 </div>
 
 <script>
+    // --- 核心逻辑 ---
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
+        
         const titles = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'logs':'系统日志', 'settings':'系统设置'};
         const icons = {'dashboard':'ri-dashboard-3-line', 'deploy':'ri-rocket-2-line', 'rules':'ri-route-line', 'logs':'ri-file-list-3-line', 'settings':'ri-settings-4-line'};
         document.getElementById('page-text').innerText = titles[id];
         document.getElementById('page-icon').className = icons[id];
+        
         document.querySelectorAll('.sidebar .item').forEach(i => i.classList.remove('active'));
         if (el) el.classList.add('active');
+        else { const t = document.querySelector('.sidebar .item[onclick*="'+id+'"]'); if(t) t.classList.add('active'); }
+        
         document.querySelectorAll('.mobile-nav .nav-btn').forEach(b => b.classList.remove('active'));
         const mBtn = document.querySelector('.mobile-nav .nav-btn[onclick*="'+id+'"]');
         if(mBtn) mBtn.classList.add('active');
+
         if(location.hash !== '#'+id) { if(history.pushState) history.pushState(null,null,'#'+id); else location.hash = '#'+id; }
     }
     
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
 
+    // 复制文本
     function copyText(txt) {
         if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制: "+txt, "success"));
         else {
@@ -2471,15 +2478,21 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         }
     }
 
+    // 主题切换
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
         const next = curr === 'dark' ? 'light' : 'dark';
         html.setAttribute('data-theme', next);
         localStorage.setItem('theme', next);
+        updateChartTheme(next);
         document.getElementById('theme-icon').className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     }
+    const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
 
+    // Toast 提示
     function showToast(msg, type) {
         const box = document.getElementById('toast');
         const icon = document.getElementById('t-icon');
@@ -2491,6 +2504,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         setTimeout(() => box.className = 'toast', 3000);
     }
 
+    // 确认框
     function showConfirm(title, msg, type, cb) {
         document.getElementById('c_title').innerText = title;
         document.getElementById('c_msg').innerHTML = msg;
@@ -2503,6 +2517,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
+    // 部署命令逻辑
     function genCmd() {
         const n = document.getElementById('agentName').value;
         const t = document.getElementById('addrType').value;
@@ -2516,11 +2531,13 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
+    // 规则操作
     function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，确定吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的流量统计吗？", "normal", () => location.href="/reset_traffic?id="+id); }
     function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>这将向节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
+    // 编辑
     function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_note').value = note;
@@ -2535,37 +2552,90 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
+    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); document.getElementById('twoFAModal').style.display='none'; } }
 
+    // 2FA
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
     function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else alert("验证码错误"); }); }
     function disable2FA() { showConfirm("关闭 2FA", "关闭后账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
+    // --- Chart.js: 实时流量 (双线: Tx, Rx) ---
     var ctx = document.getElementById('trafficChart').getContext('2d');
+    
+    // 创建渐变
+    var txGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.4)'); // Violet
+    txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
+    
+    var rxGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.4)'); // Cyan
+    rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
+
     var chart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: Array(30).fill(''),
             datasets: [
-                { label: '上传 (Tx)', data: Array(30).fill(0), borderColor: '#8b5cf6', borderWidth: 2, pointRadius: 0, fill: false, tension: 0.4 },
-                { label: '下载 (Rx)', data: Array(30).fill(0), borderColor: '#06b6d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0.4 }
+                {
+                    label: '上传 (Tx)',
+                    data: Array(30).fill(0),
+                    borderColor: '#8b5cf6',
+                    backgroundColor: txGrad,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                },
+                {
+                    label: '下载 (Rx)',
+                    data: Array(30).fill(0),
+                    borderColor: '#06b6d4',
+                    backgroundColor: rxGrad,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4
+                }
             ]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: true } },
-            scales: { x: { display: false }, y: { beginAtZero: true, ticks: { callback: v => formatBytes(v)+'/s' } } },
-            animation: { duration: 0 }
+            plugins: { legend: { display: true }, tooltip: { mode: 'index', intersect: false } },
+            scales: {
+                x: { display: false },
+                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.1)', borderDash: [5, 5] }, ticks: { callback: v => formatBytes(v)+'/s', color: '#94a3b8' } }
+            },
+            animation: { duration: 0 },
+            interaction: { mode: 'nearest', axis: 'x', intersect: false }
         }
     });
 
+    // --- Chart.js: 流量占比饼图 ---
     var ctxPie = document.getElementById('pieChart').getContext('2d');
     var pieChart = new Chart(ctxPie, {
         type: 'doughnut',
-        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'], borderWidth: 0 }] },
-        options: { responsive: true, maintainAspectRatio: false, cutout: '70%' }
+        data: {
+            labels: [],
+            datasets: [{
+                data: [],
+                backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { position: 'right', labels: { color: '#94a3b8', boxWidth: 12 } } },
+            cutout: '70%'
+        }
     });
 
+    function updateChartTheme(theme) {
+        chart.options.scales.y.grid.color = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        chart.update();
+    }
+
+    // --- WS 数据处理 ---
     function formatBytes(b) {
         if(b==0) return "0 B";
         const u = 1024, i = Math.floor(Math.log(b)/Math.log(u));
@@ -2580,41 +2650,54 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 if(msg.type === 'stats' && msg.data) {
                     const d = msg.data;
                     document.getElementById('stat-total-traffic').innerText = formatBytes(d.total_traffic);
+                    
+                    // 实时速度
                     document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
                     document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
+                    
+                    // 更新线图
                     chart.data.datasets[0].data.push(d.speed_tx);
                     chart.data.datasets[0].data.shift();
                     chart.data.datasets[1].data.push(d.speed_rx);
                     chart.data.datasets[1].data.shift();
                     chart.update();
+
+                    // 更新饼图 (Top 5 流量规则)
                     if (d.rules) {
                         const sortedRules = [...d.rules].sort((a,b) => b.total - a.total).slice(0, 5);
                         pieChart.data.labels = sortedRules.map(r => r.name || '未命名');
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update();
                     }
+
+                    // 更新节点负载
                     if(d.agents) d.agents.forEach(a => {
                         const loadText = document.getElementById('load-text-'+a.name);
                         const loadBar = document.getElementById('load-bar-'+a.name);
                         if(loadText && loadBar) {
                             let loadStr = a.sys_status; 
+                            // 简单解析 Load: 0.05 | Mem ...
                             let loadVal = 0;
                             if(loadStr.includes("Load:")) {
                                 let parts = loadStr.split("|");
                                 loadVal = parseFloat(parts[0].replace("Load:", "").trim()) || 0;
                             }
                             loadText.innerText = loadVal.toFixed(2);
-                            let pct = loadVal * 20; if (pct > 100) pct = 100;
+                            let pct = loadVal * 20; // 假设 Load 5 = 100%
+                            if (pct > 100) pct = 100;
                             loadBar.style.width = pct + "%";
                             loadBar.style.background = pct > 80 ? "#ef4444" : "#6366f1";
                         }
                     });
+                    
+                    // 更新规则列表状态
                     if(d.rules) {
                         d.rules.forEach(r => {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
                             const lat = document.getElementById('rule-latency-'+r.id);
                             const dot = document.getElementById('rule-status-dot-'+r.id);
+                            
                             if(lat && dot) {
                                 if(r.status) {
                                     lat.innerHTML = '<i class="ri-pulse-line" style="color:#10b981"></i> ' + r.latency + ' ms';
@@ -2633,11 +2716,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                             }
                         });
                     }
+
                     if(d.logs && document.getElementById('logs').classList.contains('active')) {
                         const tbody = document.getElementById('log-table-body');
                         let html = '';
                         d.logs.forEach(l => {
-                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td><td>'+l.ip+'</td><td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td><td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
+                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td>'+
+                                    '<td>'+l.ip+'</td>'+
+                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td>'+
+                                    '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
                     }
