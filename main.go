@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"html/template"
@@ -35,17 +41,18 @@ import (
 	"github.com/boombuler/barcode/qr"
 	"github.com/gorilla/websocket"
 	"github.com/pquerna/otp/totp"
+	_ "modernc.org/sqlite" // 纯 Go 实现的 SQLite 驱动
 )
 
 // --- 配置与常量 ---
 
 const (
+	DBFile      = "data.db"
 	ConfigFile  = "config.json"
 	ControlPort = ":9999"
 	WebPort     = ":8888"
 	DownloadURL = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 
-	// --- 性能调优参数 ---
 	TCPKeepAlive   = 60 * time.Second
 	UDPBufferSize  = 4 * 1024 * 1024
 	CopyBufferSize = 32 * 1024
@@ -100,12 +107,10 @@ type AppConfig struct {
 	IsSetup      bool          `json:"is_setup"`
 	TgBotToken   string        `json:"tg_bot_token"`
 	TgChatID     string        `json:"tg_chat_id"`
-	
-	TwoFAEnabled bool   `json:"two_fa_enabled"`
-	TwoFASecret  string `json:"two_fa_secret"`
-
-	Rules        []LogicalRule `json:"saved_rules"`
-	Logs         []OpLog       `json:"logs"`
+	TwoFAEnabled bool          `json:"two_fa_enabled"`
+	TwoFASecret  string        `json:"two_fa_secret"`
+	Rules        []LogicalRule `json:"saved_rules"` 
+	Logs         []OpLog       `json:"logs"`        
 }
 
 type ForwardTask struct {
@@ -180,36 +185,126 @@ type RuleStatusData struct {
 }
 
 var (
+	db               *sql.DB
 	config           AppConfig
 	agents           = make(map[string]*AgentInfo)
 	rules            = make([]LogicalRule, 0)
 	opLogs           = make([]OpLog, 0)
 	mu               sync.Mutex
 	runningListeners sync.Map
-	
-	activeTasks      sync.Map 
-	activeTargets    sync.Map 
-	
+	activeTasks      sync.Map
+	activeTargets    sync.Map
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
-	targetHealthMap  sync.Map 
-	
+	targetHealthMap  sync.Map
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
-	
+
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	wsClients  = make(map[*websocket.Conn]bool)
 	wsMu       sync.Mutex
-	
-	// TLS 状态
+
 	isMasterTLS bool = false
 	useTLS      bool = false
 )
 
-// --- 密码安全工具函数 ---
+// --- 数据库初始化与迁移逻辑 ---
+
+const dbSchema = `
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY,
+    note TEXT,
+    entry_agent TEXT,
+    entry_port TEXT,
+    exit_agent TEXT,
+    target_ip TEXT,
+    target_port TEXT,
+    protocol TEXT,
+    bridge_port TEXT,
+    traffic_limit INTEGER,
+    disabled INTEGER,
+    speed_limit INTEGER,
+    total_tx INTEGER DEFAULT 0,
+    total_rx INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT,
+    ip TEXT,
+    action TEXT,
+    msg TEXT
+);`
+
+func initDB() {
+	var err error
+	db, err = sql.Open("sqlite", DBFile)
+	if err != nil {
+		log.Fatalf("❌ 无法打开数据库文件: %v", err)
+	}
+
+	if _, err := db.Exec(dbSchema); err != nil {
+		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
+	}
+
+	if _, err := os.Stat(ConfigFile); err == nil {
+		var count int
+		db.QueryRow("SELECT count(*) FROM settings").Scan(&count)
+		if count == 0 {
+			migrateOldData()
+		}
+	}
+}
+
+func migrateOldData() {
+	log.Println("🚚 检测到旧配置文件，正在执行无感迁移至 SQLite...")
+	data, err := os.ReadFile(ConfigFile)
+	if err != nil {
+		return
+	}
+	var old AppConfig
+	if err := json.Unmarshal(data, &old); err != nil {
+		return
+	}
+
+	setDBSetting := func(k, v string) { _, _ = db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
+	setDBSetting("web_user", old.WebUser)
+	setDBSetting("web_pass", old.WebPass)
+	setDBSetting("agent_token", old.AgentToken)
+	setDBSetting("master_ip", old.MasterIP)
+	setDBSetting("master_ipv6", old.MasterIPv6)
+	setDBSetting("master_domain", old.MasterDomain)
+	setDBSetting("is_setup", strconv.FormatBool(old.IsSetup))
+	setDBSetting("tg_bot_token", old.TgBotToken)
+	setDBSetting("tg_chat_id", old.TgChatID)
+	setDBSetting("two_fa_enabled", strconv.FormatBool(old.TwoFAEnabled))
+	setDBSetting("two_fa_secret", old.TwoFASecret)
+
+	for _, r := range old.Rules {
+		disabled := 0
+		if r.Disabled {
+			disabled = 1
+		}
+		_, _ = db.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
+	}
+
+	for _, l := range old.Logs {
+		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", l.Time, l.IP, l.Action, l.Msg)
+	}
+
+	_ = os.Rename(ConfigFile, ConfigFile+".bak")
+	log.Println("✅ 迁移成功。旧文件已备份。")
+}
+
+// --- 基础工具函数 ---
 
 func generateSalt() string {
 	b := make([]byte, 16)
@@ -232,7 +327,7 @@ func md5Hash(s string) string {
 func checkLoginRateLimit(ip string) bool {
 	if t, ok := blockUntil.Load(ip); ok {
 		if time.Now().Before(t.(time.Time)) {
-			return false 
+			return false
 		}
 		blockUntil.Delete(ip)
 		loginAttempts.Delete(ip)
@@ -250,18 +345,66 @@ func recordLoginFail(ip string) {
 	}
 }
 
+func autoGenerateCert() error {
+	if _, err := os.Stat("server.crt"); err == nil {
+		if _, err := os.Stat("server.key"); err == nil {
+			return nil
+		}
+	}
+	log.Println("🛠️ 未检测到 SSL 证书，正在自动生成自签证书...")
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(3650 * 24 * time.Hour)
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"GoRelay-Pro"},
+			CommonName:   "GoRelay Master",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				template.IPAddresses = append(template.IPAddresses, ipnet.IP)
+			}
+		}
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return err
+	}
+	certOut, _ := os.Create("server.crt")
+	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	certOut.Close()
+	keyOut, _ := os.OpenFile("server.key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	keyOut.Close()
+	log.Println("✅ 自签证书已成功生成 (server.crt & server.key)")
+	return nil
+}
+
 // --- 主程序 ---
 
 func main() {
 	setRLimit()
-
 	mode := flag.String("mode", "master", "运行模式")
 	name := flag.String("name", "", "Agent名称")
 	connect := flag.String("connect", "", "Master地址")
 	token := flag.String("token", "", "通信Token")
 	serviceOp := flag.String("service", "", "install | uninstall")
 	tlsFlag := flag.Bool("tls", false, "使用 TLS 加密连接 (Agent模式)")
-
 	flag.Parse()
 
 	if *serviceOp != "" {
@@ -272,6 +415,7 @@ func main() {
 	setupSignalHandler()
 
 	if *mode == "master" {
+		initDB()
 		loadConfig()
 		runMaster()
 	} else if *mode == "agent" {
@@ -320,25 +464,13 @@ func addLog(r *http.Request, action, msg string) {
 			ip = f
 		}
 	}
-	entry := OpLog{Time: time.Now().Format("01-02 15:04:05"), IP: ip, Action: action, Msg: msg}
-	mu.Lock()
-	opLogs = append([]OpLog{entry}, opLogs...)
-	if len(opLogs) > MaxLogEntries {
-		opLogs = opLogs[:MaxLogEntries]
-	}
-	atomic.StoreInt32(&configDirty, 1)
-	mu.Unlock()
+	now := time.Now().Format("01-02 15:04:05")
+	_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
 }
 
 func addSystemLog(ip, action, msg string) {
-	entry := OpLog{Time: time.Now().Format("01-02 15:04:05"), IP: ip, Action: action, Msg: msg}
-	mu.Lock()
-	opLogs = append([]OpLog{entry}, opLogs...)
-	if len(opLogs) > MaxLogEntries {
-		opLogs = opLogs[:MaxLogEntries]
-	}
-	atomic.StoreInt32(&configDirty, 1)
-	mu.Unlock()
+	now := time.Now().Format("01-02 15:04:05")
+	_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
 }
 
 func handleService(op, mode, name, connect, token string, useTLS bool) {
@@ -347,12 +479,10 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	}
 	exe, _ := os.Executable()
 	exe, _ = filepath.Abs(exe)
-	
 	tlsParam := ""
 	if useTLS {
 		tlsParam = " -tls"
 	}
-	
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
 	isSys := false
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
@@ -418,12 +548,16 @@ func doSelfUninstall() {
 }
 
 func sendTelegram(text string) {
-	if config.TgBotToken == "" || config.TgChatID == "" {
+	mu.Lock()
+	token := config.TgBotToken
+	chatID := config.TgChatID
+	mu.Unlock()
+	if token == "" || chatID == "" {
 		return
 	}
-	api := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", config.TgBotToken)
+	api := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
 	data := url.Values{}
-	data.Set("chat_id", config.TgChatID)
+	data.Set("chat_id", chatID)
 	data.Set("text", text)
 	go func() { http.PostForm(api, data) }()
 }
@@ -431,24 +565,19 @@ func sendTelegram(text string) {
 // ================= MASTER =================
 
 func runMaster() {
+	autoGenerateCert()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
 			if atomic.CompareAndSwapInt32(&configDirty, 1, 0) {
-				mu.Lock()
 				saveConfig()
-				mu.Unlock()
 			}
 		}
 	}()
-
 	go broadcastLoop()
-
 	go func() {
-		// 自动检测 TLS 证书
 		var ln net.Listener
 		var err error
-		
 		if _, errStat := os.Stat("server.crt"); errStat == nil {
 			if _, errStat := os.Stat("server.key"); errStat == nil {
 				cert, errLoad := tls.LoadX509KeyPair("server.crt", "server.key")
@@ -457,12 +586,11 @@ func runMaster() {
 					ln, err = tls.Listen("tcp", ControlPort, tlsConfig)
 					if err == nil {
 						log.Println("🔐 Master 已启用 TLS 加密模式 (端口:9999)")
-						isMasterTLS = true // 标记开启
+						isMasterTLS = true
 					}
 				}
 			}
 		}
-
 		if ln == nil {
 			ln, err = net.Listen("tcp", ControlPort)
 			if err != nil {
@@ -470,7 +598,6 @@ func runMaster() {
 			}
 			log.Println("⚠️ Master 正在使用明文 TCP 模式")
 		}
-
 		for {
 			c, err := ln.Accept()
 			if err == nil {
@@ -493,7 +620,6 @@ func runMaster() {
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
-	// 2FA API
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
@@ -531,16 +657,6 @@ func broadcastLoop() {
 		var currentTx, currentRx int64
 		var agentData []AgentStatusData
 		var ruleData []RuleStatusData
-		var logData []OpLog
-		
-		if len(opLogs) > 0 {
-			limit := 15
-			if len(opLogs) < limit {
-				limit = len(opLogs)
-			}
-			logData = make([]OpLog, limit)
-			copy(logData, opLogs[:limit])
-		}
 
 		for _, a := range agents {
 			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus})
@@ -548,10 +664,9 @@ func broadcastLoop() {
 		for _, r := range rules {
 			currentTx += r.TotalTx
 			currentRx += r.TotalRx
-			
 			ruleData = append(ruleData, RuleStatusData{
 				ID:        r.ID,
-				Name:      r.Note, // For chart label
+				Name:      r.Note,
 				Total:     r.TotalTx + r.TotalRx,
 				UserCount: r.UserCount,
 				Limit:     r.TrafficLimit,
@@ -561,17 +676,26 @@ func broadcastLoop() {
 		}
 		mu.Unlock()
 
+		var logData []OpLog
+		lRows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+		for lRows.Next() {
+			var l OpLog
+			lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+			logData = append(logData, l)
+		}
+
 		var speedTx int64 = 0
 		var speedRx int64 = 0
-		
-		// Initial skip
 		if lastTotalTx != 0 || lastTotalRx != 0 {
 			speedTx = currentTx - lastTotalTx
 			speedRx = currentRx - lastTotalRx
 		}
-		if speedTx < 0 { speedTx = 0 }
-		if speedRx < 0 { speedRx = 0 }
-		
+		if speedTx < 0 {
+			speedTx = 0
+		}
+		if speedRx < 0 {
+			speedRx = 0
+		}
 		lastTotalTx = currentTx
 		lastTotalRx = currentRx
 
@@ -580,7 +704,6 @@ func broadcastLoop() {
 			wsMu.Unlock()
 			continue
 		}
-
 		msg := WSMessage{
 			Type: "stats",
 			Data: WSDashboardData{
@@ -592,7 +715,6 @@ func broadcastLoop() {
 				Logs:         logData,
 			},
 		}
-
 		for client := range wsClients {
 			if err := client.WriteJSON(msg); err != nil {
 				client.Close()
@@ -611,25 +733,24 @@ func handleAgentConn(conn net.Conn) {
 		return
 	}
 	data, ok := msg.Payload.(map[string]interface{})
-	if !ok || data["token"].(string) != config.AgentToken {
+	mu.Lock()
+	tk := config.AgentToken
+	mu.Unlock()
+	if !ok || data["token"].(string) != tk {
 		return
 	}
 	name := data["name"].(string)
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-
 	mu.Lock()
 	if old, exists := agents[name]; exists {
 		old.Conn.Close()
 	}
 	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn}
 	mu.Unlock()
-
 	log.Printf("Agent上线: %s (%s)", name, remoteIP)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
 	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s\nIP: %s\n时间: %s", name, remoteIP, time.Now().Format("15:04:05")))
-
 	pushConfigToAll()
-
 	for {
 		var m Message
 		if dec.Decode(&m) != nil {
@@ -671,9 +792,8 @@ func handleStatsReport(payload interface{}) {
 	d, _ := json.Marshal(payload)
 	var reports []TrafficReport
 	json.Unmarshal(d, &reports)
-
+	
 	mu.Lock()
-	defer mu.Unlock()
 	limitTriggered := false
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_entry") {
@@ -692,8 +812,11 @@ func handleStatsReport(payload interface{}) {
 			}
 		}
 	}
+	// 在锁内保存，使用 NoLock 版本
+	saveConfigNoLock()
+	mu.Unlock()
+
 	if limitTriggered {
-		saveConfig()
 		go pushConfigToAll()
 	}
 }
@@ -702,7 +825,6 @@ func handleHealthReport(payload interface{}) {
 	d, _ := json.Marshal(payload)
 	var reports []HealthReport
 	json.Unmarshal(d, &reports)
-
 	mu.Lock()
 	defer mu.Unlock()
 	for _, rep := range reports {
@@ -734,7 +856,6 @@ func pushConfigToAll() {
 		if r.TrafficLimit > 0 && (r.TotalTx+r.TotalRx) >= r.TrafficLimit {
 			continue
 		}
-		
 		rawIPs := strings.Split(r.TargetIP, ",")
 		var targetList []string
 		for _, ip := range rawIPs {
@@ -744,26 +865,16 @@ func pushConfigToAll() {
 			}
 		}
 		finalTargetStr := strings.Join(targetList, ",")
-
 		tasksMap[r.ExitAgent] = append(tasksMap[r.ExitAgent], ForwardTask{
-			ID: r.ID + "_exit", 
-			Protocol: r.Protocol, 
-			Listen: ":" + r.BridgePort, 
-			Target: finalTargetStr, 
-			SpeedLimit: r.SpeedLimit, 
+			ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: finalTargetStr, SpeedLimit: r.SpeedLimit,
 		})
-
 		if exit, ok := agents[r.ExitAgent]; ok {
 			rip := exit.RemoteIP
 			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", 
-				Protocol: r.Protocol, 
-				Listen: ":" + r.EntryPort, 
-				Target: fmt.Sprintf("%s:%s", rip, r.BridgePort),
-				SpeedLimit: r.SpeedLimit,
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit,
 			})
 		}
 	}
@@ -772,7 +883,6 @@ func pushConfigToAll() {
 		activeAgents[k] = v
 	}
 	mu.Unlock()
-
 	for n, a := range activeAgents {
 		t := tasksMap[n]
 		if t == nil {
@@ -799,11 +909,18 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	displayRules := make([]LogicalRule, len(rules))
 	copy(displayRules, rules)
-	
-	displayLogs := make([]OpLog, len(opLogs))
-	copy(displayLogs, opLogs)
-	
-	twoFA := config.TwoFAEnabled
+	mu.Unlock()
+
+	var displayLogs []OpLog
+	rows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
+	for rows.Next() {
+		var l OpLog
+		rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+		displayLogs = append(displayLogs, l)
+	}
+
+	mu.Lock()
+	conf := config
 	mu.Unlock()
 
 	data := struct {
@@ -820,19 +937,25 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Config       AppConfig
 		TwoFA        bool
 		IsTLS        bool
-	}{al, displayRules, displayLogs, config.AgentToken, config.WebUser, DownloadURL, totalTraffic, config.MasterIP, config.MasterIPv6, config.MasterDomain, config, twoFA, isMasterTLS}
+	}{al, displayRules, displayLogs, conf.AgentToken, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
 		"add":         func(a, b int64) int64 { return a + b },
 		"percent": func(currTx, currRx, limit int64) float64 {
-			if limit <= 0 { return 0 }
+			if limit <= 0 {
+				return 0
+			}
 			p := (float64(currTx+currRx) / float64(limit)) * 100
-			if p > 100 { p = 100 }
+			if p > 100 {
+				p = 100
+			}
 			return p
 		},
 		"formatSpeed": func(bytesPerSec int64) string {
-			if bytesPerSec <= 0 { return "无限制" }
+			if bytesPerSec <= 0 {
+				return "无限制"
+			}
 			return formatBytes(bytesPerSec) + "/s"
 		},
 	})
@@ -869,14 +992,12 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
-		
 		salt := generateSalt()
 		pwdHash := hashPassword(r.FormValue("password"), salt)
 		config.WebPass = salt + "$" + pwdHash
-		
 		config.AgentToken = r.FormValue("token")
 		config.IsSetup = true
-		saveConfig()
+		saveConfigNoLock() // 修正：在锁内调用不带锁的保存函数
 		mu.Unlock()
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -894,19 +1015,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		t.Execute(w, map[string]interface{}{"TwoFA": isEnabled})
 		return
 	}
-
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if !checkLoginRateLimit(ip) {
 		http.Error(w, "尝试次数过多，请稍后再试", 429)
 		return
 	}
-
 	mu.Lock()
 	u, storedVal := config.WebUser, config.WebPass
 	twoFAEnabled := config.TwoFAEnabled
 	twoFASecret := config.TwoFASecret
 	mu.Unlock()
-	
 	passMatch := false
 	parts := strings.Split(storedVal, "$")
 	if len(parts) == 2 {
@@ -922,18 +1040,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			newHash := hashPassword(r.FormValue("password"), newSalt)
 			mu.Lock()
 			config.WebPass = newSalt + "$" + newHash
-			saveConfig()
+			saveConfigNoLock()
 			mu.Unlock()
 		}
 	}
-
 	if !passMatch {
 		recordLoginFail(ip)
 		t, _ := template.New("l").Parse(loginHtml)
-		t.Execute(w, map[string]interface{}{"TwoFA": false, "Error": "账号或密码错误"})
+		t.Execute(w, map[string]interface{}{"TwoFA": twoFAEnabled, "Error": "账号或密码错误"})
 		return
 	}
-
 	if twoFAEnabled {
 		code := r.FormValue("code")
 		if code == "" || !totp.Validate(code, twoFASecret) {
@@ -943,7 +1059,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
@@ -964,20 +1079,21 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	u := config.WebUser
+	mu.Unlock()
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      "GoRelay-Pro",
-		AccountName: config.WebUser,
+		AccountName: u,
 	})
 	if err != nil {
 		http.Error(w, "生成失败", 500)
 		return
 	}
-
 	var buf bytes.Buffer
 	img, _ := qr.Encode(key.URL(), qr.M, qr.Auto)
 	img, _ = barcode.Scale(img, 200, 200)
 	png.Encode(&buf, img)
-	
 	resp := map[string]string{
 		"secret": key.Secret(),
 		"qr":     "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()),
@@ -991,12 +1107,11 @@ func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 		Code   string `json:"code"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-
 	if totp.Validate(req.Code, req.Secret) {
 		mu.Lock()
 		config.TwoFASecret = req.Secret
 		config.TwoFAEnabled = true
-		saveConfig()
+		saveConfigNoLock()
 		mu.Unlock()
 		addLog(r, "安全设置", "开启双因素认证 (2FA)")
 		json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -1009,13 +1124,11 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	config.TwoFAEnabled = false
 	config.TwoFASecret = ""
-	saveConfig()
+	saveConfigNoLock()
 	mu.Unlock()
 	addLog(r, "安全设置", "关闭双因素认证 (2FA)")
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
-
-// --- 原有 Handlers ---
 
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -1023,7 +1136,6 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	}
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
-	
 	mu.Lock()
 	newRule := LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -1040,7 +1152,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		Disabled:     false,
 	}
 	rules = append(rules, newRule)
-	saveConfig()
+	saveConfigNoLock()
 	mu.Unlock()
 	addLog(r, "新建规则", fmt.Sprintf("添加转发: %s -> %s:%s", newRule.Note, newRule.TargetIP, newRule.TargetPort))
 	go pushConfigToAll()
@@ -1054,7 +1166,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
-
 	mu.Lock()
 	found := false
 	for i := range rules {
@@ -1073,7 +1184,7 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if found {
-		saveConfig()
+		saveConfigNoLock()
 	}
 	mu.Unlock()
 	if found {
@@ -1092,12 +1203,16 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 		if rules[i].ID == id {
 			rules[i].Disabled = !rules[i].Disabled
 			found = true
-			if rules[i].Disabled { state = "暂停" } else { state = "启用" }
+			if rules[i].Disabled {
+				state = "暂停"
+			} else {
+				state = "启用"
+			}
 			break
 		}
 	}
 	if found {
-		saveConfig()
+		saveConfigNoLock()
 	}
 	mu.Unlock()
 	if found {
@@ -1120,7 +1235,7 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if found {
-		saveConfig()
+		saveConfigNoLock()
 	}
 	mu.Unlock()
 	if found {
@@ -1140,7 +1255,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rules = nr
-	saveConfig()
+	saveConfigNoLock()
 	mu.Unlock()
 	addLog(r, "删除规则", fmt.Sprintf("移除规则 ID: %s", id))
 	go pushConfigToAll()
@@ -1178,23 +1293,28 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.MasterDomain = r.FormValue("master_domain")
 	config.TgBotToken = r.FormValue("tg_bot_token")
 	config.TgChatID = r.FormValue("tg_chat_id")
-	saveConfig()
+	saveConfigNoLock()
 	mu.Unlock()
 	addLog(r, "系统设置", "更新系统配置参数")
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
 }
 
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Disposition", "attachment; filename=config.json")
-	w.Header().Set("Content-Type", "application/json")
-	http.ServeFile(w, r, ConfigFile)
-	addLog(r, "数据备份", "下载配置文件 config.json")
+	w.Header().Set("Content-Disposition", "attachment; filename=data.db")
+	w.Header().Set("Content-Type", "application/x-sqlite3")
+	http.ServeFile(w, r, DBFile)
+	addLog(r, "数据备份", "下载数据库 data.db")
 }
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
-	mu.Lock()
-	b, _ := json.MarshalIndent(opLogs, "", "  ")
-	mu.Unlock()
+	var logs []OpLog
+	rows, _ := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
+	for rows.Next() {
+		var l OpLog
+		rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+		logs = append(logs, l)
+	}
+	b, _ := json.MarshalIndent(logs, "", "  ")
 	w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(b)
@@ -1205,28 +1325,22 @@ func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 
 func runAgent(name, masterAddr, token string) {
 	for {
-		// 自动探测 TLS
 		var conn net.Conn
 		var err error
-		
 		if useTLS {
 			conn, err = tls.Dial("tcp", masterAddr, &tls.Config{InsecureSkipVerify: true})
 		} else {
 			conn, err = net.Dial("tcp", masterAddr)
 		}
-
 		if err != nil {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		
 		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token}})
-
 		stop := make(chan struct{})
 		go func() {
-			// *** 关键优化：将心跳同步为 1 秒 ***
 			t := time.NewTicker(1 * time.Second)
-			h := time.NewTicker(10 * time.Second) // 健康检查 10s
+			h := time.NewTicker(10 * time.Second)
 			defer t.Stop()
 			defer h.Stop()
 			for {
@@ -1260,7 +1374,6 @@ func runAgent(name, masterAddr, token string) {
 				}
 			}
 		}()
-
 		dec := json.NewDecoder(conn)
 		for {
 			var msg Message
@@ -1282,7 +1395,6 @@ func runAgent(name, masterAddr, token string) {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
 				json.Unmarshal(d, &tasks)
-				
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
@@ -1295,7 +1407,6 @@ func runAgent(name, masterAddr, token string) {
 					} else {
 						restart = true
 					}
-
 					if restart {
 						if closeFunc, ok := runningListeners.Load(t.ID); ok {
 							closeFunc.(func())()
@@ -1312,7 +1423,6 @@ func runAgent(name, masterAddr, token string) {
 							activeTargets.Delete(t.ID)
 							time.Sleep(200 * time.Millisecond)
 						}
-						
 						agentTraffic.Store(t.ID, &TrafficCounter{})
 						var uz int64 = 0
 						agentUserCounts.Store(t.ID, &uz)
@@ -1321,7 +1431,6 @@ func runAgent(name, masterAddr, token string) {
 						startProxy(t)
 					}
 				}
-				
 				runningListeners.Range(func(k, v interface{}) bool {
 					if !active[k.(string)] {
 						v.(func())()
@@ -1345,11 +1454,11 @@ func checkTargetHealth(conn net.Conn) {
 		targetsStr := value.(string)
 		targets := strings.Split(targetsStr, ",")
 		var bestLat int64 = -1
-		
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
-			if target == "" { continue }
-			
+			if target == "" {
+				continue
+			}
 			start := time.Now()
 			c, err := net.DialTimeout("tcp", target, 2*time.Second)
 			if err == nil {
@@ -1366,7 +1475,6 @@ func checkTargetHealth(conn net.Conn) {
 		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
 		return true
 	})
-	
 	if len(results) > 0 {
 		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
@@ -1423,15 +1531,10 @@ func startProxy(t ForwardTask) {
 	v, _ := agentUserCounts.Load(t.ID)
 	userCountPtr := v.(*int64)
 	ipTracker := &IpTracker{refs: make(map[string]int), count: userCountPtr}
-
 	if t.Protocol == "tcp" || t.Protocol == "both" {
 		go func() {
 			ln, err := net.Listen("tcp", t.Listen)
 			if err != nil {
-				runningListeners.Delete(t.ID)
-				activeTargets.Delete(t.ID)
-				activeTasks.Delete(t.ID)
-				agentTraffic.Delete(t.ID)
 				return
 			}
 			l.Lock()
@@ -1471,10 +1574,6 @@ func startProxy(t ForwardTask) {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen)
 			ln, err := net.ListenUDP("udp", addr)
 			if err != nil {
-				runningListeners.Delete(t.ID)
-				activeTargets.Delete(t.ID)
-				activeTasks.Delete(t.ID)
-				agentTraffic.Delete(t.ID)
 				return
 			}
 			ln.SetReadBuffer(UDPBufferSize)
@@ -1490,24 +1589,25 @@ func startProxy(t ForwardTask) {
 func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 	defer src.Close()
 	allTargets := strings.Split(targetStr, ",")
-	
 	var healthyTargets []string
 	for _, t := range allTargets {
 		t = strings.TrimSpace(t)
-		if t == "" { continue }
+		if t == "" {
+			continue
+		}
 		if status, ok := targetHealthMap.Load(t); ok && status.(bool) {
 			healthyTargets = append(healthyTargets, t)
 		}
 	}
-
 	candidates := healthyTargets
 	if len(candidates) == 0 {
 		candidates = []string{}
 		for _, t := range allTargets {
-			if strings.TrimSpace(t) != "" { candidates = append(candidates, strings.TrimSpace(t)) }
+			if strings.TrimSpace(t) != "" {
+				candidates = append(candidates, strings.TrimSpace(t))
+			}
 		}
 	}
-
 	var dst net.Conn
 	var err error
 	if len(candidates) > 0 {
@@ -1521,12 +1621,10 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 			}
 		}
 	}
-
 	if dst == nil {
 		return
 	}
 	defer dst.Close()
-	
 	if tc, ok := dst.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(TCPKeepAlive)
@@ -1537,14 +1635,12 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 		return
 	}
 	cnt := v.(*TrafficCounter)
-	
 	go copyCount(dst, src, &cnt.Tx, limit)
 	copyCount(src, dst, &cnt.Rx, limit)
 }
 
 func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker, limit int64) {
 	targets := strings.Split(targetStr, ",")
-	
 	udpSessions := &sync.Map{}
 	defer func() {
 		udpSessions.Range(func(key, value interface{}) bool {
@@ -1552,7 +1648,6 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			return true
 		})
 	}()
-	
 	v, _ := agentTraffic.Load(tid)
 	if v == nil {
 		return
@@ -1588,28 +1683,34 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			s := val.(*udpSession)
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
-			throttle(n, limit, time.Now()) 
+			throttle(n, limit, time.Now())
 		} else {
 			var candidates []string
 			for _, t := range targets {
 				t = strings.TrimSpace(t)
-				if t == "" { continue }
+				if t == "" {
+					continue
+				}
 				if status, ok := targetHealthMap.Load(t); ok && status.(bool) {
 					candidates = append(candidates, t)
 				}
 			}
 			if len(candidates) == 0 {
 				for _, t := range targets {
-					if strings.TrimSpace(t) != "" { candidates = append(candidates, strings.TrimSpace(t)) }
+					if strings.TrimSpace(t) != "" {
+						candidates = append(candidates, strings.TrimSpace(t))
+					}
 				}
 			}
-			if len(candidates) == 0 { continue }
-
+			if len(candidates) == 0 {
+				continue
+			}
 			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
 			t := candidates[randIdx.Int64()]
 			dstAddr, _ := net.ResolveUDPAddr("udp", t)
-			if dstAddr == nil { continue }
-
+			if dstAddr == nil {
+				continue
+			}
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				continue
@@ -1617,10 +1718,8 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
-			
 			newConn.Write(buf[:n])
-			throttle(n, limit, time.Now()) 
-
+			throttle(n, limit, time.Now())
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
@@ -1657,7 +1756,6 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
-
 	for {
 		nr, err := src.Read(buf)
 		if nr > 0 {
@@ -1666,10 +1764,7 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 			if nw > 0 {
 				atomic.AddInt64(c, int64(nw))
 			}
-			if ew != nil {
-				break
-			}
-			if nr != nw {
+			if ew != nil || nr != nw {
 				break
 			}
 			throttle(nr, limit, start)
@@ -1680,35 +1775,91 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 	}
 }
 
-type CounterWriter struct {
-	io.Writer
-	Counter *int64
-}
-
-func (w *CounterWriter) Write(p []byte) (n int, err error) {
-	n, err = w.Writer.Write(p)
-	if n > 0 {
-		atomic.AddInt64(w.Counter, int64(n))
-	}
-	return
-}
+// ================= DATA PERSISTENCE =================
 
 func loadConfig() {
-	f, err := os.Open(ConfigFile)
-	if err == nil {
-		defer f.Close()
-		json.NewDecoder(f).Decode(&config)
-		rules = config.Rules
-		opLogs = config.Logs
+	mu.Lock()
+	defer mu.Unlock()
+	rows, _ := db.Query("SELECT key, value FROM settings")
+	for rows.Next() {
+		var k, v string
+		rows.Scan(&k, &v)
+		switch k {
+		case "web_user": config.WebUser = v
+		case "web_pass": config.WebPass = v
+		case "agent_token": config.AgentToken = v
+		case "master_ip": config.MasterIP = v
+		case "master_ipv6": config.MasterIPv6 = v
+		case "master_domain": config.MasterDomain = v
+		case "is_setup": config.IsSetup = (v == "true")
+		case "tg_bot_token": config.TgBotToken = v
+		case "tg_chat_id": config.TgChatID = v
+		case "two_fa_enabled": config.TwoFAEnabled = (v == "true")
+		case "two_fa_secret": config.TwoFASecret = v
+		}
+	}
+	rules = []LogicalRule{}
+	rRows, _ := db.Query("SELECT id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
+	for rRows.Next() {
+		var r LogicalRule
+		var disabled int
+		rRows.Scan(&r.ID, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &disabled, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
+		r.Disabled = (disabled == 1)
+		rules = append(rules, r)
 	}
 }
 
+// saveConfig 是一个外部调用的安全函数，它会自动获取锁。
 func saveConfig() {
-	config.Rules = rules
-	config.Logs = opLogs
-	f, _ := os.Create(ConfigFile)
-	defer f.Close()
-	json.NewEncoder(f).Encode(&config)
+	mu.Lock()
+	defer mu.Unlock()
+	saveConfigNoLock()
+}
+
+// saveConfigNoLock 是核心保存逻辑，它【不获取锁】，由已经持有锁的函数调用，防止死锁。
+func saveConfigNoLock() {
+	conf := config
+	localRules := make([]LogicalRule, len(rules))
+	copy(localRules, rules)
+
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("❌ 开启数据库事务失败: %v", err)
+		return
+	}
+	defer tx.Rollback()
+
+	setS := func(k, v string) { _, _ = tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
+	setS("web_user", conf.WebUser)
+	setS("web_pass", conf.WebPass)
+	setS("agent_token", conf.AgentToken)
+	setS("master_ip", conf.MasterIP)
+	setS("master_ipv6", conf.MasterIPv6)
+	setS("master_domain", conf.MasterDomain)
+	setS("is_setup", strconv.FormatBool(conf.IsSetup))
+	setS("tg_bot_token", conf.TgBotToken)
+	setS("tg_chat_id", conf.TgChatID)
+	setS("two_fa_enabled", strconv.FormatBool(conf.TwoFAEnabled))
+	setS("two_fa_secret", conf.TwoFASecret)
+
+	_, _ = tx.Exec("DELETE FROM rules")
+	for _, r := range localRules {
+		disabled := 0
+		if r.Disabled {
+			disabled = 1
+		}
+		_, err := tx.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		if err != nil {
+			log.Printf("❌ 插入规则失败: %v", err)
+		}
+	}
+	
+	if err := tx.Commit(); err != nil {
+		log.Printf("❌ 提交事务失败: %v", err)
+	}
 }
 
 func setupSignalHandler() {
@@ -1925,7 +2076,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
 .btn { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
 .btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
-.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } /* 保留部分次级按钮样式 */
+.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } 
 .btn.danger { background: var(--danger-bg); color: var(--danger-text); }
 .btn.danger:hover { background: var(--danger); color: #fff; }
 .btn.icon { padding: 8px; width: 34px; height: 34px; border-radius: 8px; }
@@ -2147,7 +2298,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         <div id="deploy" class="page">
             <div class="card">
                 <h3><i class="ri-install-line"></i> 节点安装向导</h3>
-                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。</p>
+                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器上执行以下命令以安装 Agent 客户端。</p>
                 
                 <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);margin-top:20px">
                     <div class="grid-form" style="margin-bottom:15px">
@@ -2290,33 +2441,26 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 </div>
 
 <script>
-    // --- 核心逻辑 ---
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
-        
         const titles = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'logs':'系统日志', 'settings':'系统设置'};
         const icons = {'dashboard':'ri-dashboard-3-line', 'deploy':'ri-rocket-2-line', 'rules':'ri-route-line', 'logs':'ri-file-list-3-line', 'settings':'ri-settings-4-line'};
         document.getElementById('page-text').innerText = titles[id];
         document.getElementById('page-icon').className = icons[id];
-        
         document.querySelectorAll('.sidebar .item').forEach(i => i.classList.remove('active'));
         if (el) el.classList.add('active');
-        else { const t = document.querySelector('.sidebar .item[onclick*="'+id+'"]'); if(t) t.classList.add('active'); }
-        
         document.querySelectorAll('.mobile-nav .nav-btn').forEach(b => b.classList.remove('active'));
         const mBtn = document.querySelector('.mobile-nav .nav-btn[onclick*="'+id+'"]');
         if(mBtn) mBtn.classList.add('active');
-
         if(location.hash !== '#'+id) { if(history.pushState) history.pushState(null,null,'#'+id); else location.hash = '#'+id; }
     }
     
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
 
-    // 复制文本
     function copyText(txt) {
         if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制: "+txt, "success"));
         else {
@@ -2327,21 +2471,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         }
     }
 
-    // 主题切换
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
         const next = curr === 'dark' ? 'light' : 'dark';
         html.setAttribute('data-theme', next);
         localStorage.setItem('theme', next);
-        updateChartTheme(next);
         document.getElementById('theme-icon').className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     }
-    const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    document.documentElement.setAttribute('data-theme', savedTheme);
-    document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
 
-    // Toast 提示
     function showToast(msg, type) {
         const box = document.getElementById('toast');
         const icon = document.getElementById('t-icon');
@@ -2353,7 +2491,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         setTimeout(() => box.className = 'toast', 3000);
     }
 
-    // 确认框
     function showConfirm(title, msg, type, cb) {
         document.getElementById('c_title').innerText = title;
         document.getElementById('c_msg').innerHTML = msg;
@@ -2366,7 +2503,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
-    // 部署命令逻辑
     function genCmd() {
         const n = document.getElementById('agentName').value;
         const t = document.getElementById('addrType').value;
@@ -2380,13 +2516,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
-    // 规则操作
     function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，确定吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的流量统计吗？", "normal", () => location.href="/reset_traffic?id="+id); }
     function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>这将向节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
-    // 编辑
     function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_note').value = note;
@@ -2401,90 +2535,37 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
-    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); document.getElementById('twoFAModal').style.display='none'; } }
 
-    // 2FA
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
     function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else alert("验证码错误"); }); }
     function disable2FA() { showConfirm("关闭 2FA", "关闭后账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
-    // --- Chart.js: 实时流量 (双线: Tx, Rx) ---
     var ctx = document.getElementById('trafficChart').getContext('2d');
-    
-    // 创建渐变
-    var txGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.4)'); // Violet
-    txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
-    
-    var rxGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.4)'); // Cyan
-    rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
-
     var chart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: Array(30).fill(''),
             datasets: [
-                {
-                    label: '上传 (Tx)',
-                    data: Array(30).fill(0),
-                    borderColor: '#8b5cf6',
-                    backgroundColor: txGrad,
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    fill: true,
-                    tension: 0.4
-                },
-                {
-                    label: '下载 (Rx)',
-                    data: Array(30).fill(0),
-                    borderColor: '#06b6d4',
-                    backgroundColor: rxGrad,
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    fill: true,
-                    tension: 0.4
-                }
+                { label: '上传 (Tx)', data: Array(30).fill(0), borderColor: '#8b5cf6', borderWidth: 2, pointRadius: 0, fill: false, tension: 0.4 },
+                { label: '下载 (Rx)', data: Array(30).fill(0), borderColor: '#06b6d4', borderWidth: 2, pointRadius: 0, fill: false, tension: 0.4 }
             ]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: true }, tooltip: { mode: 'index', intersect: false } },
-            scales: {
-                x: { display: false },
-                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.1)', borderDash: [5, 5] }, ticks: { callback: v => formatBytes(v)+'/s', color: '#94a3b8' } }
-            },
-            animation: { duration: 0 },
-            interaction: { mode: 'nearest', axis: 'x', intersect: false }
+            plugins: { legend: { display: true } },
+            scales: { x: { display: false }, y: { beginAtZero: true, ticks: { callback: v => formatBytes(v)+'/s' } } },
+            animation: { duration: 0 }
         }
     });
 
-    // --- Chart.js: 流量占比饼图 ---
     var ctxPie = document.getElementById('pieChart').getContext('2d');
     var pieChart = new Chart(ctxPie, {
         type: 'doughnut',
-        data: {
-            labels: [],
-            datasets: [{
-                data: [],
-                backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'],
-                borderWidth: 0
-            }]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { position: 'right', labels: { color: '#94a3b8', boxWidth: 12 } } },
-            cutout: '70%'
-        }
+        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'], borderWidth: 0 }] },
+        options: { responsive: true, maintainAspectRatio: false, cutout: '70%' }
     });
 
-    function updateChartTheme(theme) {
-        chart.options.scales.y.grid.color = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
-        chart.update();
-    }
-
-    // --- WS 数据处理 ---
     function formatBytes(b) {
         if(b==0) return "0 B";
         const u = 1024, i = Math.floor(Math.log(b)/Math.log(u));
@@ -2499,54 +2580,41 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 if(msg.type === 'stats' && msg.data) {
                     const d = msg.data;
                     document.getElementById('stat-total-traffic').innerText = formatBytes(d.total_traffic);
-                    
-                    // 实时速度
                     document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
                     document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
-                    
-                    // 更新线图
                     chart.data.datasets[0].data.push(d.speed_tx);
                     chart.data.datasets[0].data.shift();
                     chart.data.datasets[1].data.push(d.speed_rx);
                     chart.data.datasets[1].data.shift();
                     chart.update();
-
-                    // 更新饼图 (Top 5 流量规则)
                     if (d.rules) {
                         const sortedRules = [...d.rules].sort((a,b) => b.total - a.total).slice(0, 5);
                         pieChart.data.labels = sortedRules.map(r => r.name || '未命名');
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update();
                     }
-
-                    // 更新节点负载
                     if(d.agents) d.agents.forEach(a => {
                         const loadText = document.getElementById('load-text-'+a.name);
                         const loadBar = document.getElementById('load-bar-'+a.name);
                         if(loadText && loadBar) {
                             let loadStr = a.sys_status; 
-                            // 简单解析 Load: 0.05 | Mem ...
                             let loadVal = 0;
                             if(loadStr.includes("Load:")) {
                                 let parts = loadStr.split("|");
                                 loadVal = parseFloat(parts[0].replace("Load:", "").trim()) || 0;
                             }
                             loadText.innerText = loadVal.toFixed(2);
-                            let pct = loadVal * 20; // 假设 Load 5 = 100%
-                            if (pct > 100) pct = 100;
+                            let pct = loadVal * 20; if (pct > 100) pct = 100;
                             loadBar.style.width = pct + "%";
                             loadBar.style.background = pct > 80 ? "#ef4444" : "#6366f1";
                         }
                     });
-                    
-                    // 更新规则列表状态
                     if(d.rules) {
                         d.rules.forEach(r => {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
                             const lat = document.getElementById('rule-latency-'+r.id);
                             const dot = document.getElementById('rule-status-dot-'+r.id);
-                            
                             if(lat && dot) {
                                 if(r.status) {
                                     lat.innerHTML = '<i class="ri-pulse-line" style="color:#10b981"></i> ' + r.latency + ' ms';
@@ -2565,15 +2633,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                             }
                         });
                     }
-
                     if(d.logs && document.getElementById('logs').classList.contains('active')) {
                         const tbody = document.getElementById('log-table-body');
                         let html = '';
                         d.logs.forEach(l => {
-                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td>'+
-                                    '<td>'+l.ip+'</td>'+
-                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td>'+
-                                    '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
+                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td><td>'+l.ip+'</td><td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td><td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
                     }
