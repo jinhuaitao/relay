@@ -1,0 +1,18 @@
+# 忽略编译产物
+relay
+relay.exe
+relay-linux-*
+relay-windows-*
+relay-darwin-*
+
+# 忽略数据库和配置
+data.db
+config.json
+*.log
+
+# 忽略证书文件
+server.key
+server.crt
+
+# 忽略系统文件
+.DS_Store
