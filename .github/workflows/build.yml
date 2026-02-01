@@ -19,19 +19,19 @@ jobs:
         include:
           - os: linux
             arch: amd64
-            filename: gorelay-linux-amd64
+            filename: relay-linux-amd64
           - os: linux
             arch: arm64
-            filename: gorelay-linux-arm64
+            filename: relay-linux-arm64
           - os: windows
             arch: amd64
-            filename: gorelay-windows-amd64.exe
+            filename: relay-windows-amd64.exe
           - os: darwin
             arch: amd64
-            filename: gorelay-darwin-amd64
+            filename: relay-darwin-amd64
           - os: darwin
             arch: arm64
-            filename: gorelay-darwin-arm64
+            filename: relay-darwin-arm64
 
     steps:
     # 1. 拉取代码
