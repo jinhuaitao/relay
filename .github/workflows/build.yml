@@ -1,0 +1,67 @@
+name: Build and Release
+
+# 触发机制：当推送以 'v' 开头的标签时触发（例如 v1.0.0）
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 定义交叉编译的平台
+        include:
+          - os: linux
+            arch: amd64
+            filename: gorelay-linux-amd64
+          - os: linux
+            arch: arm64
+            filename: gorelay-linux-arm64
+          - os: windows
+            arch: amd64
+            filename: gorelay-windows-amd64.exe
+          - os: darwin
+            arch: amd64
+            filename: gorelay-darwin-amd64
+          - os: darwin
+            arch: arm64
+            filename: gorelay-darwin-arm64
+
+    steps:
+    # 1. 拉取代码
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. 设置 Go 环境
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21' # 你的 go.mod 中的版本
+
+    # 3. 下载依赖
+    - name: Download dependencies
+      run: go mod download
+
+    # 4. 编译 (禁用 CGO 以确保静态链接和跨平台兼容)
+    - name: Build Binary
+      env:
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0 
+      run: |
+        go build -ldflags "-s -w" -o ${{ matrix.filename }} main.go
+
+    # 5. 上传构建产物到 GitHub Release
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: ${{ matrix.filename }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
