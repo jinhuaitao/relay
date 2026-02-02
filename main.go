@@ -29,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ import (
 	"github.com/boombuler/barcode/qr"
 	"github.com/gorilla/websocket"
 	"github.com/pquerna/otp/totp"
-	_ "modernc.org/sqlite" // 纯 Go 实现的 SQLite 驱动
+	_ "modernc.org/sqlite"
 )
 
 // --- 配置与常量 ---
@@ -50,13 +51,12 @@ const (
 	ConfigFile      = "config.json"
 	ControlPort     = ":9999"
 	WebPort         = ":8888"
-	// 这里只保留基础 URL，架构后缀由前端 JS 动态拼接
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
 	CopyBufferSize  = 32 * 1024
 	MaxLogEntries   = 200
-	MaxLogRetention = 1000 // 自动清理：最多保留 1000 条日志
+	MaxLogRetention = 1000
 )
 
 var bufPool = sync.Pool{
@@ -70,6 +70,7 @@ var bufPool = sync.Pool{
 
 type LogicalRule struct {
 	ID           string `json:"id"`
+	Group        string `json:"group"`
 	Note         string `json:"note"`
 	EntryAgent   string `json:"entry_agent"`
 	EntryPort    string `json:"entry_port"`
@@ -219,6 +220,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 CREATE TABLE IF NOT EXISTS rules (
     id TEXT PRIMARY KEY,
+    group_name TEXT, 
     note TEXT,
     entry_agent TEXT,
     entry_port TEXT,
@@ -248,18 +250,17 @@ func initDB() {
 		log.Fatalf("❌ 无法打开数据库文件: %v", err)
 	}
 
-	// 优化：设置连接池上限
 	db.SetMaxOpenConns(1)
-
-	// 优化：WAL 模式与文件大小管理
 	db.Exec("PRAGMA journal_mode=WAL;")
-	db.Exec("PRAGMA journal_size_limit = 10485760;") // 限制 WAL 文件为 10MB
-	db.Exec("PRAGMA wal_autocheckpoint = 100;")      // 每 100 页尝试自动检查点
-	db.Exec("PRAGMA synchronous = NORMAL;")          // WAL 模式下的最佳平衡设置
+	db.Exec("PRAGMA journal_size_limit = 10485760;")
+	db.Exec("PRAGMA wal_autocheckpoint = 100;")
+	db.Exec("PRAGMA synchronous = NORMAL;")
 
 	if _, err := db.Exec(dbSchema); err != nil {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
+
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 
 	if _, err := os.Stat(ConfigFile); err == nil {
 		var count int
@@ -299,9 +300,9 @@ func migrateOldData() {
 		if r.Disabled {
 			disabled = 1
 		}
-		_, _ = db.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
 	}
 	_ = os.Rename(ConfigFile, ConfigFile+".bak")
 }
@@ -561,13 +562,10 @@ func runMaster() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
-			// 定时刷盘
 			if atomic.CompareAndSwapInt32(&configDirty, 1, 0) {
 				saveConfig()
 			}
-			// 定时清理旧日志
 			cleanOldLogs()
-			// 强制截断并重置 WAL 文件大小
 			db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		}
 	}()
@@ -673,7 +671,6 @@ func broadcastLoop() {
 		}
 		mu.Unlock()
 
-		// 修复：必须 rows.Close()，否则 Web 掉线
 		var logData []OpLog
 		lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
 		if err == nil {
@@ -807,7 +804,7 @@ func handleStatsReport(payload interface{}) {
 					rules[i].TotalTx += rep.TxDelta
 					rules[i].TotalRx += rep.RxDelta
 					rules[i].UserCount = rep.UserCount
-					atomic.StoreInt32(&configDirty, 1) // 标记脏数据
+					atomic.StoreInt32(&configDirty, 1)
 
 					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
 						limitTriggered = true
@@ -905,6 +902,14 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	displayRules := make([]LogicalRule, len(rules))
 	copy(displayRules, rules)
 	mu.Unlock()
+
+	// 排序规则：按 Group 排序，以便前端可以合并显示
+	sort.Slice(displayRules, func(i, j int) bool {
+		if displayRules[i].Group == displayRules[j].Group {
+			return displayRules[i].ID < displayRules[j].ID // 同组内按 ID 排序
+		}
+		return displayRules[i].Group < displayRules[j].Group
+	})
 
 	var displayLogs []OpLog
 	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
@@ -1106,6 +1111,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	rules = append(rules, LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
+		Group:        r.FormValue("group"),
 		Note:         r.FormValue("note"),
 		EntryAgent:   r.FormValue("entry_agent"),
 		EntryPort:    r.FormValue("entry_port"),
@@ -1130,6 +1136,7 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
+			rules[i].Group = r.FormValue("group")
 			rules[i].Note = r.FormValue("note")
 			rules[i].EntryAgent = r.FormValue("entry_agent")
 			rules[i].EntryPort = r.FormValue("entry_port")
@@ -1620,13 +1627,13 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	rRows, err := db.Query("SELECT id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
+	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
 	if err == nil {
 		defer rRows.Close()
 		for rRows.Next() {
 			var r LogicalRule
 			var d int
-			rRows.Scan(&r.ID, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
+			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
 			r.Disabled = (d == 1)
 			rules = append(rules, r)
 		}
@@ -1664,8 +1671,8 @@ func saveConfigNoLock() {
 		if r.Disabled {
 			d = 1
 		}
-		_, _ = tx.Exec(`INSERT INTO rules (id, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx)
 	}
 	_ = tx.Commit()
 }
@@ -1897,6 +1904,11 @@ th { text-align: left; padding: 16px 24px; color: var(--text-sub); font-size: 12
 td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; transition: background 0.2s; }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--input-bg); }
+.group-header { background: rgba(99, 102, 241, 0.08); cursor: pointer; user-select: none; }
+.group-header:hover { background: rgba(99, 102, 241, 0.15); }
+.group-header td { padding: 10px 24px; font-weight: 700; color: var(--primary); font-size: 13px; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+.group-icon { transition: transform 0.2s; display: inline-block; margin-right: 6px; }
+.group-collapsed .group-icon { transform: rotate(-90deg); }
 
 /* 状态徽标 */
 .badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; }
@@ -2081,6 +2093,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 <h3><i class="ri-add-circle-line"></i> 新建转发规则</h3>
                 <form action="/add" method="POST">
                     <div class="grid-form">
+                        <div class="form-group"><label>分组名称</label><input name="group" placeholder="例如: 业务A (留空为默认)"></div>
                         <div class="form-group"><label>备注名称</label><input name="note" placeholder="例如: 远程桌面" required></div>
                         <div class="form-group"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" placeholder="1024-65535" required></div>
@@ -2101,8 +2114,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                     <table>
                         <thead><tr><th>链路信息</th><th>目标地址 & 延迟</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead>
                         <tbody>
+                        {{$currentGroup := "INIT_h7&^"}}
                         {{range .Rules}}
-                        <tr style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
+                        {{if ne .Group $currentGroup}}
+                            <tr class="group-header" onclick="toggleGroup(this)" data-group="{{.Group}}">
+                                <td colspan="5">
+                                    <i class="ri-arrow-down-s-line group-icon"></i>
+                                    <i class="ri-folder-open-line"></i> 
+                                    {{if .Group}}{{.Group}}{{else}}默认分组{{end}}
+                                </td>
+                            </tr>
+                            {{$currentGroup = .Group}}
+                        {{end}}
+                        <tr class="rule-row" data-group="{{.Group}}" style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
                             <td>
                                 <div style="font-weight:700;font-size:15px;margin-bottom:6px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
@@ -2140,7 +2164,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                             <td>
                                 <div style="display:flex;gap:8px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置流量"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -2271,7 +2295,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
             <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap:20px">
-                <div class="form-group" style="grid-column: 1/-1"><label>备注名称</label><input name="note" id="e_note"></div>
+                <div class="form-group"><label>分组名称</label><input name="group" id="e_group" placeholder="例如: 业务A"></div>
+                <div class="form-group"><label>备注名称</label><input name="note" id="e_note"></div>
                 <div class="form-group"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" id="e_eport"></div>
                 <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
@@ -2334,6 +2359,51 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
+
+    // 分组折叠功能
+    document.addEventListener('DOMContentLoaded', () => {
+        const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
+        collapsed.forEach(g => {
+            const header = document.querySelector('.group-header[data-group="'+g+'"]');
+            if(header) setGroupState(header, false); // 页面加载时恢复折叠状态（false = 折叠）
+        });
+    });
+
+    function toggleGroup(header) {
+        // 判断当前状态：是否有 collapsed 类
+        const isCurrentlyCollapsed = header.classList.contains('group-collapsed');
+        
+        // 修正逻辑：
+        // 如果当前是【折叠】，我们要【展开】(true)
+        // 如果当前是【展开】，我们要【折叠】(false)
+        setGroupState(header, isCurrentlyCollapsed); 
+        
+        // 更新本地存储
+        const group = header.getAttribute('data-group');
+        let collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
+        if (isCurrentlyCollapsed) { 
+            // 如果原本是折叠的，现在展开了，所以从列表中移除
+            collapsed = collapsed.filter(i => i !== group);
+        } else {
+            // 如果原本是展开的，现在折叠了，添加到列表
+            if(!collapsed.includes(group)) collapsed.push(group);
+        }
+        localStorage.setItem('collapsed_groups', JSON.stringify(collapsed));
+    }
+
+    function setGroupState(header, expand) {
+        const group = header.getAttribute('data-group');
+        // 更安全的查找方式，避免特殊字符导致的选择器报错
+        const rows = Array.from(document.querySelectorAll('.rule-row')).filter(row => row.getAttribute('data-group') === group);
+
+        if (!expand) {
+            header.classList.add('group-collapsed');
+            rows.forEach(r => r.style.display = 'none');
+        } else {
+            header.classList.remove('group-collapsed');
+            rows.forEach(r => r.style.display = 'table-row');
+        }
+    }
 
     function copyText(txt) {
         if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制: "+txt, "success"));
@@ -2402,8 +2472,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的历史流量统计数据吗？", "normal", () => location.href="/reset_traffic?id="+id); }
     function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
-    function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit, speed) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
+        document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
         document.getElementById('e_entry').value = entry;
         document.getElementById('e_eport').value = eport;
