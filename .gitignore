@@ -2,7 +2,6 @@
 relay
 relay.exe
 relay-linux-*
-relay-windows-*
 relay-darwin-*
 
 # 忽略数据库和配置
