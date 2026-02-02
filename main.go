@@ -1716,27 +1716,28 @@ const setupHtml = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <style>
-:root { --primary: #6366f1; --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --text-sub: #94a3b8; --border: #334155; }
-body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-image: radial-gradient(circle at top right, #1e1b4b, transparent 40%), radial-gradient(circle at bottom left, #312e81, transparent 40%); }
-.card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 40px; border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); width: 100%; max-width: 400px; border: 1px solid rgba(255,255,255,0.1); }
-h2 { text-align: center; margin: 0 0 10px 0; font-size: 24px; font-weight: 700; background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-p { text-align: center; color: var(--text-sub); margin-bottom: 30px; font-size: 14px; }
+:root { --primary: #6366f1; --bg: #0f172a; --text: #f8fafc; --text-sub: #94a3b8; }
+body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-image: radial-gradient(circle at top right, #312e81, transparent 40%), radial-gradient(circle at bottom left, #1e1b4b, transparent 40%); }
+.card { background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 40px; border-radius: 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); width: 100%; max-width: 400px; border: 1px solid rgba(255,255,255,0.1); }
+h2 { text-align: center; margin: 0 0 10px 0; font-size: 26px; font-weight: 800; background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+p { text-align: center; color: var(--text-sub); margin-bottom: 30px; font-size: 14px; line-height: 1.5; }
 .input-group { margin-bottom: 20px; position: relative; }
-.input-group i { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-sub); }
-input { width: 100%; padding: 14px 14px 14px 44px; border: 1px solid var(--border); border-radius: 12px; background: rgba(15, 23, 42, 0.6); color: var(--text); outline: none; transition: .3s; box-sizing: border-box; font-size: 14px; }
-input:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); background: rgba(15, 23, 42, 0.8); }
-button { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .3s; box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.3); }
+.input-group i { position: absolute; left: 16px; top: 50%; transform: translateY(-50%); color: var(--text-sub); transition: .3s; }
+input { width: 100%; padding: 14px 14px 14px 44px; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; background: rgba(15, 23, 42, 0.6); color: var(--text); outline: none; transition: .3s; box-sizing: border-box; font-size: 14px; }
+input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2); background: rgba(15, 23, 42, 0.9); }
+input:focus + i { color: var(--primary); }
+button { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .3s; box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.3); display: flex; align-items: center; justify-content: center; gap: 8px; }
 button:hover { transform: translateY(-2px); box-shadow: 0 20px 25px -5px rgba(99, 102, 241, 0.4); }
 </style>
 </head>
 <body>
 <form class="card" method="POST">
     <h2>GoRelay Pro</h2>
-    <p>欢迎使用，请配置您的初始管理员账户</p>
-    <div class="input-group"><i class="ri-user-line"></i><input name="username" placeholder="设置管理员用户名" required autocomplete="off"></div>
-    <div class="input-group"><i class="ri-lock-password-line"></i><input type="password" name="password" placeholder="设置登录密码" required></div>
-    <div class="input-group"><i class="ri-key-2-line"></i><input name="token" placeholder="设置通信 Token (用于连接 Agent)" required></div>
-    <button>完成初始化 <i class="ri-arrow-right-line" style="vertical-align: middle; margin-left: 5px;"></i></button>
+    <p>欢迎使用，请配置初始管理员账户<br>并设置通信 Token 密钥</p>
+    <div class="input-group"><input name="username" placeholder="设置管理员用户名" required autocomplete="off"><i class="ri-user-line"></i></div>
+    <div class="input-group"><input type="password" name="password" placeholder="设置登录密码" required><i class="ri-lock-password-line"></i></div>
+    <div class="input-group"><input name="token" placeholder="设置通信 Token (Agent 连接密钥)" required><i class="ri-key-2-line"></i></div>
+    <button>完成初始化 <i class="ri-arrow-right-line"></i></button>
 </form>
 </body>
 </html>`
@@ -1748,16 +1749,16 @@ const loginHtml = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <style>
-:root { --primary: #6366f1; --bg: #0f172a; --text: #f8fafc; --text-sub: #94a3b8; }
+:root { --primary: #6366f1; --bg: #020617; --text: #f8fafc; --text-sub: #94a3b8; }
 body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; position: relative; }
-.bg-glow { position: absolute; width: 600px; height: 600px; background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, rgba(0,0,0,0) 70%); top: -10%; left: -10%; z-index: -1; animation: float 10s infinite ease-in-out; }
-.bg-glow-2 { position: absolute; width: 500px; height: 500px; background: radial-gradient(circle, rgba(168,85,247,0.15) 0%, rgba(0,0,0,0) 70%); bottom: -10%; right: -10%; z-index: -1; animation: float 10s infinite ease-in-out reverse; }
+.bg-glow { position: absolute; width: 600px; height: 600px; background: radial-gradient(circle, rgba(99,102,241,0.1) 0%, rgba(0,0,0,0) 70%); top: -10%; left: -10%; z-index: -1; animation: float 10s infinite ease-in-out; }
+.bg-glow-2 { position: absolute; width: 500px; height: 500px; background: radial-gradient(circle, rgba(168,85,247,0.1) 0%, rgba(0,0,0,0) 70%); bottom: -10%; right: -10%; z-index: -1; animation: float 10s infinite ease-in-out reverse; }
 @keyframes float { 0%,100%{transform:translate(0,0)} 50%{transform:translate(30px, 30px)} }
 
-.card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); padding: 48px 40px; border-radius: 24px; width: 100%; max-width: 380px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }
+.card { background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); padding: 48px 40px; border-radius: 24px; width: 100%; max-width: 360px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); }
 .header { text-align: center; margin-bottom: 32px; }
-.logo { font-size: 48px; margin-bottom: 10px; display: inline-block; background: linear-gradient(135deg, #818cf8, #c084fc); -webkit-background-clip: text; color: transparent; }
-.header h2 { margin: 0; font-size: 24px; font-weight: 700; color: #fff; }
+.logo-icon { font-size: 48px; margin-bottom: 10px; display: inline-block; background: linear-gradient(135deg, #818cf8, #c084fc); -webkit-background-clip: text; color: transparent; filter: drop-shadow(0 0 10px rgba(99,102,241,0.3)); }
+.header h2 { margin: 0; font-size: 24px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
 .header p { margin: 8px 0 0; color: var(--text-sub); font-size: 14px; }
 
 .input-box { margin-bottom: 20px; position: relative; }
@@ -1768,25 +1769,26 @@ input:focus + i { color: var(--primary); }
 
 button { width: 100%; padding: 14px; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #fff; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; transition: .3s; margin-top: 10px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2); display: flex; align-items: center; justify-content: center; gap: 8px; }
 button:hover { transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(99, 102, 241, 0.4); }
-.error-msg { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 10px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; text-align: center; border: 1px solid rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; gap: 6px; }
+.error-msg { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 12px; border-radius: 10px; font-size: 13px; margin-bottom: 24px; text-align: center; border: 1px solid rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; gap: 6px; animation: shake 0.4s ease-in-out; }
+@keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-5px)} 75%{transform:translateX(5px)} }
 </style>
 </head>
 <body>
 <div class="bg-glow"></div><div class="bg-glow-2"></div>
 <form class="card" method="POST">
     <div class="header">
-        <i class="ri-globe-line logo"></i>
+        <i class="ri-globe-line logo-icon"></i>
         <h2>GoRelay Pro</h2>
-        <p>安全内网穿透管理系统</p>
+        <p>安全内网穿透控制台</p>
     </div>
-    {{if .Error}}<div class="error-msg"><i class="ri-error-warning-line"></i> {{.Error}}</div>{{end}}
+    {{if .Error}}<div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>{{end}}
     
-    <div class="input-box"><input name="username" placeholder="管理员账号" required><i class="ri-user-3-line"></i></div>
-    <div class="input-box"><input type="password" name="password" placeholder="密码" required><i class="ri-lock-2-line"></i></div>
+    <div class="input-box"><input name="username" placeholder="管理员账号" required autocomplete="off"><i class="ri-user-3-line"></i></div>
+    <div class="input-box"><input type="password" name="password" placeholder="登录密码" required><i class="ri-lock-2-line"></i></div>
     {{if .TwoFA}}
-    <div class="input-box"><input name="code" placeholder="两步验证码 (2FA)" required pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 2px; text-align: center; padding-left: 14px;"><i class="ri-shield-keyhole-line" style="left: auto; right: 16px;"></i></div>
+    <div class="input-box"><input name="code" placeholder="2FA 动态验证码" required pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 2px; text-align: center; padding-left: 14px;"><i class="ri-shield-keyhole-line" style="left: auto; right: 16px;"></i></div>
     {{end}}
-    <button>登录系统 <i class="ri-arrow-right-line"></i></button>
+    <button>立即登录 <i class="ri-arrow-right-line"></i></button>
 </form>
 </body>
 </html>`
@@ -1798,38 +1800,41 @@ const dashboardHtml = `
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>GoRelay Pro 仪表盘</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-/* --- 现代 CSS 变量 --- */
+/* --- 现代 CSS 变量定义 --- */
 :root {
-    --primary: #6366f1; --primary-hover: #4f46e5; --primary-light: rgba(99, 102, 241, 0.15);
-    --bg-body: #f1f5f9; --bg-sidebar: #0f172a; --bg-card: #ffffff;
+    --primary: #6366f1; --primary-hover: #4f46e5; --primary-light: rgba(99, 102, 241, 0.1);
+    --bg-body: #f8fafc; --bg-sidebar: #0f172a; --bg-card: #ffffff;
     --text-main: #0f172a; --text-sub: #64748b; --text-inv: #ffffff;
-    --border: #e2e8f0; --input-bg: #f8fafc;
-    --success: #10b981; --success-bg: #d1fae5; --success-text: #065f46;
-    --danger: #ef4444; --danger-bg: #fee2e2; --danger-text: #991b1b;
-    --warning: #f59e0b; --warning-bg: #fef3c7; --warning-text: #92400e;
+    --border: #e2e8f0; --input-bg: #f1f5f9;
+    --success: #10b981; --success-bg: #ecfdf5; --success-text: #047857;
+    --danger: #ef4444; --danger-bg: #fef2f2; --danger-text: #b91c1c;
+    --warning: #f59e0b; --warning-bg: #fffbeb; --warning-text: #b45309;
     --radius: 16px;
-    --shadow: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+    --shadow: 0 4px 6px -1px rgba(0,0,0,0.02), 0 2px 4px -1px rgba(0,0,0,0.02);
     --sidebar-w: 260px;
-    --trans: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --trans: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 [data-theme="dark"] {
-    --bg-body: #020617; --bg-sidebar: #0f172a; --bg-card: #1e293b;
-    --text-main: #f8fafc; --text-sub: #94a3b8;
-    --border: #334155; --input-bg: #0f172a;
+    --bg-body: #020617; --bg-sidebar: #0f172a; --bg-card: rgba(30, 41, 59, 0.7);
+    --text-main: #f1f5f9; --text-sub: #94a3b8;
+    --border: rgba(255,255,255,0.08); --input-bg: rgba(15, 23, 42, 0.6);
     --primary-light: rgba(99, 102, 241, 0.2);
-    --success-bg: rgba(16, 185, 129, 0.2); --success-text: #34d399;
-    --danger-bg: rgba(239, 68, 68, 0.2); --danger-text: #f87171;
-    --warning-bg: rgba(245, 158, 11, 0.2); --warning-text: #fbbf24;
-    --shadow: 0 10px 15px -3px rgba(0,0,0,0.4);
+    --success-bg: rgba(16, 185, 129, 0.15); --success-text: #34d399;
+    --danger-bg: rgba(239, 68, 68, 0.15); --danger-text: #f87171;
+    --warning-bg: rgba(245, 158, 11, 0.15); --warning-text: #fbbf24;
+    --shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
 }
 
-/* --- 基础样式 --- */
+/* --- 全局样式 --- */
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-body { margin: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; transition: var(--trans); }
+body { margin: 0; font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; transition: background 0.3s ease; }
+/* 背景装饰 */
+body::before { content: ''; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle at 80% 0%, rgba(99,102,241,0.08) 0%, transparent 50%), radial-gradient(circle at 0% 100%, rgba(168,85,247,0.08) 0%, transparent 50%); z-index: -1; pointer-events: none; }
+
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -1837,105 +1842,123 @@ body { margin: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-
 
 /* --- 侧边栏 --- */
 .sidebar { width: var(--sidebar-w); background: var(--bg-sidebar); color: var(--text-inv); display: flex; flex-direction: column; flex-shrink: 0; z-index: 50; border-right: 1px solid rgba(255,255,255,0.05); }
-.brand { height: 70px; display: flex; align-items: center; padding: 0 24px; font-size: 20px; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.05); gap: 10px; background: linear-gradient(90deg, #6366f1, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.brand i { color: #818cf8; font-size: 24px; -webkit-text-fill-color: #818cf8; }
-.menu { flex: 1; padding: 20px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-.item { display: flex; align-items: center; padding: 12px 16px; color: #94a3b8; cursor: pointer; border-radius: 12px; transition: var(--trans); font-size: 14px; font-weight: 500; }
+.brand { height: 72px; display: flex; align-items: center; padding: 0 24px; font-size: 20px; font-weight: 800; gap: 12px; letter-spacing: -0.5px; }
+.brand i { color: #818cf8; font-size: 26px; }
+.menu { flex: 1; padding: 20px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.item { display: flex; align-items: center; padding: 12px 16px; color: #94a3b8; cursor: pointer; border-radius: 12px; transition: var(--trans); font-size: 14px; font-weight: 500; margin-bottom: 2px; }
 .item:hover { background: rgba(255,255,255,0.05); color: #fff; }
-.item.active { background: linear-gradient(90deg, var(--primary) 0%, rgba(99,102,241,0.8) 100%); color: #fff; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+.item.active { background: linear-gradient(90deg, var(--primary) 0%, rgba(99,102,241,0.6) 100%); color: #fff; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
 .item i { margin-right: 12px; font-size: 18px; }
 
-.user-panel { padding: 20px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.1); }
+.user-panel { padding: 20px; border-top: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.2); }
 .user-card { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.avatar { width: 36px; height: 36px; background: linear-gradient(135deg, #a5b4fc, #6366f1); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.avatar { width: 40px; height: 40px; background: linear-gradient(135deg, #a5b4fc, #6366f1); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
 .user-meta div:first-child { font-weight: 600; font-size: 14px; }
 .user-meta div:last-child { font-size: 12px; opacity: 0.6; }
-.btn-logout { display: flex; align-items: center; justify-content: center; width: 100%; padding: 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: transparent; color: #f87171; cursor: pointer; font-size: 12px; gap: 6px; transition: var(--trans); text-decoration: none; }
+.btn-logout { display: flex; align-items: center; justify-content: center; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: transparent; color: #f87171; cursor: pointer; font-size: 13px; gap: 6px; transition: var(--trans); text-decoration: none; font-weight: 500; }
 .btn-logout:hover { background: rgba(239,68,68,0.1); border-color: #ef4444; }
 
 /* --- 主内容区 --- */
-.main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; }
-.header { height: 70px; background: var(--bg-card); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; transition: var(--trans); }
-.page-title { font-weight: 700; font-size: 18px; display: flex; align-items: center; gap: 10px; }
-.theme-toggle { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-body); color: var(--text-main); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: var(--trans); }
-.theme-toggle:hover { background: var(--border); }
+.main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; min-width: 0; }
+.header { height: 72px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; transition: var(--trans); z-index: 40; }
+.page-title { font-weight: 800; font-size: 24px; display: flex; align-items: center; gap: 12px; color: var(--text-main); letter-spacing: -0.5px; }
+.page-title i { color: var(--primary); }
+.theme-toggle { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-main); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: var(--trans); backdrop-filter: blur(10px); }
+.theme-toggle:hover { border-color: var(--primary); color: var(--primary); box-shadow: 0 0 10px var(--primary-light); }
 
-.content { flex: 1; padding: 24px; overflow-y: auto; overflow-x: hidden; }
-.page { display: none; animation: fadeIn 0.4s ease; max-width: 1400px; margin: 0 auto; }
+.content { flex: 1; padding: 0 32px 32px 32px; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+.page { display: none; max-width: 1400px; margin: 0 auto; animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
 .page.active { display: block; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
-/* --- 卡片与布局 --- */
-.card { background: var(--bg-card); padding: 24px; border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); margin-bottom: 24px; position: relative; overflow: hidden; }
-h3 { margin: 0 0 20px 0; font-size: 16px; color: var(--text-main); font-weight: 700; display: flex; align-items: center; gap: 8px; }
-h3 i { color: var(--primary); }
+/* --- 卡片与组件 --- */
+.card { background: var(--bg-card); padding: 24px; border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); margin-bottom: 24px; position: relative; overflow: hidden; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); transition: transform 0.2s; }
+.card:hover { border-color: rgba(99,102,241,0.3); }
+
+h3 { margin: 0 0 20px 0; font-size: 16px; color: var(--text-main); font-weight: 700; display: flex; align-items: center; gap: 10px; }
+h3 i { color: var(--primary); background: var(--primary-light); padding: 6px; border-radius: 8px; font-size: 16px; }
 
 .dashboard-grid { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; margin-bottom: 24px; }
-@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 24px; }
-.stat-item { padding: 24px; display: flex; align-items: center; justify-content: space-between; position: relative; overflow: hidden; }
-.stat-item::after { content: ''; position: absolute; right: -20px; top: -20px; width: 100px; height: 100px; background: var(--primary); opacity: 0.05; border-radius: 50%; filter: blur(20px); }
-.stat-val { font-size: 28px; font-weight: 800; color: var(--text-main); line-height: 1.2; letter-spacing: -0.5px; }
-.stat-label { color: var(--text-sub); font-size: 13px; font-weight: 500; margin-top: 4px; }
-.stat-icon { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 26px; background: var(--input-bg); color: var(--primary); border: 1px solid var(--border); }
+/* 统计卡片 */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 24px; margin-bottom: 24px; }
+.stat-item { padding: 24px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; height: 140px; border: 1px solid var(--border); background: linear-gradient(145deg, var(--bg-card) 0%, rgba(99,102,241,0.03) 100%); }
+.stat-item::before { content: ''; position: absolute; right: -20px; top: -20px; width: 100px; height: 100px; background: currentColor; opacity: 0.08; border-radius: 50%; filter: blur(30px); }
+.stat-item i.bg-icon { position: absolute; right: 20px; bottom: 20px; font-size: 64px; opacity: 0.05; transform: rotate(-15deg); pointer-events: none; }
+.stat-label { color: var(--text-sub); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.stat-val { font-size: 32px; font-weight: 800; color: var(--text-main); letter-spacing: -1px; z-index: 1; }
+.stat-trend { font-size: 13px; margin-top: auto; display: flex; align-items: center; gap: 4px; font-weight: 500; }
 
-/* --- 表格 --- */
+/* 表格 */
 .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-card); }
 table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 th { text-align: left; padding: 16px 24px; color: var(--text-sub); font-size: 12px; font-weight: 600; text-transform: uppercase; background: var(--input-bg); border-bottom: 1px solid var(--border); }
-td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; }
+td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; transition: background 0.2s; }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--input-bg); }
 
-.badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-.badge.success { background: var(--success-bg); color: var(--success-text); }
-.badge.danger { background: var(--danger-bg); color: var(--danger-text); }
-.badge.warning { background: var(--warning-bg); color: var(--warning-text); }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; position: relative; }
-.status-dot.pulse::after { content: ''; position: absolute; width: 100%; height: 100%; border-radius: 50%; background: inherit; animation: pulse 1.5s infinite; opacity: 0.6; transform: scale(1); }
-@keyframes pulse { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(2.5); opacity: 0; } }
+/* 状态徽标 */
+.badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; }
+.badge.success { background: var(--success-bg); color: var(--success-text); border-color: rgba(16,185,129,0.2); }
+.badge.danger { background: var(--danger-bg); color: var(--danger-text); border-color: rgba(239,68,68,0.2); }
+.badge.warning { background: var(--warning-bg); color: var(--warning-text); border-color: rgba(245,158,11,0.2); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; position: relative; background: currentColor; }
+.status-dot.pulse::after { content: ''; position: absolute; top: -4px; left: -4px; right: -4px; bottom: -4px; border-radius: 50%; border: 2px solid currentColor; animation: pulse 2s infinite; opacity: 0.5; }
+@keyframes pulse { 0% { transform: scale(0.8); opacity: 0.8; } 100% { transform: scale(2); opacity: 0; } }
 
-/* --- 按钮与表单 --- */
-.grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; align-items: end; }
+/* 表单与按钮 */
+.grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; align-items: end; }
 .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-sub); }
-input, select { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: 0.2s; }
-input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-light); }
+input, select { width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: 0.2s; font-family: inherit; }
+input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-light); background: var(--bg-card); }
 
-.btn { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; }
-.btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
-.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); } /* 保留部分次级按钮样式 */
-.btn.danger { background: var(--danger-bg); color: var(--danger-text); }
+.btn { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; box-shadow: 0 4px 6px -1px rgba(99, 102, 241, 0.3); }
+.btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 8px 12px -1px rgba(99, 102, 241, 0.4); }
+.btn:active { transform: translateY(0); }
+.btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-main); box-shadow: none; }
+.btn.secondary:hover { background: var(--input-bg); border-color: var(--text-sub); }
+.btn.danger { background: var(--danger-bg); color: var(--danger-text); border: 1px solid rgba(239,68,68,0.2); box-shadow: none; }
 .btn.danger:hover { background: var(--danger); color: #fff; }
-.btn.icon { padding: 8px; width: 34px; height: 34px; border-radius: 8px; }
+.btn.icon { padding: 8px; width: 36px; height: 36px; border-radius: 8px; font-size: 16px; }
 
-/* --- 进度条 --- */
+/* 进度条 */
 .progress { width: 100%; height: 6px; background: var(--border); border-radius: 10px; overflow: hidden; margin-top: 8px; }
-.progress-bar { height: 100%; background: var(--primary); border-radius: 10px; transition: width 0.5s ease; }
+.progress-bar { height: 100%; background: var(--primary); border-radius: 10px; transition: width 0.5s ease; box-shadow: 0 0 10px var(--primary-light); }
 
-/* --- 模态框 --- */
+/* 终端窗口样式 */
+.terminal-window { background: #1e293b; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden; border: 1px solid #334155; font-family: 'JetBrains Mono', monospace; }
+.terminal-header { background: #0f172a; padding: 10px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #334155; }
+.dot { width: 12px; height: 12px; border-radius: 50%; }
+.dot.red { background: #ef4444; } .dot.yellow { background: #f59e0b; } .dot.green { background: #10b981; }
+.terminal-body { padding: 20px; color: #e2e8f0; font-size: 13px; line-height: 1.6; word-break: break-all; position: relative; }
+.cmd-content { opacity: 0.8; }
+.copy-overlay { position: absolute; top: 10px; right: 10px; }
+
+/* 模态框 */
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); animation: fadeIn 0.2s; }
-.modal-content { background: var(--bg-card); margin: 8vh auto; padding: 30px; border-radius: 20px; width: 90%; max-width: 500px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border); transform: scale(0.95); animation: scaleIn 0.3s forwards; position: relative; max-height: 85vh; overflow-y: auto; }
+.modal-content { background: var(--bg-card); margin: 8vh auto; padding: 32px; border-radius: 24px; width: 90%; max-width: 550px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border); transform: scale(0.95); animation: scaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; position: relative; max-height: 85vh; overflow-y: auto; }
 @keyframes scaleIn { to { transform: scale(1); opacity: 1; } }
-.close-modal { position: absolute; right: 20px; top: 20px; font-size: 24px; cursor: pointer; color: var(--text-sub); }
-.close-modal:hover { color: var(--text-main); }
+.close-modal { position: absolute; right: 24px; top: 24px; font-size: 24px; cursor: pointer; color: var(--text-sub); transition: .2s; }
+.close-modal:hover { color: var(--text-main); transform: rotate(90deg); }
 
-/* --- 移动端适配 --- */
+/* 移动端适配 */
 .mobile-nav { display: none; }
 @media (max-width: 768px) {
     .sidebar { display: none; }
-    .header { padding: 0 16px; }
-    .content { padding: 16px; padding-bottom: 80px; }
+    .header { padding: 0 20px; height: 64px; }
+    .content { padding: 20px 20px 90px 20px; }
     .stats-grid { grid-template-columns: 1fr; }
-    .mobile-nav { display: flex; position: fixed; bottom: 0; left: 0; width: 100%; background: var(--bg-card); border-top: 1px solid var(--border); height: 60px; z-index: 100; justify-content: space-around; padding-bottom: env(safe-area-inset-bottom); }
-    .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sub); font-size: 10px; gap: 4px; }
+    .mobile-nav { display: flex; position: fixed; bottom: 0; left: 0; width: 100%; background: rgba(var(--bg-card), 0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); height: 64px; z-index: 100; justify-content: space-around; padding-bottom: env(safe-area-inset-bottom); align-items: center; }
+    .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sub); font-size: 10px; gap: 4px; height: 100%; transition: .2s; }
     .nav-btn.active { color: var(--primary); }
-    .nav-btn i { font-size: 20px; }
+    .nav-btn.active i { transform: translateY(-2px); }
+    .nav-btn i { font-size: 22px; transition: .2s; }
 }
 
-/* --- Toast --- */
-.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: rgba(15, 23, 42, 0.9); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: 0.3s; z-index: 2000; display: flex; align-items: center; gap: 8px; backdrop-filter: blur(10px); box-shadow: 0 10px 20px rgba(0,0,0,0.2); }
-.toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 80px; }
+/* Toast */
+.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: rgba(15, 23, 42, 0.95); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 10px; backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
+.toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 100px; }
 </style>
 </head>
 <body>
@@ -1945,8 +1968,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 <div class="sidebar">
     <div class="brand"><i class="ri-globe-line"></i> GoRelay Pro</div>
     <div class="menu">
-        <div class="item active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i> 概览</div>
-        <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发规则</div>
+        <div class="item active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i> 概览监控</div>
+        <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发管理</div>
         <div class="item" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i> 节点部署</div>
         <div class="item" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i> 系统日志</div>
         <div class="item" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i> 系统设置</div>
@@ -1956,7 +1979,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div class="user-meta">
                 <div>{{.User}}</div>
-                <div>管理员 (Admin)</div>
+                <div>管理员在线</div>
             </div>
         </div>
         <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i> 安全退出</a>
@@ -1965,11 +1988,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
 <div class="main">
     <header class="header">
-        <div class="page-title"><i class="ri-dashboard-3-line" id="page-icon"></i> <span id="page-text">仪表盘</span></div>
-        <div style="display:flex;gap:10px">
-            <a href="https://github.com/jinhuaitao/relay" target="_blank" class="theme-toggle" style="text-decoration:none;color:var(--text-main)" title="项目源码">
-                <i class="ri-github-line"></i>
-            </a>
+        <div class="page-title"><span id="page-text">仪表盘</span></div>
+        <div style="display:flex;gap:16px;align-items:center">
+            <a href="https://github.com/jinhuaitao/relay" target="_blank" class="theme-toggle" title="项目源码"><i class="ri-github-line"></i></a>
             <div class="theme-toggle" onclick="toggleTheme()"><i class="ri-moon-line" id="theme-icon"></i></div>
         </div>
     </header>
@@ -1977,43 +1998,47 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     <div class="content">
         <div id="dashboard" class="page active">
             <div class="stats-grid">
-                <div class="card stat-item">
+                <div class="card stat-item" style="color:#6366f1">
                     <div>
                         <div class="stat-label">累计总流量</div>
                         <div class="stat-val" id="stat-total-traffic">{{formatBytes .TotalTraffic}}</div>
                     </div>
-                    <div class="stat-icon"><i class="ri-arrow-up-down-line"></i></div>
+                    <div class="stat-trend"><i class="ri-database-2-line"></i> 数据中继总量</div>
+                    <i class="ri-arrow-up-down-line bg-icon"></i>
                 </div>
-                <div class="card stat-item">
+                <div class="card stat-item" style="color:#06b6d4">
                     <div>
                         <div class="stat-label">实时下载 (Rx)</div>
-                        <div class="stat-val" id="speed-rx" style="color:#06b6d4">0 B/s</div>
+                        <div class="stat-val" id="speed-rx">0 B/s</div>
                     </div>
-                    <div class="stat-icon" style="color:#06b6d4;background:rgba(6,182,212,0.1);border-color:rgba(6,182,212,0.2)"><i class="ri-download-2-line"></i></div>
+                    <div class="stat-trend"><i class="ri-download-2-line"></i> 当前下行带宽</div>
+                    <i class="ri-speed-line bg-icon"></i>
                 </div>
-                <div class="card stat-item">
+                <div class="card stat-item" style="color:#8b5cf6">
                     <div>
                         <div class="stat-label">实时上传 (Tx)</div>
-                        <div class="stat-val" id="speed-tx" style="color:#8b5cf6">0 B/s</div>
+                        <div class="stat-val" id="speed-tx">0 B/s</div>
                     </div>
-                    <div class="stat-icon" style="color:#8b5cf6;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.2)"><i class="ri-upload-2-line"></i></div>
+                    <div class="stat-trend"><i class="ri-upload-2-line"></i> 当前上行带宽</div>
+                    <i class="ri-upload-cloud-line bg-icon"></i>
                 </div>
-                <div class="card stat-item">
+                <div class="card stat-item" style="color:#10b981">
                     <div>
                         <div class="stat-label">在线节点</div>
-                        <div class="stat-val">{{len .Agents}} <span style="font-size:14px;color:var(--text-sub);font-weight:500">/ {{len .Rules}} 规则</span></div>
+                        <div class="stat-val">{{len .Agents}} <span style="font-size:16px;opacity:0.6;font-weight:600">/ {{len .Rules}}</span></div>
                     </div>
-                    <div class="stat-icon" style="color:#10b981;background:var(--success-bg);border-color:rgba(16,185,129,0.2)"><i class="ri-server-line"></i></div>
+                    <div class="stat-trend"><i class="ri-server-line"></i> 活跃/规则总数</div>
+                    <i class="ri-cpu-line bg-icon"></i>
                 </div>
             </div>
 
             <div class="dashboard-grid">
                 <div class="card">
-                    <h3><i class="ri-pulse-line"></i> 实时流量监控 (Tx/Rx)</h3>
+                    <h3><i class="ri-pulse-line"></i> 实时全网流量监控</h3>
                     <div style="height:320px;width:100%;"><canvas id="trafficChart"></canvas></div>
                 </div>
                 <div class="card">
-                    <h3><i class="ri-pie-chart-line"></i> 流量分布 (Top 5)</h3>
+                    <h3><i class="ri-pie-chart-line"></i> 规则流量分布 (Top 5)</h3>
                     <div style="height:320px;width:100%;display:flex;justify-content:center"><canvas id="pieChart"></canvas></div>
                 </div>
             </div>
@@ -2023,17 +2048,17 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 <div class="table-container">
                     {{if .Agents}}
                     <table>
-                        <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
+                        <thead><tr><th>状态</th><th>节点名称 / 标识</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
                         <tbody>
                         {{range .Agents}}
                         <tr>
-                            <td><span class="status-dot pulse" style="background:#10b981"></span></td>
-                            <td><div style="font-weight:600">{{.Name}}</div></td>
-                            <td><span class="click-copy" onclick="copyText('{{.RemoteIP}}')" style="font-family:monospace;background:var(--bg-body);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer" title="点击复制">{{.RemoteIP}}</span></td>
-                            <td style="width:200px">
-                                <div style="display:flex;align-items:center;gap:10px">
+                            <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
+                            <td><div style="font-weight:700">{{.Name}}</div></td>
+                            <td><span class="click-copy" onclick="copyText('{{.RemoteIP}}')" style="font-family:'JetBrains Mono';background:var(--input-bg);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer" title="点击复制">{{.RemoteIP}}</span></td>
+                            <td style="width:240px">
+                                <div style="display:flex;align-items:center;gap:12px">
                                     <div class="progress" style="margin:0;flex:1"><div class="progress-bar" id="load-bar-{{.Name}}" style="width:0%"></div></div>
-                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:monospace;min-width:60px">0.0</span>
+                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:'JetBrains Mono';min-width:60px;text-align:right">0.0</span>
                                 </div>
                             </td>
                             <td><button class="btn danger icon" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button></td>
@@ -2042,7 +2067,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                         </tbody>
                     </table>
                     {{else}}
-                    <div style="padding:40px;text-align:center;color:var(--text-sub)"><i class="ri-ghost-line" style="font-size:32px;margin-bottom:10px;display:block"></i>暂无在线节点</div>
+                    <div style="padding:60px 0;text-align:center;color:var(--text-sub)">
+                        <div style="background:var(--input-bg);width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px auto;font-size:32px"><i class="ri-ghost-line"></i></div>
+                        暂无在线节点，请前往“部署”页面添加
+                    </div>
                     {{end}}
                 </div>
             </div>
@@ -2071,44 +2099,46 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 <h3><i class="ri-list-check"></i> 规则列表</h3>
                 <div class="table-container">
                     <table>
-                        <thead><tr><th>链路信息</th><th>目标地址</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead>
+                        <thead><tr><th>链路信息</th><th>目标地址 & 延迟</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead>
                         <tbody>
                         {{range .Rules}}
                         <tr style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
                             <td>
-                                <div style="font-weight:700">{{if .Note}}{{.Note}}{{else}}未命名{{end}}</div>
-                                <div style="font-size:12px;color:var(--text-sub);margin-top:4px;display:flex;align-items:center;gap:5px">
-                                    <span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.EntryAgent}}:{{.EntryPort}}</span> <i class="ri-arrow-right-line"></i> <span style="background:var(--bg-body);padding:2px 6px;border-radius:4px">{{.ExitAgent}}</span>
+                                <div style="font-weight:700;font-size:15px;margin-bottom:6px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
+                                <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
+                                    <span style="background:var(--input-bg);padding:2px 8px;border-radius:6px;border:1px solid var(--border)">{{.EntryAgent}}:{{.EntryPort}}</span> 
+                                    <i class="ri-arrow-right-line" style="color:var(--primary);font-size:12px"></i> 
+                                    <span style="background:var(--input-bg);padding:2px 8px;border-radius:6px;border:1px solid var(--border)">{{.ExitAgent}}</span>
                                 </div>
                             </td>
                             <td>
-                                <div style="font-family:monospace;font-size:13px">{{.TargetIP}}:{{.TargetPort}}</div>
-                                <div style="font-size:11px;margin-top:2px" id="rule-latency-{{.ID}}"><i class="ri-pulse-line"></i> 检测中...</div>
+                                <div style="font-family:'JetBrains Mono';font-size:13px">{{.TargetIP}}:{{.TargetPort}}</div>
+                                <div style="font-size:12px;margin-top:4px;display:flex;align-items:center;gap:5px" id="rule-latency-{{.ID}}"><i class="ri-loader-4-line ri-spin"></i> 检测中...</div>
                             </td>
-                            <td style="min-width:180px">
-                                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
-                                    <span><i class="ri-user-line"></i> <span id="rule-uc-{{.ID}}">{{.UserCount}}</span></span>
-                                    <span id="rule-traffic-{{.ID}}" style="font-family:monospace">{{formatBytes (add .TotalTx .TotalRx)}}</span>
+                            <td style="min-width:200px">
+                                <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
+                                    <span><i class="ri-user-line"></i> <span id="rule-uc-{{.ID}}">{{.UserCount}}</span> 连接</span>
+                                    <span id="rule-traffic-{{.ID}}" style="font-family:'JetBrains Mono';font-weight:600">{{formatBytes (add .TotalTx .TotalRx)}}</span>
                                 </div>
                                 {{if gt .TrafficLimit 0}}
                                 <div class="progress"><div id="rule-bar-{{.ID}}" class="progress-bar" style="width:{{percent .TotalTx .TotalRx .TrafficLimit}}%"></div></div>
-                                <div style="font-size:10px;color:var(--text-sub);margin-top:2px;display:flex;justify-content:space-between">
+                                <div style="font-size:11px;color:var(--text-sub);margin-top:4px;display:flex;justify-content:space-between">
                                     <span id="rule-limit-text-{{.ID}}">已用 {{percent .TotalTx .TotalRx .TrafficLimit | printf "%.1f"}}%</span>
-                                    <span>限额: {{formatBytes .TrafficLimit}}</span>
+                                    <span>限 {{formatBytes .TrafficLimit}}</span>
                                 </div>
                                 {{else}}
                                 <div class="progress"><div class="progress-bar" style="width:100%;background:var(--success)"></div></div>
-                                <div style="font-size:10px;color:var(--text-sub);margin-top:2px">无流量限制</div>
+                                <div style="font-size:11px;color:var(--text-sub);margin-top:4px"><i class="ri-infinite-line"></i> 无流量限制</div>
                                 {{end}}
                             </td>
                             <td>
-                                {{if .Disabled}}<span class="badge" style="background:var(--border);color:var(--text-sub)">已暂停</span>
+                                {{if .Disabled}}<span class="badge" style="background:var(--input-bg);color:var(--text-sub)">已暂停</span>
                                 {{else if and (gt .TrafficLimit 0) (ge (add .TotalTx .TotalRx) .TrafficLimit)}}<span class="badge danger">流量耗尽</span>
-                                {{else}}<span class="badge success"><span class="badge-dot" id="rule-status-dot-{{.ID}}"></span> 运行中</span>{{end}}
-                                <div style="font-size:10px;color:var(--text-sub);margin-top:4px">限速: {{formatSpeed .SpeedLimit}}</div>
+                                {{else}}<span class="badge success"><span class="status-dot pulse" id="rule-status-dot-{{.ID}}"></span> 运行中</span>{{end}}
+                                <div style="font-size:11px;color:var(--text-sub);margin-top:4px;opacity:0.8">{{if gt .SpeedLimit 0}}限速 {{formatSpeed .SpeedLimit}}{{else}}全速模式{{end}}</div>
                             </td>
                             <td>
-                                <div style="display:flex;gap:6px">
+                                <div style="display:flex;gap:8px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
                                     <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置流量"><i class="ri-refresh-line"></i></button>
@@ -2126,20 +2156,27 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         <div id="deploy" class="page">
             <div class="card">
                 <h3><i class="ri-install-line"></i> 节点安装向导</h3>
-                <p style="color:var(--text-sub);font-size:14px;line-height:1.6">请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。</p>
+                <p style="color:var(--text-sub);font-size:14px;line-height:1.6;max-width:800px">
+                    请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。
+                </p>
                 
-                <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);margin-top:20px">
-                    <div class="grid-form" style="margin-bottom:15px">
-                        <div class="form-group"><label>给节点起个名字</label><input id="agentName" value="Node-01"></div>
-                        <div class="form-group"><label>连接方式</label><select id="addrType"><option value="domain">使用域名 ({{.MasterDomain}})</option><option value="v4">使用 IPv4 ({{.MasterIP}})</option><option value="v6">使用 IPv6 ({{.MasterIPv6}})</option></select></div>
-                        <div class="form-group"><label>Agent 架构</label><select id="archType"><option value="amd64">Linux AMD64 (x86_64)</option><option value="arm64">Linux ARM64 (aarch64)</option></select></div>
+                <div style="background:var(--input-bg);padding:24px;border-radius:16px;border:1px solid var(--border);margin-top:20px">
+                    <div class="grid-form" style="margin-bottom:20px">
+                        <div class="form-group"><label>1. 给节点起个名字</label><input id="agentName" value="Node-01"></div>
+                        <div class="form-group"><label>2. 选择连接方式</label><select id="addrType"><option value="domain">使用域名 ({{.MasterDomain}})</option><option value="v4">使用 IPv4 ({{.MasterIP}})</option><option value="v6">使用 IPv6 ({{.MasterIPv6}})</option></select></div>
+                        <div class="form-group"><label>3. 目标机器架构</label><select id="archType"><option value="amd64">Linux AMD64 (x86_64)</option><option value="arm64">Linux ARM64 (aarch64)</option></select></div>
                     </div>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px">
-                        <button class="btn" onclick="genCmd()"><i class="ri-magic-line"></i> 生成命令</button>
-                        <button class="btn secondary" onclick="copyCmd()"><i class="ri-file-copy-line"></i> 复制命令</button>
-                    </div>
-                    <div style="background:#1e293b;color:#f8fafc;padding:15px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:13px;word-break:break-all;position:relative">
-                        <div id="cmdText" style="opacity:0.7">请先点击“生成命令”按钮...</div>
+                    <button class="btn" onclick="genCmd()"><i class="ri-magic-line"></i> 生成安装命令</button>
+                    
+                    <div class="terminal-window" style="margin-top:24px">
+                        <div class="terminal-header">
+                            <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+                            <span style="color:#64748b;font-size:12px;margin-left:10px">bash — 80x24</span>
+                        </div>
+                        <div class="terminal-body">
+                            <div class="copy-overlay"><button class="btn icon secondary" style="background:rgba(255,255,255,0.1);color:#fff;border:none" onclick="copyCmd()" title="复制"><i class="ri-file-copy-line"></i></button></div>
+                            <span style="color:#10b981">root@server:~$</span> <span id="cmdText" class="cmd-content">请先点击上方按钮生成命令...</span><span class="cursor" style="animation:blink 1s infinite">_</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2147,19 +2184,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
         <div id="logs" class="page">
             <div class="card">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
                     <h3><i class="ri-history-line"></i> 系统操作日志</h3>
-                    <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px"><i class="ri-download-line"></i> 导出日志</a>
+                    <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px"><i class="ri-download-line"></i> 导出 JSON</a>
                 </div>
                 <div class="table-container">
                     <table>
-                        <thead><tr><th>时间</th><th>IP 来源</th><th>操作类型</th><th>详情</th></tr></thead>
+                        <thead><tr><th>时间</th><th>IP 来源</th><th>操作类型</th><th>详情内容</th></tr></thead>
                         <tbody id="log-table-body">
                         {{range .Logs}}
                         <tr>
-                            <td style="font-family:monospace;color:var(--text-sub)">{{.Time}}</td>
+                            <td style="font-family:'JetBrains Mono';color:var(--text-sub)">{{.Time}}</td>
                             <td>{{.IP}}</td>
-                            <td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">{{.Action}}</span></td>
+                            <td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">{{.Action}}</span></td>
                             <td style="color:var(--text-sub)">{{.Msg}}</td>
                         </tr>
                         {{end}}
@@ -2170,16 +2207,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         </div>
 
         <div id="settings" class="page">
-            <div class="card" style="max-width:700px">
-                <h3><i class="ri-settings-line"></i> 系统全局设置</h3>
+            <div class="card" style="max-width:800px">
+                <h3><i class="ri-settings-line"></i> 系统全局配置</h3>
                 <form action="/update_settings" method="POST">
-                    <div class="grid-form" style="grid-template-columns: 1fr;">
-                        <div class="form-group"><label>修改登录密码</label><input type="password" name="password" placeholder="留空则保持不变"></div>
-                        <div class="form-group"><label>通信 Token (Agent 连接凭证)</label><input name="token" value="{{.Token}}"></div>
+                    <div class="grid-form" style="grid-template-columns: 1fr; gap:24px">
                         
-                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border)">
-                            <h4 style="margin:0 0 15px 0;font-size:14px"><i class="ri-telegram-line"></i> Telegram 通知配置</h4>
-                            <div class="grid-form" style="gap:15px">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+                            <div class="form-group"><label>修改管理员密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
+                            <div class="form-group"><label>通信 Token (Agent 密钥)</label><input name="token" value="{{.Token}}"></div>
+                        </div>
+                        
+                        <div style="background:rgba(99,102,241,0.05);padding:24px;border-radius:16px;border:1px solid rgba(99,102,241,0.2)">
+                            <h4 style="margin:0 0 16px 0;font-size:15px;color:var(--primary)"><i class="ri-telegram-line"></i> Telegram 消息通知</h4>
+                            <div class="grid-form" style="gap:16px">
                                 <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}" placeholder="123456:ABC-DEF..."></div>
                                 <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}" placeholder="-100xxxxxxx"></div>
                             </div>
@@ -2187,8 +2227,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
                         <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                             <div>
-                                <h4 style="margin:0 0 5px 0;font-size:14px"><i class="ri-shield-keyhole-line"></i> 双因素认证 (2FA)</h4>
-                                <div style="font-size:12px;color:var(--text-sub)">增加账户安全性，登录时需验证 OTP 动态码</div>
+                                <h4 style="margin:0 0 6px 0;font-size:14px"><i class="ri-shield-keyhole-line"></i> 双因素认证 (2FA)</h4>
+                                <div style="font-size:12px;color:var(--text-sub)">推荐开启。登录时需验证 Google Authenticator 动态码。</div>
                             </div>
                             <div>
                                 {{if .Config.TwoFAEnabled}}
@@ -2199,15 +2239,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                             </div>
                         </div>
 
-                        <div class="grid-form" style="gap:15px">
+                        <div class="grid-form" style="gap:16px;margin-top:10px">
                             <div class="form-group"><label>面板域名</label><input name="master_domain" value="{{.MasterDomain}}"></div>
                             <div class="form-group"><label>面板 IP (IPv4)</label><input name="master_ip" value="{{.MasterIP}}"></div>
                             <div class="form-group"><label>面板 IP (IPv6)</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
                         </div>
 
-                        <div style="display:flex;gap:15px;margin-top:10px">
-                            <button class="btn" style="flex:1"><i class="ri-save-3-line"></i> 保存配置</button>
-                            <a href="/download_config" class="btn" style="flex:1"><i class="ri-download-cloud-2-line"></i> 备份配置</a>
+                        <div style="display:flex;gap:16px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px">
+                            <button class="btn" style="flex:2;height:48px"><i class="ri-save-3-line"></i> 保存系统配置</button>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:48px"><i class="ri-download-cloud-2-line"></i> 备份数据</a>
                         </div>
                     </div>
                 </form>
@@ -2226,32 +2266,32 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 
 <div id="editModal" class="modal">
     <div class="modal-content">
-        <span class="close-modal" onclick="closeEdit()">&times;</span>
-        <h3 style="margin-top:0">修改规则</h3>
+        <span class="close-modal" onclick="closeEdit()"><i class="ri-close-line"></i></span>
+        <h3 style="margin-top:0;font-size:20px">修改转发规则</h3>
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
-            <div class="grid-form" style="grid-template-columns: 1fr 1fr;">
-                <div class="form-group" style="grid-column: 1/-1"><label>备注</label><input name="note" id="e_note"></div>
+            <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap:20px">
+                <div class="form-group" style="grid-column: 1/-1"><label>备注名称</label><input name="note" id="e_note"></div>
                 <div class="form-group"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" id="e_eport"></div>
                 <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                <div class="form-group" style="grid-column: 1/-1"><label>目标地址</label><input name="target_ip" id="e_tip"></div>
+                <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (IP/域名)</label><input name="target_ip" id="e_tip"></div>
                 <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
                 <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-                <div class="form-group"><label>流量限额</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
-                <div class="form-group"><label>带宽限速</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
-                <div class="form-group" style="grid-column: 1/-1;margin-top:10px"><button class="btn" style="width:100%">保存修改</button></div>
+                <div class="form-group"><label>流量限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
+                <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
+                <div class="form-group" style="grid-column: 1/-1;margin-top:16px"><button class="btn" style="width:100%;height:44px">保存修改</button></div>
             </div>
         </form>
     </div>
 </div>
 
 <div id="confirmModal" class="modal">
-    <div class="modal-content" style="max-width:360px;text-align:center;padding-top:40px">
-        <div style="font-size:48px;margin-bottom:16px" id="c_icon">⚠️</div>
-        <h3 style="justify-content:center;margin-bottom:10px" id="c_title">确认操作</h3>
-        <p style="color:var(--text-sub);margin-bottom:24px;line-height:1.5" id="c_msg"></p>
-        <div style="display:flex;gap:10px">
+    <div class="modal-content" style="max-width:400px;text-align:center;padding:40px 30px">
+        <div style="font-size:56px;margin-bottom:20px;line-height:1" id="c_icon">⚠️</div>
+        <h3 style="justify-content:center;margin-bottom:12px;font-size:20px" id="c_title">确认操作</h3>
+        <p style="color:var(--text-sub);margin-bottom:32px;line-height:1.6" id="c_msg"></p>
+        <div style="display:flex;gap:12px">
             <button class="btn secondary" style="flex:1" onclick="closeConfirm()">取消</button>
             <button id="c_btn" class="btn danger" style="flex:1">确认</button>
         </div>
@@ -2259,28 +2299,27 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
 </div>
 
 <div id="twoFAModal" class="modal">
-    <div class="modal-content" style="text-align:center;max-width:350px">
-        <span class="close-modal" onclick="document.getElementById('twoFAModal').style.display='none'">&times;</span>
+    <div class="modal-content" style="text-align:center;max-width:360px">
+        <span class="close-modal" onclick="document.getElementById('twoFAModal').style.display='none'"><i class="ri-close-line"></i></span>
         <h3 style="justify-content:center">绑定 2FA</h3>
-        <p style="font-size:13px;color:var(--text-sub)">请使用 Google Authenticator 扫描下方二维码</p>
-        <img id="qrImage" style="width:200px;height:200px;border-radius:12px;margin:10px 0 20px 0;border:1px solid var(--border)">
-        <input id="twoFACode" placeholder="输入 6 位验证码" style="text-align:center;letter-spacing:4px;font-size:18px;margin-bottom:15px">
+        <p style="font-size:13px;color:var(--text-sub);margin-bottom:20px">请使用 Google Authenticator 扫描下方二维码</p>
+        <div style="background:#fff;padding:10px;border-radius:12px;display:inline-block;margin-bottom:20px">
+            <img id="qrImage" style="width:180px;height:180px;display:block">
+        </div>
+        <input id="twoFACode" placeholder="输入 6 位验证码" style="text-align:center;letter-spacing:6px;font-size:20px;margin-bottom:20px;font-family:'JetBrains Mono'">
         <button class="btn" onclick="verify2FA()" style="width:100%">验证并开启</button>
     </div>
 </div>
 
 <script>
-    // --- 核心逻辑 ---
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
         document.getElementById(id).classList.add('active');
         
-        const titles = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'logs':'系统日志', 'settings':'系统设置'};
-        const icons = {'dashboard':'ri-dashboard-3-line', 'deploy':'ri-rocket-2-line', 'rules':'ri-route-line', 'logs':'ri-file-list-3-line', 'settings':'ri-settings-4-line'};
+        const titles = {'dashboard':'仪表盘', 'deploy':'节点部署', 'rules':'转发规则', 'logs':'系统日志', 'settings':'系统配置'};
         document.getElementById('page-text').innerText = titles[id];
-        document.getElementById('page-icon').className = icons[id];
         
         document.querySelectorAll('.sidebar .item').forEach(i => i.classList.remove('active'));
         if (el) el.classList.add('active');
@@ -2296,7 +2335,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
 
-    // 复制文本
     function copyText(txt) {
         if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制: "+txt, "success"));
         else {
@@ -2307,7 +2345,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         }
     }
 
-    // 主题切换
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
@@ -2321,19 +2358,17 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     document.documentElement.setAttribute('data-theme', savedTheme);
     document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
 
-    // Toast 提示
     function showToast(msg, type) {
         const box = document.getElementById('toast');
         const icon = document.getElementById('t-icon');
         document.getElementById('t-msg').innerText = msg;
         box.className = 'toast show';
-        if(type === 'warn') { icon.className = 'ri-error-warning-line'; box.style.background = 'var(--warning-bg)'; box.style.color = 'var(--warning-text)'; }
-        else if(type === 'success') { icon.className = 'ri-checkbox-circle-line'; box.style.background = '#10b981'; box.style.color = '#fff'; }
-        else { icon.className = 'ri-information-line'; box.style.background = '#0f172a'; box.style.color = '#fff'; }
+        if(type === 'warn') { icon.className = 'ri-error-warning-fill'; icon.style.color = '#fbbf24'; }
+        else if(type === 'success') { icon.className = 'ri-checkbox-circle-fill'; icon.style.color = '#34d399'; }
+        else { icon.className = 'ri-information-fill'; icon.style.color = '#60a5fa'; }
         setTimeout(() => box.className = 'toast', 3000);
     }
 
-    // 确认框
     function showConfirm(title, msg, type, cb) {
         document.getElementById('c_title').innerText = title;
         document.getElementById('c_msg').innerHTML = msg;
@@ -2346,33 +2381,27 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
-    // 部署命令逻辑
     function genCmd() {
         const n = document.getElementById('agentName').value;
         const t = document.getElementById('addrType').value;
-        const arch = document.getElementById('archType').value; // 获取手动选择的架构
-        
-        // 自动拼接架构后缀
+        const arch = document.getElementById('archType').value;
         const finalDwUrl = dwUrl + "-linux-" + arch;
-        
         const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
-        if(!host || host === "[]") { showToast("请先配置 Master 地址", "warn"); return; }
+        if(!host || host === "[]") { showToast("请先在设置中配置面板地址", "warn"); return; }
         
         let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
         if(is_tls) cmd += ' -tls';
         document.getElementById('cmdText').innerText = cmd;
         document.getElementById('cmdText').style.opacity = '1';
-        showToast("命令已生成 (" + arch + ")", "success");
+        showToast("安装命令已生成 (" + arch + ")", "success");
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
-    // 规则操作
-    function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，确定吗？", "danger", () => location.href="/delete?id="+id); }
+    function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，且无法恢复，确定吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
-    function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的流量统计吗？", "normal", () => location.href="/reset_traffic?id="+id); }
-    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>这将向节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
+    function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的历史流量统计数据吗？", "normal", () => location.href="/reset_traffic?id="+id); }
+    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
-    // 编辑
     function openEdit(id, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_note').value = note;
@@ -2389,22 +2418,22 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
     window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); document.getElementById('twoFAModal').style.display='none'; } }
 
-    // 2FA
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
-    function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else alert("验证码错误"); }); }
+    function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已成功开启", "success"); setTimeout(()=>location.reload(), 1000); } else showToast("验证码错误", "warn"); }); }
     function disable2FA() { showConfirm("关闭 2FA", "关闭后账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
-    // --- Chart.js: 实时流量 (双线: Tx, Rx) ---
-    var ctx = document.getElementById('trafficChart').getContext('2d');
+    // Chart.js Configuration
+    Chart.defaults.font.family = "'Inter', sans-serif";
+    Chart.defaults.color = '#94a3b8';
     
-    // 创建渐变
+    var ctx = document.getElementById('trafficChart').getContext('2d');
     var txGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.4)'); // Violet
+    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.4)');
     txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
     
     var rxGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.4)'); // Cyan
+    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.4)');
     rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
 
     var chart = new Chart(ctx, {
@@ -2412,69 +2441,49 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
         data: {
             labels: Array(30).fill(''),
             datasets: [
-                {
-                    label: '上传 (Tx)',
-                    data: Array(30).fill(0),
-                    borderColor: '#8b5cf6',
-                    backgroundColor: txGrad,
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    fill: true,
-                    tension: 0.4
-                },
-                {
-                    label: '下载 (Rx)',
-                    data: Array(30).fill(0),
-                    borderColor: '#06b6d4',
-                    backgroundColor: rxGrad,
-                    borderWidth: 2,
-                    pointRadius: 0,
-                    fill: true,
-                    tension: 0.4
-                }
+                { label: '上传 (Tx)', data: Array(30).fill(0), borderColor: '#8b5cf6', backgroundColor: txGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 },
+                { label: '下载 (Rx)', data: Array(30).fill(0), borderColor: '#06b6d4', backgroundColor: rxGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 }
             ]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: true }, tooltip: { mode: 'index', intersect: false } },
+            plugins: { legend: { display: true, labels: { boxWidth: 10, usePointStyle: true } }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15, 23, 42, 0.9)' } },
             scales: {
                 x: { display: false },
-                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.1)', borderDash: [5, 5] }, ticks: { callback: v => formatBytes(v)+'/s', color: '#94a3b8' } }
+                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.1)', borderDash: [5, 5] }, ticks: { callback: v => formatBytes(v)+'/s' } }
             },
-            animation: { duration: 0 },
             interaction: { mode: 'nearest', axis: 'x', intersect: false }
         }
     });
 
-    // --- Chart.js: 流量占比饼图 ---
     var ctxPie = document.getElementById('pieChart').getContext('2d');
     var pieChart = new Chart(ctxPie, {
         type: 'doughnut',
         data: {
             labels: [],
-            datasets: [{
-                data: [],
-                backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'],
-                borderWidth: 0
-            }]
+            datasets: [{ data: [], backgroundColor: ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6'], borderWidth: 0 }]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { position: 'right', labels: { color: '#94a3b8', boxWidth: 12 } } },
-            cutout: '70%'
+            plugins: { legend: { position: 'right', labels: { boxWidth: 12, usePointStyle: true, padding: 20 } } },
+            cutout: '75%'
         }
     });
 
     function updateChartTheme(theme) {
-        chart.options.scales.y.grid.color = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        const gridColor = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+        chart.options.scales.y.grid.color = gridColor;
         chart.update();
     }
 
-    // --- WS 数据处理 ---
     function formatBytes(b) {
         if(b==0) return "0 B";
         const u = 1024, i = Math.floor(Math.log(b)/Math.log(u));
         return parseFloat((b / Math.pow(u, i)).toFixed(2)) + " " + ["B","KB","MB","GB","TB"][i];
+    }
+    function formatSpeed(b) {
+        if(b<=0) return "无限制";
+        return formatBytes(b)+"/s";
     }
 
     function connectWS() {
@@ -2485,61 +2494,31 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                 if(msg.type === 'stats' && msg.data) {
                     const d = msg.data;
                     document.getElementById('stat-total-traffic').innerText = formatBytes(d.total_traffic);
-                    
-                    // 实时速度
                     document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
                     document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
                     
-                    // 更新线图
-                    chart.data.datasets[0].data.push(d.speed_tx);
-                    chart.data.datasets[0].data.shift();
-                    chart.data.datasets[1].data.push(d.speed_rx);
-                    chart.data.datasets[1].data.shift();
-                    chart.update();
+                    chart.data.datasets[0].data.push(d.speed_tx); chart.data.datasets[0].data.shift();
+                    chart.data.datasets[1].data.push(d.speed_rx); chart.data.datasets[1].data.shift();
+                    chart.update('none');
 
-                    // 更新饼图 (Top 5 流量规则)
                     if (d.rules) {
                         const sortedRules = [...d.rules].sort((a,b) => b.total - a.total).slice(0, 5);
                         pieChart.data.labels = sortedRules.map(r => r.name || '未命名');
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
-                        pieChart.update();
-                    }
-
-                    // 更新节点负载
-                    if(d.agents) d.agents.forEach(a => {
-                        const loadText = document.getElementById('load-text-'+a.name);
-                        const loadBar = document.getElementById('load-bar-'+a.name);
-                        if(loadText && loadBar) {
-                            let loadStr = a.sys_status; 
-                            // 简单解析 Load: 0.05 | Mem ...
-                            let loadVal = 0;
-                            if(loadStr.includes("Load:")) {
-                                let parts = loadStr.split("|");
-                                loadVal = parseFloat(parts[0].replace("Load:", "").trim()) || 0;
-                            }
-                            loadText.innerText = loadVal.toFixed(2);
-                            let pct = loadVal * 20; // 假设 Load 5 = 100%
-                            if (pct > 100) pct = 100;
-                            loadBar.style.width = pct + "%";
-                            loadBar.style.background = pct > 80 ? "#ef4444" : "#6366f1";
-                        }
-                    });
-                    
-                    // 更新规则列表状态
-                    if(d.rules) {
+                        pieChart.update('none');
+                        
                         d.rules.forEach(r => {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
                             const lat = document.getElementById('rule-latency-'+r.id);
                             const dot = document.getElementById('rule-status-dot-'+r.id);
-                            
                             if(lat && dot) {
                                 if(r.status) {
                                     lat.innerHTML = '<i class="ri-pulse-line" style="color:#10b981"></i> ' + r.latency + ' ms';
-                                    dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="badge-dot"></span> 正常';
+                                    dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中';
                                 } else {
-                                    lat.innerHTML = '<i class="ri-error-warning-line" style="color:#ef4444"></i> 离线';
-                                    dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="badge-dot"></span> 异常';
+                                    lat.innerHTML = '<i class="ri-error-warning-fill" style="color:#ef4444"></i> 离线';
+                                    dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常';
                                 }
                             }
                             if(r.limit > 0) {
@@ -2552,13 +2531,26 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                         });
                     }
 
+                    if(d.agents) d.agents.forEach(a => {
+                        const loadText = document.getElementById('load-text-'+a.name);
+                        const loadBar = document.getElementById('load-bar-'+a.name);
+                        if(loadText && loadBar) {
+                            let loadStr = a.sys_status; 
+                            let loadVal = 0;
+                            if(loadStr.includes("Load:")) { loadVal = parseFloat(loadStr.split("|")[0].replace("Load:", "").trim()) || 0; }
+                            loadText.innerText = loadVal.toFixed(2);
+                            let pct = loadVal * 20; if (pct > 100) pct = 100;
+                            loadBar.style.width = pct + "%"; loadBar.style.background = pct > 80 ? "#ef4444" : "#10b981";
+                        }
+                    });
+
                     if(d.logs && document.getElementById('logs').classList.contains('active')) {
                         const tbody = document.getElementById('log-table-body');
                         let html = '';
                         d.logs.forEach(l => {
-                            html += '<tr><td style="font-family:monospace;color:var(--text-sub)">'+l.time+'</td>'+
+                            html += '<tr><td style="font-family:\'JetBrains Mono\';color:var(--text-sub)">'+l.time+'</td>'+
                                     '<td>'+l.ip+'</td>'+
-                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main)">'+l.action+'</span></td>'+
+                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">'+l.action+'</span></td>'+
                                     '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
