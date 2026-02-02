@@ -50,6 +50,7 @@ const (
 	ConfigFile      = "config.json"
 	ControlPort     = ":9999"
 	WebPort         = ":8888"
+	// 这里只保留基础 URL，架构后缀由前端 JS 动态拼接
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
@@ -2131,6 +2132,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
                     <div class="grid-form" style="margin-bottom:15px">
                         <div class="form-group"><label>给节点起个名字</label><input id="agentName" value="Node-01"></div>
                         <div class="form-group"><label>连接方式</label><select id="addrType"><option value="domain">使用域名 ({{.MasterDomain}})</option><option value="v4">使用 IPv4 ({{.MasterIP}})</option><option value="v6">使用 IPv6 ({{.MasterIPv6}})</option></select></div>
+                        <div class="form-group"><label>Agent 架构</label><select id="archType"><option value="amd64">Linux AMD64 (x86_64)</option><option value="arm64">Linux ARM64 (aarch64)</option></select></div>
                     </div>
                     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px">
                         <button class="btn" onclick="genCmd()"><i class="ri-magic-line"></i> 生成命令</button>
@@ -2348,13 +2350,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px 
     function genCmd() {
         const n = document.getElementById('agentName').value;
         const t = document.getElementById('addrType').value;
+        const arch = document.getElementById('archType').value; // 获取手动选择的架构
+        
+        // 自动拼接架构后缀
+        const finalDwUrl = dwUrl + "-linux-" + arch;
+        
         const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
         if(!host || host === "[]") { showToast("请先配置 Master 地址", "warn"); return; }
-        let cmd = 'curl -L -o /root/relay '+dwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
+        
+        let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
         if(is_tls) cmd += ' -tls';
         document.getElementById('cmdText').innerText = cmd;
         document.getElementById('cmdText').style.opacity = '1';
-        showToast("命令已生成", "success");
+        showToast("命令已生成 (" + arch + ")", "success");
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
