@@ -97,6 +97,24 @@ install_relay() {
     
     check_dependencies
 
+    # --- 新增：自动识别架构并修改下载链接 ---
+    ARCH=$(uname -m)
+    BASE_URL="https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download"
+    case "$ARCH" in
+        x86_64)
+            DOWNLOAD_URL="${BASE_URL}/relay-linux-amd64"
+            ;;
+        aarch64|arm64)
+            DOWNLOAD_URL="${BASE_URL}/relay-linux-arm64"
+            ;;
+        *)
+            log_error "不支持的系统架构: $ARCH"
+            return
+            ;;
+    esac
+    log_info "检测到系统架构: $ARCH，使用对应版本安装"
+    # ----------------------------------------
+
     # 1. 下载
     log_info "正在下载二进制文件..."
     wget -q -O "$BIN_PATH" "$DOWNLOAD_URL"
