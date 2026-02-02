@@ -1,10 +1,15 @@
 name: Build and Release
 
-# 触发机制：当推送以 'v' 开头的标签时触发（例如 v1.0.0）
 on:
+  # 1. 修改触发规则
   push:
+    branches:
+      - "main"    # 或者是 "master"，根据你的主分支名称修改
     tags:
-      - 'v*'
+      - 'v*'      # 保持原有的打标签触发
+  pull_request:   # (可选) 提交 PR 时也触发编译测试
+    branches:
+      - "main"
 
 permissions:
   contents: write
@@ -15,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 定义交叉编译的平台
         include:
           - os: linux
             arch: amd64
@@ -31,21 +35,17 @@ jobs:
             filename: relay-darwin-arm64
 
     steps:
-    # 1. 拉取代码
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 2. 设置 Go 环境
     - name: Setup Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.21' # 你的 go.mod 中的版本
+        go-version: '1.21'
 
-    # 3. 下载依赖
     - name: Download dependencies
       run: go mod download
 
-    # 4. 编译 (禁用 CGO 以确保静态链接和跨平台兼容)
     - name: Build Binary
       env:
         GOOS: ${{ matrix.os }}
@@ -54,7 +54,17 @@ jobs:
       run: |
         go build -ldflags "-s -w" -o ${{ matrix.filename }} main.go
 
-    # 5. 上传构建产物到 GitHub Release
+    # --- 新增步骤：普通提交时上传编译产物 ---
+    # 如果不是 tag 推送，则将文件上传到 Action 的 Artifacts 中供下载测试
+    - name: Upload Artifact (Build Test)
+      uses: actions/upload-artifact@v4
+      if: startsWith(github.ref, 'refs/tags/') == false
+      with:
+        name: binary-${{ matrix.os }}-${{ matrix.arch }}
+        path: ${{ matrix.filename }}
+        retention-days: 5 # 文件保留5天
+
+    # --- 原有步骤：打标签时发布 Release ---
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
