@@ -23,9 +23,6 @@ jobs:
           - os: linux
             arch: arm64
             filename: relay-linux-arm64
-          - os: windows
-            arch: amd64
-            filename: relay-windows-amd64.exe
           - os: darwin
             arch: amd64
             filename: relay-darwin-amd64
