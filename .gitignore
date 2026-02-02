@@ -1,17 +1,29 @@
-# 忽略编译产物
+# --- 编译产物 ---
 relay
 relay.exe
 relay-linux-*
 relay-darwin-*
+relay-windows-*
+main  # 有时候 go build 没指定名字会默认叫 main
 
-# 忽略数据库和配置
+# --- 数据库和日志 ---
 data.db
-config.json
+*.db-journal
 *.log
 
-# 忽略证书文件
+# --- 敏感配置 (绝对不要提交) ---
+config.json
+.env
+
+# --- 证书文件 ---
 server.key
 server.crt
+*.pem
 
-# 忽略系统文件
+# --- 系统文件 ---
 .DS_Store
+Thumbs.db
+
+# --- IDE 编辑器缓存 ---
+.idea/
+.vscode/
