@@ -156,6 +156,8 @@ Master (面板) 维护：
 
 <img width="1644" height="1099" alt="1" src="https://github.com/user-attachments/assets/449225ca-e52c-4faa-a475-36ec2055035c" />
 
+<img width="1639" height="1095" alt="4" src="https://github.com/user-attachments/assets/93244731-9771-434d-8719-78588ed49ce3" />
+
 <img width="1646" height="1095" alt="2" src="https://github.com/user-attachments/assets/210a9c63-d6a4-446a-bbd4-df1bc44e94ab" />
 
 <img width="1641" height="1095" alt="3" src="https://github.com/user-attachments/assets/adaca06c-ba1d-48a3-950b-6b7c865ad302" />
