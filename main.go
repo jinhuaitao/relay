@@ -492,15 +492,15 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if op == "install" {
 		if isSys {
 			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", exe, args)
-			os.WriteFile("/etc/systemd/system/relay.service", []byte(c), 0644)
-			exec.Command("systemctl", "enable", "relay").Run()
-			exec.Command("systemctl", "restart", "relay").Run()
+			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
+			exec.Command("systemctl", "enable", "gorelay").Run()
+			exec.Command("systemctl", "restart", "gorelay").Run()
 			log.Println("Systemd 服务已安装")
 		} else if isAlpine {
 			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", exe, args)
-			os.WriteFile("/etc/init.d/relay", []byte(c), 0755)
-			exec.Command("rc-update", "add", "relay", "default").Run()
-			exec.Command("rc-service", "relay", "restart").Run()
+			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
+			exec.Command("rc-update", "add", "gorelay", "default").Run()
+			exec.Command("rc-service", "gorelay", "restart").Run()
 			log.Println("OpenRC 服务已安装")
 		} else {
 			exec.Command("nohup", exe, args, "&").Start()
