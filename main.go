@@ -1311,15 +1311,15 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
 	// 1. 尝试 Systemd
-	if _, err := os.Stat("/etc/systemd/system/relay.service"); err == nil {
-		exec.Command("systemctl", "restart", "relay").Start()
+	if _, err := os.Stat("/etc/systemd/system/gorelay.service"); err == nil {
+		exec.Command("systemctl", "restart", "gorelay").Start()
 		time.Sleep(1 * time.Second)
 		os.Exit(0)
 		return
 	}
 	// 2. 尝试 OpenRC
-	if _, err := os.Stat("/etc/init.d/relay"); err == nil {
-		exec.Command("rc-service", "relay", "restart").Start()
+	if _, err := os.Stat("/etc/init.d/gorelay"); err == nil {
+		exec.Command("rc-service", "gorelay", "restart").Start()
 		time.Sleep(1 * time.Second)
 		os.Exit(0)
 		return
