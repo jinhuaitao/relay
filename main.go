@@ -492,9 +492,9 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if op == "install" {
 		if isSys {
 			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", exe, args)
-			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
-			exec.Command("systemctl", "enable", "gorelay").Run()
-			exec.Command("systemctl", "restart", "gorelay").Run()
+			os.WriteFile("/etc/systemd/system/relay.service", []byte(c), 0644)
+			exec.Command("systemctl", "enable", "relay").Run()
+			exec.Command("systemctl", "restart", "relay").Run()
 			log.Println("Systemd 服务已安装")
 		} else if isAlpine {
 			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", exe, args)
@@ -1311,15 +1311,15 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
 	// 1. 尝试 Systemd
-	if _, err := os.Stat("/etc/systemd/system/gorelay.service"); err == nil {
-		exec.Command("systemctl", "restart", "gorelay").Start()
+	if _, err := os.Stat("/etc/systemd/system/relay.service"); err == nil {
+		exec.Command("systemctl", "restart", "relay").Start()
 		time.Sleep(1 * time.Second)
 		os.Exit(0)
 		return
 	}
 	// 2. 尝试 OpenRC
-	if _, err := os.Stat("/etc/init.d/gorelay"); err == nil {
-		exec.Command("rc-service", "gorelay", "restart").Start()
+	if _, err := os.Stat("/etc/init.d/relay"); err == nil {
+		exec.Command("rc-service", "relay", "restart").Start()
 		time.Sleep(1 * time.Second)
 		os.Exit(0)
 		return
