@@ -1156,13 +1156,6 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
-
-	// --- 优先使用用户输入的桥接端口 ---
-	bridgePort := r.FormValue("bridge_port")
-	if bridgePort == "" {
-		bridgePort = fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
-	}
-
 	mu.Lock()
 	rules = append(rules, LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -1176,7 +1169,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		Protocol:     r.FormValue("protocol"),
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
-		BridgePort:   bridgePort,
+		BridgePort:   fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
 	})
 	saveConfigNoLock()
 	mu.Unlock()
@@ -1199,10 +1192,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TargetIP = r.FormValue("target_ip")
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
-			// --- 更新桥接端口 ---
-			if bp := r.FormValue("bridge_port"); bp != "" {
-				rules[i].BridgePort = bp
-			}
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
 			break
@@ -2221,10 +2210,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-group"><label>目标 IP (支持多IP/域名)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1,[ IPV6 ]" required></div>
                         <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
-                        <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
-                        <div class="form-group"><label>桥接端口 (NAT机必填)</label><input type="number" name="bridge_port" placeholder="留空则随机，NAT出口请填分配端口"></div>
                         <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
+                        <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
                         <div class="form-group"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
                     </div>
                 </form>
@@ -2286,7 +2274,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                             <td>
                                 <div style="display:flex;gap:8px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.BridgePort}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置流量"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -2443,7 +2431,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                 <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (IP/域名)</label><input name="target_ip" id="e_tip"></div>
                 <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
                 <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
-                <div class="form-group"><label>桥接端口</label><input type="number" name="bridge_port" id="e_bport" placeholder="NAT出口必填"></div>
                 <div class="form-group"><label>流量限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
                 <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
                 <div class="form-group" style="grid-column: 1/-1;margin-top:16px"><button class="btn" style="width:100%;height:48px">保存修改</button></div>
@@ -2621,7 +2608,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的历史流量统计数据吗？", "normal", () => location.href="/reset_traffic?id="+id); }
     function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, bridge, limit, speed) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
@@ -2631,7 +2618,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         document.getElementById('e_tip').value = tip;
         document.getElementById('e_tport').value = tport;
         document.getElementById('e_proto').value = proto;
-        document.getElementById('e_bport').value = bridge; 
         document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
         document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
         document.getElementById('editModal').style.display = 'block';
