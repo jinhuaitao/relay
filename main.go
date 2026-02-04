@@ -49,7 +49,6 @@ import (
 const (
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
-	ControlPort     = ":9999"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	TCPKeepAlive    = 60 * time.Second
@@ -58,6 +57,9 @@ const (
 	MaxLogEntries   = 200
 	MaxLogRetention = 1000
 )
+
+// 支持多个 Agent 连接端口
+var ControlPorts = []string{":9999", ":10086"}
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
@@ -102,6 +104,7 @@ type AppConfig struct {
 	WebUser      string        `json:"web_user"`
 	WebPass      string        `json:"web_pass"`
 	AgentToken   string        `json:"agent_token"`
+	AgentPorts   string        `json:"agent_ports"`
 	MasterIP     string        `json:"master_ip"`
 	MasterIPv6   string        `json:"master_ipv6"`
 	MasterDomain string        `json:"master_domain"`
@@ -286,6 +289,7 @@ func migrateOldData() {
 	setDBSetting("web_user", old.WebUser)
 	setDBSetting("web_pass", old.WebPass)
 	setDBSetting("agent_token", old.AgentToken)
+	setDBSetting("agent_ports", old.AgentPorts)
 	setDBSetting("master_ip", old.MasterIP)
 	setDBSetting("master_ipv6", old.MasterIPv6)
 	setDBSetting("master_domain", old.MasterDomain)
@@ -571,33 +575,62 @@ func runMaster() {
 	}()
 	go broadcastLoop()
 	go func() {
-		var ln net.Listener
-		var err error
-		if _, errStat := os.Stat("server.crt"); errStat == nil {
-			if _, errStat := os.Stat("server.key"); errStat == nil {
-				cert, errLoad := tls.LoadX509KeyPair("server.crt", "server.key")
-				if errLoad == nil {
-					tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
-					ln, err = tls.Listen("tcp", ControlPort, tlsConfig)
-					if err == nil {
-						log.Println("🔐 Master 已启用 TLS 模式 (端口:9999)")
-						isMasterTLS = true
-					}
+		// 预先检查证书，决定是否启用 TLS
+		var agentTlsConfig *tls.Config
+		if _, err := os.Stat("server.crt"); err == nil {
+			if _, err := os.Stat("server.key"); err == nil {
+				if cert, err := tls.LoadX509KeyPair("server.crt", "server.key"); err == nil {
+					agentTlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+					isMasterTLS = true
+					log.Println("🔐 Master 已启用 TLS 模式")
 				}
 			}
 		}
-		if ln == nil {
-			ln, err = net.Listen("tcp", ControlPort)
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Println("⚠️ Master 已启用 TCP 模式")
+		if !isMasterTLS {
+			log.Println("⚠️ Master 已启用 TCP 模式 (未找到证书或加载失败)")
 		}
-		for {
-			c, err := ln.Accept()
-			if err == nil {
-				go handleAgentConn(c)
+
+		// 从配置中读取端口列表，默认 9999
+		portsStr := config.AgentPorts
+		if portsStr == "" {
+			portsStr = "9999"
+		}
+		ports := strings.Split(portsStr, ",")
+
+		// 循环监听多个端口
+		for _, pStr := range ports {
+			pStr = strings.TrimSpace(pStr)
+			if pStr == "" {
+				continue
 			}
+			if !strings.Contains(pStr, ":") {
+				pStr = ":" + pStr
+			}
+
+			go func(p string) {
+				var ln net.Listener
+				var err error
+
+				if isMasterTLS {
+					ln, err = tls.Listen("tcp", p, agentTlsConfig)
+				}
+				if ln == nil {
+					ln, err = net.Listen("tcp", p)
+				}
+
+				if err != nil {
+					log.Printf("❌ 监听端口 %s 失败: %v", p, err)
+					return
+				}
+				log.Printf("✅ Agent 监听端口启动: %s", p)
+
+				for {
+					c, err := ln.Accept()
+					if err == nil {
+						go handleAgentConn(c)
+					}
+				}
+			}(pStr)
 		}
 	}()
 
@@ -618,6 +651,7 @@ func runMaster() {
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
+	http.HandleFunc("/restart", authMiddleware(handleRestart)) // 新增重启路由
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -903,10 +937,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	copy(displayRules, rules)
 	mu.Unlock()
 
-	// 排序规则：按 Group 排序，以便前端可以合并显示
+	// 排序规则
 	sort.Slice(displayRules, func(i, j int) bool {
 		if displayRules[i].Group == displayRules[j].Group {
-			return displayRules[i].ID < displayRules[j].ID // 同组内按 ID 排序
+			return displayRules[i].ID < displayRules[j].ID
 		}
 		return displayRules[i].Group < displayRules[j].Group
 	})
@@ -926,6 +960,19 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	conf := config
 	mu.Unlock()
 
+	// 准备端口列表给前端 (从配置中读取)
+	pStr := conf.AgentPorts
+	if pStr == "" {
+		pStr = "9999"
+	}
+	cleanPorts := make([]string, 0)
+	for _, p := range strings.Split(pStr, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			cleanPorts = append(cleanPorts, strings.TrimPrefix(p, ":"))
+		}
+	}
+
 	data := struct {
 		Agents       []AgentInfo
 		Rules        []LogicalRule
@@ -940,7 +987,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Config       AppConfig
 		TwoFA        bool
 		IsTLS        bool
-	}{al, displayRules, displayLogs, conf.AgentToken, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS}
+		Ports        []string // 新增: 传递端口列表
+	}{al, displayRules, displayLogs, conf.AgentToken, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -1217,6 +1265,7 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
 	config.AgentToken = r.FormValue("token")
+	config.AgentPorts = r.FormValue("agent_ports") // 保存新添加的端口配置
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
@@ -1246,6 +1295,48 @@ func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	b, _ := json.MarshalIndent(logs, "", "  ")
 	w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
 	w.Write(b)
+}
+
+func handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+	w.Write([]byte("ok"))
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		doRestart()
+	}()
+}
+
+func doRestart() {
+	log.Println("🔄 接收到重启指令...")
+	// 1. 尝试 Systemd
+	if _, err := os.Stat("/etc/systemd/system/gorelay.service"); err == nil {
+		exec.Command("systemctl", "restart", "gorelay").Start()
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+		return
+	}
+	// 2. 尝试 OpenRC
+	if _, err := os.Stat("/etc/init.d/gorelay"); err == nil {
+		exec.Command("rc-service", "gorelay", "restart").Start()
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+		return
+	}
+	// 3. 直接二进制重启 (Standalone/Docker/Manual)
+	argv0, err := os.Executable()
+	if err != nil {
+		argv0 = os.Args[0]
+	}
+	os.Stdin = nil
+	os.Stdout = nil
+	os.Stderr = nil
+	if runtime.GOOS == "windows" {
+		os.Exit(0)
+	} else {
+		syscall.Exec(argv0, os.Args, os.Environ())
+	}
 }
 
 // ================= AGENT CORE =================
@@ -1606,6 +1697,8 @@ func loadConfig() {
 				config.WebPass = v
 			case "agent_token":
 				config.AgentToken = v
+			case "agent_ports":
+				config.AgentPorts = v
 			case "master_ip":
 				config.MasterIP = v
 			case "master_ipv6":
@@ -1656,6 +1749,7 @@ func saveConfigNoLock() {
 	setS("web_user", conf.WebUser)
 	setS("web_pass", conf.WebPass)
 	setS("agent_token", conf.AgentToken)
+	setS("agent_ports", conf.AgentPorts)
 	setS("master_ip", conf.MasterIP)
 	setS("master_ipv6", conf.MasterIPv6)
 	setS("master_domain", conf.MasterDomain)
@@ -1941,6 +2035,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 .btn.secondary:hover { background: var(--input-bg); border-color: var(--text-sub); color: var(--primary); }
 .btn.danger { background: var(--danger-bg); color: var(--danger-text); border: 1px solid rgba(239,68,68,0.2); box-shadow: none; }
 .btn.danger:hover { background: var(--danger); color: #fff; border-color: transparent; }
+.btn.warning { background: var(--warning-bg); color: var(--warning-text); border: 1px solid rgba(245,158,11,0.2); box-shadow: none; }
+.btn.warning:hover { background: var(--warning); color: #fff; border-color: transparent; }
 .btn.icon { padding: 0; width: 36px; height: 36px; border-radius: 10px; font-size: 18px; }
 
 /* 进度条 */
@@ -2202,7 +2298,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                     <div class="grid-form" style="margin-bottom:24px">
                         <div class="form-group"><label>1. 给节点起个名字</label><input id="agentName" value="Node-01"></div>
                         <div class="form-group"><label>2. 选择连接方式</label><select id="addrType"><option value="domain">使用域名 ({{.MasterDomain}})</option><option value="v4">使用 IPv4 ({{.MasterIP}})</option><option value="v6">使用 IPv6 ({{.MasterIPv6}})</option></select></div>
-                        <div class="form-group"><label>3. 目标机器架构</label><select id="archType"><option value="amd64">Linux AMD64 (x86_64)</option><option value="arm64">Linux ARM64 (aarch64)</option></select></div>
+                        <div class="form-group">
+                            <label>3. 通信端口</label>
+                            <select id="connPort">
+                                {{range .Ports}}<option value="{{.}}">{{.}}</option>{{end}}
+                                <option disabled>──────────</option>
+                                <option disabled value="">(更多端口请去系统设置)</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label>4. 目标机器架构</label><select id="archType"><option value="amd64">Linux AMD64 (x86_64)</option><option value="arm64">Linux ARM64 (aarch64)</option></select></div>
                     </div>
                     <button class="btn" onclick="genCmd()"><i class="ri-magic-line"></i> 生成安装命令</button>
                     
@@ -2254,16 +2358,25 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                             <div class="form-group"><label>修改管理员密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
                             <div class="form-group"><label>通信 Token (Agent 密钥)</label><input name="token" value="{{.Token}}"></div>
                         </div>
+
+                        <div style="background:rgba(129,140,248,0.05);padding:20px;border-radius:16px;border:1px dashed var(--primary);grid-column:1/-1">
+                            <h4 style="margin:0 0 10px 0;font-size:14px;color:var(--primary)"><i class="ri-server-line"></i> Agent 通信端口配置</h4>
+                            <div class="form-group" style="margin:0">
+                                <label style="font-weight:400">设置 Master 监听的端口 (多个端口请用英文逗号分隔，例如: 9999,10086)</label>
+                                <input name="agent_ports" value="{{if .Config.AgentPorts}}{{.Config.AgentPorts}}{{else}}9999{{end}}" placeholder="9999">
+                                <div style="font-size:12px;color:var(--warning-text);margin-top:6px;display:flex;align-items:center;gap:4px"><i class="ri-alert-line"></i> 修改此处端口后，必须手动重启服务才能生效！</div>
+                            </div>
+                        </div>
                         
-                        <div style="background:rgba(99,102,241,0.05);padding:24px;border-radius:16px;border:1px solid rgba(99,102,241,0.2)">
+                        <div style="background:rgba(99,102,241,0.05);padding:24px;border-radius:16px;border:1px solid rgba(99,102,241,0.2);grid-column:1/-1">
                             <h4 style="margin:0 0 16px 0;font-size:15px;color:var(--primary)"><i class="ri-telegram-line"></i> Telegram 消息通知</h4>
-                            <div class="grid-form" style="gap:16px">
+                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
                                 <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}" placeholder="123456:ABC-DEF..."></div>
                                 <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}" placeholder="-100xxxxxxx"></div>
                             </div>
                         </div>
 
-                        <div style="background:var(--input-bg);padding:24px;border-radius:16px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+                        <div style="background:var(--input-bg);padding:24px;border-radius:16px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;grid-column:1/-1">
                             <div>
                                 <h4 style="margin:0 0 6px 0;font-size:14px"><i class="ri-shield-keyhole-line"></i> 双因素认证 (2FA)</h4>
                                 <div style="font-size:12px;color:var(--text-sub)">推荐开启。登录时需验证 Google Authenticator 动态码。</div>
@@ -2277,15 +2390,16 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                             </div>
                         </div>
 
-                        <div class="grid-form" style="gap:16px;margin-top:10px">
+                        <div class="grid-form" style="gap:16px;margin-top:10px;grid-column:1/-1;grid-template-columns: 1fr 1fr 1fr;">
                             <div class="form-group"><label>面板域名</label><input name="master_domain" value="{{.MasterDomain}}"></div>
                             <div class="form-group"><label>面板 IP (IPv4)</label><input name="master_ip" value="{{.MasterIP}}"></div>
                             <div class="form-group"><label>面板 IP (IPv6)</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
                         </div>
 
-                        <div style="display:flex;gap:16px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px">
+                        <div style="display:flex;gap:16px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px;grid-column:1/-1">
                             <button class="btn" style="flex:2;height:48px"><i class="ri-save-3-line"></i> 保存系统配置</button>
-                            <a href="/download_config" class="btn secondary" style="flex:1;height:48px"><i class="ri-download-cloud-2-line"></i> 备份数据</a>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:48px" title="备份数据库"><i class="ri-download-cloud-2-line"></i> 备份</a>
+                            <button type="button" class="btn warning" style="flex:1;height:48px" onclick="restartService()" title="重启面板服务"><i class="ri-restart-line"></i> 重启</button>
                         </div>
                     </div>
                 </form>
@@ -2351,7 +2465,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 </div>
 
 <script>
-    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", port="9999", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
@@ -2424,6 +2538,17 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         }
     }
 
+    function restartService() {
+        showConfirm("重启服务", "确定要重启面板服务吗？<br>短暂的连接中断不会影响已建立的转发连接。", "warning", () => {
+            fetch('/restart', {method: 'POST'}).then(() => {
+                showToast("系统正在重启...", "warn");
+                setTimeout(() => location.reload(), 3000);
+            }).catch(() => {
+                showToast("请求发送失败", "warn");
+            });
+        });
+    }
+
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
@@ -2454,6 +2579,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         const btn = document.getElementById('c_btn');
         const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
+        else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认重启'; icon.innerText = '🔄'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '🤔'; }
         btn.onclick = function() { closeConfirm(); cb(); };
         document.getElementById('confirmModal').style.display = 'block';
@@ -2464,11 +2590,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         const n = document.getElementById('agentName').value;
         const t = document.getElementById('addrType').value;
         const arch = document.getElementById('archType').value;
+        const p = document.getElementById('connPort').value; 
         const finalDwUrl = dwUrl + "-linux-" + arch;
         const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
         if(!host || host === "[]") { showToast("请先在设置中配置面板地址", "warn"); return; }
         
-        let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+port+'" -token "'+token+'"';
+        let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+p+'" -token "'+token+'"';
         if(is_tls) cmd += ' -tls';
         document.getElementById('cmdText').innerText = cmd;
         document.getElementById('cmdText').style.opacity = '1';
