@@ -498,9 +498,9 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 			log.Println("Systemd 服务已安装")
 		} else if isAlpine {
 			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", exe, args)
-			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
-			exec.Command("rc-update", "add", "gorelay", "default").Run()
-			exec.Command("rc-service", "gorelay", "restart").Run()
+			os.WriteFile("/etc/init.d/relay", []byte(c), 0755)
+			exec.Command("rc-update", "add", "relay", "default").Run()
+			exec.Command("rc-service", "relay", "restart").Run()
 			log.Println("OpenRC 服务已安装")
 		} else {
 			exec.Command("nohup", exe, args, "&").Start()
