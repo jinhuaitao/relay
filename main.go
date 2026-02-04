@@ -2075,7 +2075,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     .nav-btn i { font-size: 22px; transition: .2s; }
     .card { padding: 20px; } /* 移动端卡片内边距调小 */
     .chart-box { height: 240px; } /* 移动端图表高度恢复紧凑 */
-    .dashboard-grid { gap: 20px; }
+    .dashboard-grid { display: block; }
 }
 
 /* Toast */
