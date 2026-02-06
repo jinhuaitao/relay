@@ -68,7 +68,8 @@ atomic 原子操作处理流量计数，确保统计准确且高效。
  * 中转机 (Master)：一台拥有公网 IP 的服务器，用于部署控制面板。
  * 节点机 (Agent)：一台或多台用于实际转发流量的服务器（可以是那台中转机自己，也可以是其他国内/国外机器）。
 # 第二步：两种方式
-## 1.一键安装脚本（方式）
+
+## 1.一键安装脚本（推荐方式）
 ```
 curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go_relay.sh && chmod +x go_relay.sh && ./go_relay.sh
 ```
