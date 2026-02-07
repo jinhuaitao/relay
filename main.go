@@ -1409,11 +1409,14 @@ func runAgent(name, masterAddr, token string) {
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
+					
+					// [修复] IP 变动热更新：强制更新内存中的目标地址
+					activeTargets.Store(t.ID, t.Target)
+
 					if _, loaded := activeTasks.LoadOrStore(t.ID, t); !loaded {
 						agentTraffic.Store(t.ID, &TrafficCounter{})
 						var uz int64 = 0
 						agentUserCounts.Store(t.ID, &uz)
-						activeTargets.Store(t.ID, t.Target)
 						startProxy(t)
 					}
 				}
@@ -1560,8 +1563,17 @@ func startProxy(t ForwardTask) {
 	}
 }
 
-func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
+unc pipeTCP(src net.Conn, tid string, limit int64) {
 	defer src.Close()
+
+	// [修复] 每次连接时，从 activeTargets 获取最新的 Target IP
+	var targetStr string
+	if v, ok := activeTargets.Load(tid); ok {
+		targetStr = v.(string)
+	} else {
+		return // 任务可能已被删除
+	}
+
 	allTargets := strings.Split(targetStr, ",")
 	var candidates []string
 	for _, t := range allTargets {
@@ -1585,8 +1597,7 @@ func pipeTCP(src net.Conn, targetStr, tid string, limit int64) {
 	copyCount(src, dst, &cnt.Rx, limit)
 }
 
-func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker, limit int64) {
-	targets := strings.Split(targetStr, ",")
+func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 	udpSessions := &sync.Map{}
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
@@ -1623,6 +1634,15 @@ func handleUDP(ln *net.UDPConn, targetStr string, tid string, tracker *IpTracker
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
 		} else {
+			// [修复] 每次建立新 UDP Session 时，获取最新的 Target IP
+			var currentTargetStr string
+			if v, ok := activeTargets.Load(tid); ok {
+				currentTargetStr = v.(string)
+			} else {
+				continue
+			}
+			targets := strings.Split(currentTargetStr, ",")
+
 			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(targets))))
 			dstAddr, _ := net.ResolveUDPAddr("udp", strings.TrimSpace(targets[randIdx.Int64()]))
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
