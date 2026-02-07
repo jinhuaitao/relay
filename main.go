@@ -1563,8 +1563,7 @@ func startProxy(t ForwardTask) {
 	}
 }
 
-unc pipeTCP(src net.Conn, tid string, limit int64) {
-	defer src.Close()
+unc pipeTCP(src net.Conn, tid string, limit int64) {defer src.Close()
 
 	// [修复] 每次连接时，从 activeTargets 获取最新的 Target IP
 	var targetStr string
@@ -1597,8 +1596,7 @@ unc pipeTCP(src net.Conn, tid string, limit int64) {
 	copyCount(src, dst, &cnt.Rx, limit)
 }
 
-func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
-	udpSessions := &sync.Map{}
+func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {udpSessions := &sync.Map{}
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 
