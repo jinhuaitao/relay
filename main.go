@@ -196,7 +196,7 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
-	activeTargets    sync.Map
+	activeTargets    sync.Map // 存储最新的目标地址
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
 	targetHealthMap  sync.Map
@@ -1156,6 +1156,10 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
+
+	// [还原] 移除手动指定 bridge_port，恢复随机生成
+	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
+
 	mu.Lock()
 	rules = append(rules, LogicalRule{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -1169,7 +1173,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		Protocol:     r.FormValue("protocol"),
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
-		BridgePort:   fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000),
+		BridgePort:   finalBridgePort,
 	})
 	saveConfigNoLock()
 	mu.Unlock()
@@ -1410,7 +1414,7 @@ func runAgent(name, masterAddr, token string) {
 				for _, t := range tasks {
 					active[t.ID] = true
 					
-					// [修复] IP 变动热更新：强制更新内存中的目标地址
+					// [保留] IP 变动热更新：强制更新内存中的目标地址
 					activeTargets.Store(t.ID, t.Target)
 
 					if _, loaded := activeTasks.LoadOrStore(t.ID, t); !loaded {
@@ -1539,7 +1543,8 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					pipeTCP(conn, t.Target, t.ID, t.SpeedLimit)
+					// [保留] IP 动态获取，修复旧 IP 问题
+					pipeTCP(conn, t.ID, t.SpeedLimit)
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -1558,14 +1563,17 @@ func startProxy(t ForwardTask) {
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
-			handleUDP(ln, t.Target, t.ID, ipTracker, t.SpeedLimit)
+			// [保留] IP 动态获取
+			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit)
 		}()
 	}
 }
 
-unc pipeTCP(src net.Conn, tid string, limit int64) {defer src.Close()
+// [保留] IP 热更新逻辑
+func pipeTCP(src net.Conn, tid string, limit int64) {
+	defer src.Close()
 
-	// [修复] 每次连接时，从 activeTargets 获取最新的 Target IP
+	// [保留] 每次连接时，从 activeTargets 获取最新的 Target IP
 	var targetStr string
 	if v, ok := activeTargets.Load(tid); ok {
 		targetStr = v.(string)
@@ -1596,7 +1604,9 @@ unc pipeTCP(src net.Conn, tid string, limit int64) {defer src.Close()
 	copyCount(src, dst, &cnt.Rx, limit)
 }
 
-func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {udpSessions := &sync.Map{}
+// [保留] IP 热更新逻辑
+func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
+	udpSessions := &sync.Map{}
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 
@@ -1632,7 +1642,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {ud
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
 		} else {
-			// [修复] 每次建立新 UDP Session 时，获取最新的 Target IP
+			// [保留] 每次建立新 UDP Session 时，获取最新的 Target IP
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
@@ -2228,6 +2238,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-group"><label>目标 IP (支持多IP/域名)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1,[ IPV6 ]" required></div>
                         <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
+
                         <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
