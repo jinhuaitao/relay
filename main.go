@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.25" // 当前版本号
+	AppVersion      = "v3.0.26" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -184,6 +184,8 @@ type RuleStatusData struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Total     int64  `json:"total"`
+	Tx        int64  `json:"tx"`
+	Rx        int64  `json:"rx"`
 	UserCount int64  `json:"uc"`
 	Limit     int64  `json:"limit"`
 	Status    bool   `json:"status"`
@@ -438,7 +440,7 @@ func performSelfUpdate() error {
 	os.Chmod(tmpPath, 0755)
 
 	oldPath := exePath + ".old"
-	os.Remove(oldPath) 
+	os.Remove(oldPath)
 	if err := os.Rename(exePath, oldPath); err != nil {
 		// Windows
 	}
@@ -537,8 +539,7 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if useTLS {
 		tlsParam = " -tls"
 	}
-	
-	// [修改] 根据模式设置服务名
+
 	svcName := "relay" // 默认为 Master 服务名
 	if mode == "agent" {
 		svcName = "gorelay" // Agent 服务名
@@ -553,7 +554,7 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		isAlpine = true
 	}
-	
+
 	if op == "install" {
 		if isSys {
 			c := fmt.Sprintf("[Unit]\nDescription=GoRelay Service (%s)\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", svcName, exe, args)
@@ -590,10 +591,9 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 
 func doSelfUninstall() {
 	log.Println("执行自毁程序...")
-	
-	// [修改] 尝试停止并清理 relay 和 gorelay 两个可能存在的服务名
+
 	services := []string{"relay", "gorelay"}
-	
+
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
@@ -612,7 +612,7 @@ func doSelfUninstall() {
 			}
 		}
 	}
-	
+
 	exe, err := os.Executable()
 	if err == nil {
 		realPath, err := filepath.EvalSymlinks(exe)
@@ -656,7 +656,6 @@ func runMaster() {
 	}()
 	go broadcastLoop()
 	go func() {
-		// 预先检查证书，决定是否启用 TLS
 		var agentTlsConfig *tls.Config
 		if _, err := os.Stat("server.crt"); err == nil {
 			if _, err := os.Stat("server.key"); err == nil {
@@ -671,14 +670,12 @@ func runMaster() {
 			log.Println("⚠️ Master 已启用 TCP 模式 (未找到证书或加载失败)")
 		}
 
-		// 从配置中读取端口列表，默认 9999
 		portsStr := config.AgentPorts
 		if portsStr == "" {
 			portsStr = "9999"
 		}
 		ports := strings.Split(portsStr, ",")
 
-		// 循环监听多个端口
 		for _, pStr := range ports {
 			pStr = strings.TrimSpace(pStr)
 			if pStr == "" {
@@ -732,8 +729,8 @@ func runMaster() {
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
-	http.HandleFunc("/restart", authMiddleware(handleRestart)) // 新增重启路由
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 系统更新路由
+	http.HandleFunc("/restart", authMiddleware(handleRestart))          // 新增重启路由
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))  // 系统更新路由
 	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
 	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) // [新增] 检查更新路由
 
@@ -781,6 +778,8 @@ func broadcastLoop() {
 				ID:        r.ID,
 				Name:      r.Note,
 				Total:     r.TotalTx + r.TotalRx,
+				Tx:        r.TotalTx,
+				Rx:        r.TotalRx,
 				UserCount: r.UserCount,
 				Limit:     r.TrafficLimit,
 				Status:    r.TargetStatus,
@@ -1446,9 +1445,9 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	// 简单对比版本号
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
-	
+
 	hasUpdate := remoteVer != currentVer // 简单对比：只要字符串不同就提示更新 (简化逻辑)
-	
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
 		"latest_version": data.TagName,
@@ -1458,10 +1457,10 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
-	
+
 	// [修改] 自动检测存在的服务名进行重启 (relay 或 gorelay)
 	services := []string{"relay", "gorelay"}
-	
+
 	// 1. 尝试 Systemd
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
@@ -1473,7 +1472,7 @@ func doRestart() {
 			}
 		}
 	}
-	
+
 	// 2. 尝试 OpenRC
 	if _, err := os.Stat("/etc/init.d"); err == nil {
 		for _, s := range services {
@@ -1485,7 +1484,7 @@ func doRestart() {
 			}
 		}
 	}
-	
+
 	// 3. 直接二进制重启 (Standalone/Docker/Manual)
 	argv0, err := os.Executable()
 	if err != nil {
@@ -1581,7 +1580,7 @@ func runAgent(name, masterAddr, token string) {
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
-					
+
 					// [保留] IP 变动热更新：强制更新内存中的目标地址
 					activeTargets.Store(t.ID, t.Target)
 
@@ -2101,7 +2100,7 @@ const dashboardHtml = `
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-/* --- 现代 CSS 变量定义 --- */
+/* --- 样式保持不变，为了节省篇幅，沿用原版样式 --- */
 :root {
     --primary: #818cf8; --primary-hover: #6366f1; --primary-light: rgba(129, 140, 248, 0.15);
     --bg-body: #f8fafc; --bg-sidebar: #ffffff; --bg-card: #ffffff;
@@ -2128,10 +2127,8 @@ const dashboardHtml = `
     --shadow-sm: none; --shadow-md: none; --shadow-lg: none;
 }
 
-/* --- 全局样式 --- */
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
 body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; font-size: 14px; letter-spacing: -0.01em; }
-/* 背景装饰 */
 body::before { content: ''; position: fixed; top: -10%; left: -10%; width: 50%; height: 50%; background: radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 60%); z-index: -1; pointer-events: none; filter: blur(60px); }
 body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50%; height: 50%; background: radial-gradient(circle, rgba(168,85,247,0.08) 0%, transparent 60%); z-index: -1; pointer-events: none; filter: blur(60px); }
 
@@ -2140,7 +2137,6 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-sub); }
 
-/* --- 侧边栏 --- */
 .sidebar { width: var(--sidebar-w); background: var(--bg-sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; z-index: 50; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
 .brand { height: 80px; display: flex; align-items: center; padding: 0 28px; font-size: 20px; font-weight: 800; gap: 12px; background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 .brand i { font-size: 28px; color: #818cf8; -webkit-text-fill-color: initial; }
@@ -2157,7 +2153,6 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 .btn-logout { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.05); color: #ef4444; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: var(--trans); text-decoration: none; font-weight: 600; }
 .btn-logout:hover { background: rgba(239,68,68,0.1); transform: translateY(-1px); }
 
-/* --- 主内容区 --- */
 .main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; min-width: 0; }
 .header { height: 80px; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; z-index: 40; }
 .page-title { font-weight: 800; font-size: 26px; display: flex; align-items: center; gap: 12px; color: var(--text-main); }
@@ -2170,7 +2165,6 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 .page.active { display: block; }
 @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 
-/* --- 卡片组件 (Glassmorphism) --- */
 .card { background: var(--bg-card); padding: 28px; border-radius: var(--radius); box-shadow: var(--shadow-lg); border: 1px solid var(--border); margin-bottom: 24px; position: relative; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); transition: transform 0.2s, border-color 0.2s; }
 [data-theme="dark"] .card { background: rgba(30, 41, 59, 0.4); border-top: 1px solid rgba(255,255,255,0.08); }
 .card:hover { border-color: rgba(129, 140, 248, 0.3); }
@@ -2178,7 +2172,6 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 h3 { margin: 0 0 24px 0; font-size: 16px; color: var(--text-main); font-weight: 700; display: flex; align-items: center; gap: 10px; }
 h3 i { color: var(--primary); background: var(--primary-light); padding: 8px; border-radius: 10px; font-size: 18px; }
 
-/* 统计卡片 */
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; margin-bottom: 32px; }
 .stat-item { padding: 24px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; height: 150px; border: 1px solid var(--border); border-radius: 20px; background: linear-gradient(145deg, var(--bg-card) 0%, rgba(99,102,241,0.02) 100%); transition: transform 0.2s; }
 .stat-item:hover { transform: translateY(-4px); box-shadow: 0 10px 20px -5px rgba(0,0,0,0.1); }
@@ -2189,12 +2182,9 @@ h3 i { color: var(--primary); background: var(--primary-light); padding: 8px; bo
 .stat-trend { font-size: 13px; margin-top: auto; display: flex; align-items: center; gap: 6px; font-weight: 500; opacity: 0.8; }
 
 .dashboard-grid { display: grid; grid-template-columns: 2.5fr 1fr; gap: 24px; margin-bottom: 24px; }
-/* 图表容器自适应 */
 .chart-box { height: 360px; width: 100%; position: relative; }
-
 @media (max-width: 1100px) { .dashboard-grid { grid-template-columns: 1fr; } }
 
-/* 表格优化 */
 .table-container { overflow-x: auto; border-radius: 16px; border: 1px solid var(--border); background: var(--bg-card); }
 table { width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
 th { text-align: left; padding: 18px 24px; color: var(--text-sub); font-size: 12px; font-weight: 600; text-transform: uppercase; background: var(--input-bg); border-bottom: 1px solid var(--border); }
@@ -2202,14 +2192,12 @@ td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--input-bg); }
 
-/* 分组标题设计 */
 .group-header { background: linear-gradient(90deg, var(--primary-light) 0%, transparent 100%); cursor: pointer; user-select: none; position: relative; }
 .group-header:hover { background: rgba(129, 140, 248, 0.2); }
 .group-header td { padding: 12px 24px; font-weight: 700; color: var(--primary); font-size: 13px; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); border-left: 3px solid var(--primary); }
 .group-icon { transition: transform 0.2s; display: inline-block; margin-right: 8px; width: 16px; text-align: center; }
 .group-collapsed .group-icon { transform: rotate(-90deg); }
 
-/* 状态徽标 */
 .badge { padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; letter-spacing: 0.3px; }
 .badge.success { background: var(--success-bg); color: var(--success-text); border-color: rgba(16,185,129,0.1); }
 .badge.danger { background: var(--danger-bg); color: var(--danger-text); border-color: rgba(239,68,68,0.1); }
@@ -2218,7 +2206,6 @@ tr:hover td { background: var(--input-bg); }
 .status-dot.pulse { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); animation: pulse-shadow 2s infinite; }
 @keyframes pulse-shadow { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); } 70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
 
-/* 表单与按钮 */
 .grid-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; align-items: end; }
 .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text-sub); }
 input, select { width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: 0.2s; font-family: inherit; }
@@ -2235,13 +2222,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 .btn.warning:hover { background: var(--warning); color: #fff; border-color: transparent; }
 .btn.icon { padding: 0; width: 36px; height: 36px; border-radius: 10px; font-size: 18px; }
 
-/* 进度条 */
 .progress { width: 100%; height: 6px; background: var(--border); border-radius: 10px; overflow: hidden; margin-top: 10px; position: relative; }
 .progress-bar { height: 100%; background: var(--primary); border-radius: 10px; transition: width 0.5s ease; box-shadow: 0 0 10px var(--primary-light); position: relative; overflow: hidden; }
 .progress-bar::after { content: ''; position: absolute; top: 0; left: 0; bottom: 0; right: 0; background-image: linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent); background-size: 1rem 1rem; animation: progress-stripes 1s linear infinite; }
 @keyframes progress-stripes { from { background-position: 1rem 0; } to { background-position: 0 0; } }
 
-/* 终端窗口样式 */
 .terminal-window { background: #1e293b; border-radius: 16px; box-shadow: var(--shadow-lg); overflow: hidden; border: 1px solid #334155; font-family: 'JetBrains Mono', monospace; }
 .terminal-header { background: #0f172a; padding: 12px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #334155; }
 .dot { width: 12px; height: 12px; border-radius: 50%; }
@@ -2250,31 +2235,28 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 .cmd-content { opacity: 0.9; }
 .copy-overlay { position: absolute; top: 12px; right: 12px; }
 
-/* 模态框 */
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); animation: fadeIn 0.2s; }
 .modal-content { background: var(--bg-card); margin: 8vh auto; padding: 40px; border-radius: 24px; width: 90%; max-width: 580px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid var(--border); transform: scale(0.95); animation: scaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; position: relative; max-height: 85vh; overflow-y: auto; }
 @keyframes scaleIn { to { transform: scale(1); opacity: 1; } }
 .close-modal { position: absolute; right: 24px; top: 24px; font-size: 24px; cursor: pointer; color: var(--text-sub); transition: .2s; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--input-bg); }
 .close-modal:hover { color: var(--text-main); transform: rotate(90deg); background: var(--border); }
 
-/* 移动端适配 */
 .mobile-nav { display: none; }
 @media (max-width: 768px) {
     .sidebar { display: none; }
     .header { padding: 0 20px; height: 64px; }
-    .content { padding: 20px 20px 90px 20px; } /* 移动端 padding 调小 */
+    .content { padding: 20px 20px 90px 20px; }
     .stats-grid { grid-template-columns: 1fr; }
     .mobile-nav { display: flex; position: fixed; bottom: 0; left: 0; width: 100%; background: rgba(var(--bg-card), 0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--border); height: 64px; z-index: 100; justify-content: space-around; padding-bottom: env(safe-area-inset-bottom); align-items: center; }
     .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-sub); font-size: 10px; gap: 4px; height: 100%; transition: .2s; }
     .nav-btn.active { color: var(--primary); }
     .nav-btn.active i { transform: translateY(-2px); }
     .nav-btn i { font-size: 22px; transition: .2s; }
-    .card { padding: 20px; } /* 移动端卡片内边距调小 */
-    .chart-box { height: 240px; } /* 移动端图表高度恢复紧凑 */
+    .card { padding: 20px; }
+    .chart-box { height: 240px; }
     .dashboard-grid { display: block; }
 }
 
-/* Toast */
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: rgba(15, 23, 42, 0.95); color: #fff; padding: 12px 24px; border-radius: 50px; font-size: 14px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 10px; backdrop-filter: blur(10px); box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 .toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 100px; }
 </style>
@@ -2288,7 +2270,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     <div class="menu">
         <div class="item active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i> 概览监控</div>
         <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发管理</div>
-        <div class="item" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i> 节点部署</div>
+        <div class="item" onclick="nav('deploy',this)"><i class="ri-server-line"></i> 节点部署</div>
         <div class="item" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i> 系统日志</div>
         <div class="item" onclick="nav('settings',this)">
             <i class="ri-settings-4-line"></i> 系统设置
@@ -2365,39 +2347,14 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             </div>
 
             <div class="card">
-                <h3><i class="ri-server-line"></i> 节点状态监控</h3>
+                <h3><i class="ri-speed-mini-line"></i> 实时转发流量监控</h3>
                 <div class="table-container">
-                    {{if .Agents}}
                     <table>
-                        <thead><tr><th>状态</th><th>节点名称 / 标识</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
-                        <tbody>
-                        {{range .Agents}}
-                        <tr>
-                            <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
-                            <td><div style="font-weight:700">{{.Name}}</div></td>
-                            <td><span class="click-copy" onclick="copyText('{{.RemoteIP}}')" style="font-family:'JetBrains Mono';background:var(--input-bg);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer" title="点击复制">{{.RemoteIP}}</span></td>
-                            <td style="width:240px">
-                                <div style="display:flex;align-items:center;gap:12px">
-                                    <div class="progress" style="margin:0;flex:1"><div class="progress-bar" id="load-bar-{{.Name}}" style="width:0%"></div></div>
-                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:'JetBrains Mono';min-width:60px;text-align:right">0.0</span>
-                                </div>
-                            </td>
-                            <td>
-                                <div style="display:flex;gap:8px">
-                                    <button class="btn icon warning" onclick="updateAgent('{{.Name}}')" title="更新节点版本"><i class="ri-refresh-line"></i></button>
-                                    <button class="btn icon danger" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button>
-                                </div>
-                            </td>
-                        </tr>
-                        {{end}}
+                        <thead><tr><th>规则名称</th><th>上传速度 (Tx)</th><th>下载速度 (Rx)</th><th>总流量消耗</th></tr></thead>
+                        <tbody id="rule-monitor-body">
+                            <tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">正在获取实时数据...</td></tr>
                         </tbody>
                     </table>
-                    {{else}}
-                    <div style="padding:60px 0;text-align:center;color:var(--text-sub)">
-                        <div style="background:var(--input-bg);width:80px;height:80px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 20px auto;font-size:32px"><i class="ri-ghost-line"></i></div>
-                        暂无在线节点，请前往“部署”页面添加
-                    </div>
-                    {{end}}
                 </div>
             </div>
         </div>
@@ -2527,6 +2484,43 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                     </div>
                 </div>
             </div>
+
+            <div class="card">
+                <h3><i class="ri-server-line"></i> 在线节点状态监控</h3>
+                <div class="table-container">
+                    {{if .Agents}}
+                    <table>
+                        <thead><tr><th>状态</th><th>节点名称 / 标识</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
+                        <tbody>
+                        {{range .Agents}}
+                        <tr>
+                            <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
+                            <td><div style="font-weight:700">{{.Name}}</div></td>
+                            <td><span class="click-copy" onclick="copyText('{{.RemoteIP}}')" style="font-family:'JetBrains Mono';background:var(--input-bg);padding:4px 8px;border-radius:6px;font-size:12px;cursor:pointer" title="点击复制">{{.RemoteIP}}</span></td>
+                            <td style="width:240px">
+                                <div style="display:flex;align-items:center;gap:12px">
+                                    <div class="progress" style="margin:0;flex:1"><div class="progress-bar" id="load-bar-{{.Name}}" style="width:0%"></div></div>
+                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:'JetBrains Mono';min-width:60px;text-align:right">0.0</span>
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display:flex;gap:8px">
+                                    <button class="btn icon warning" onclick="updateAgent('{{.Name}}')" title="更新节点版本"><i class="ri-refresh-line"></i></button>
+                                    <button class="btn icon danger" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button>
+                                </div>
+                            </td>
+                        </tr>
+                        {{end}}
+                        </tbody>
+                    </table>
+                    {{else}}
+                    <div style="padding:40px 0;text-align:center;color:var(--text-sub);font-size:13px">
+                        <i class="ri-ghost-line" style="font-size:24px;display:block;margin-bottom:8px"></i>
+                        暂无在线节点，请在下方生成命令进行部署
+                    </div>
+                    {{end}}
+                </div>
+            </div>
         </div>
 
         <div id="logs" class="page">
@@ -2626,7 +2620,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 <div class="mobile-nav">
     <div class="nav-btn active" onclick="nav('dashboard',this)"><i class="ri-dashboard-3-line"></i><span>概览</span></div>
     <div class="nav-btn" onclick="nav('rules',this)"><i class="ri-route-line"></i><span>规则</span></div>
-    <div class="nav-btn" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i><span>部署</span></div>
+    <div class="nav-btn" onclick="nav('deploy',this)"><i class="ri-server-line"></i><span>节点</span></div>
     <div class="nav-btn" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i><span>日志</span></div>
     <div class="nav-btn" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i><span>设置</span></div>
 </div>
@@ -2681,6 +2675,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 
 <script>
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+    var lastRuleStats = {}; // 用于存储上一次的规则流量数据，计算速度
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
@@ -2703,46 +2698,29 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
 
-    // 分组折叠功能
     document.addEventListener('DOMContentLoaded', () => {
         const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
         collapsed.forEach(g => {
             const header = document.querySelector('.group-header[data-group="'+g+'"]');
             if(header) setGroupState(header, false); 
         });
-        // 自动检查更新
         checkUpdate();
     });
 
     function toggleGroup(header) {
         const isCurrentlyCollapsed = header.classList.contains('group-collapsed');
-        // 当前是折叠状态 -> 点击展开 (true)
-        // 当前是展开状态 -> 点击折叠 (false)
         setGroupState(header, isCurrentlyCollapsed); 
-        
         const group = header.getAttribute('data-group');
         let collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
-        if (isCurrentlyCollapsed) { 
-            // 展开了，从已折叠列表中移除
-            collapsed = collapsed.filter(i => i !== group);
-        } else {
-            // 折叠了，加入列表
-            if(!collapsed.includes(group)) collapsed.push(group);
-        }
+        if (isCurrentlyCollapsed) { collapsed = collapsed.filter(i => i !== group); } else { if(!collapsed.includes(group)) collapsed.push(group); }
         localStorage.setItem('collapsed_groups', JSON.stringify(collapsed));
     }
 
     function setGroupState(header, expand) {
         const group = header.getAttribute('data-group');
         const rows = Array.from(document.querySelectorAll('.rule-row')).filter(row => row.getAttribute('data-group') === group);
-
-        if (!expand) {
-            header.classList.add('group-collapsed');
-            rows.forEach(r => r.style.display = 'none');
-        } else {
-            header.classList.remove('group-collapsed');
-            rows.forEach(r => r.style.display = 'table-row');
-        }
+        if (!expand) { header.classList.add('group-collapsed'); rows.forEach(r => r.style.display = 'none'); } 
+        else { header.classList.remove('group-collapsed'); rows.forEach(r => r.style.display = 'table-row'); }
     }
 
     function copyText(txt) {
@@ -2760,26 +2738,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             fetch('/restart', {method: 'POST'}).then(() => {
                 showToast("系统正在重启...", "warn");
                 setTimeout(() => location.reload(), 3000);
-            }).catch(() => {
-                showToast("请求发送失败", "warn");
-            });
+            }).catch(() => { showToast("请求发送失败", "warn"); });
         });
     }
 
     function checkUpdate() {
         fetch('/check_update').then(r=>r.json()).then(d => {
             if(d.has_update) {
-                // 显示侧边栏小红点
-                const badge = document.getElementById('settings-badge');
-                if(badge) badge.style.display = 'inline-block';
-                
-                // 显示设置页面的文字提示
-                const txt = document.getElementById('new-version-text');
-                if(txt) {
-                    txt.style.display = 'inline';
-                    txt.innerText = '发现新版本 ' + d.latest_version + '！';
-                }
-                
+                const badge = document.getElementById('settings-badge'); if(badge) badge.style.display = 'inline-block';
+                const txt = document.getElementById('new-version-text'); if(txt) { txt.style.display = 'inline'; txt.innerText = '发现新版本 ' + d.latest_version + '！'; }
                 showToast("发现新版本 " + d.latest_version + "，请前往设置页面更新", "success");
             }
         });
@@ -2787,18 +2754,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 
     function updateSystem() {
         showConfirm("系统更新", "确定要下载最新版本并重启 Master 面板吗？<br>服务将短暂中断。", "warning", () => {
-            const btn = document.getElementById('btn-update');
-            btn.disabled = true;
-            btn.innerText = '更新中...';
+            const btn = document.getElementById('btn-update'); btn.disabled = true; btn.innerText = '更新中...';
             fetch('/update_sys', {method: 'POST'}).then(r=>r.json()).then(d => {
-                if(d.success) {
-                    showToast("更新成功，正在重启...", "success");
-                    setTimeout(() => location.reload(), 5000);
-                } else {
-                    showToast("更新失败: " + d.error, "warn");
-                    btn.disabled = false;
-                    btn.innerText = '立即更新';
-                }
+                if(d.success) { showToast("更新成功，正在重启...", "success"); setTimeout(() => location.reload(), 5000); } 
+                else { showToast("更新失败: " + d.error, "warn"); btn.disabled = false; btn.innerText = '立即更新'; }
             }).catch(() => { showToast("请求失败", "warn"); btn.disabled = false; btn.innerText = '立即更新'; });
         });
     }
@@ -2806,8 +2765,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     function updateAgent(name) {
         showConfirm("更新节点", "确定要远程更新节点 <b>"+name+"</b> 吗？<br>节点将自动下载最新版并重启。", "warning", () => {
             fetch('/update_agent?name='+name, {method: 'POST'}).then(r => {
-                if(r.ok) showToast("已发送更新指令，请等待节点重启", "success");
-                else showToast("发送指令失败", "warn");
+                if(r.ok) showToast("已发送更新指令，请等待节点重启", "success"); else showToast("发送指令失败", "warn");
             });
         });
     }
@@ -2839,10 +2797,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     }
 
     function showConfirm(title, msg, type, cb) {
-        document.getElementById('c_title').innerText = title;
-        document.getElementById('c_msg').innerHTML = msg;
-        const btn = document.getElementById('c_btn');
-        const icon = document.getElementById('c_icon');
+        document.getElementById('c_title').innerText = title; document.getElementById('c_msg').innerHTML = msg;
+        const btn = document.getElementById('c_btn'); const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
         else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认操作'; icon.innerText = '🔄'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '🤔'; }
@@ -2978,6 +2934,27 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update('none');
                         
+                        // --- 更新实时流量表格 ---
+                        if(document.getElementById('dashboard').classList.contains('active')) {
+                            let tableHtml = '';
+                            d.rules.forEach(r => {
+                                let stx = 0, srx = 0;
+                                if (lastRuleStats[r.id]) {
+                                    stx = r.tx - lastRuleStats[r.id].tx;
+                                    srx = r.rx - lastRuleStats[r.id].rx;
+                                    if(stx < 0) stx = 0; if(srx < 0) srx = 0;
+                                }
+                                lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
+
+                                tableHtml += '<tr><td><div style="font-weight:700">'+(r.name||'未命名')+'</div></td>'+
+                                             '<td style="color:#818cf8;font-family:\'JetBrains Mono\'"><i class="ri-arrow-up-line"></i> '+formatSpeed(stx)+'</td>'+
+                                             '<td style="color:#06b6d4;font-family:\'JetBrains Mono\'"><i class="ri-arrow-down-line"></i> '+formatSpeed(srx)+'</td>'+
+                                             '<td style="color:var(--text-sub);font-family:\'JetBrains Mono\'">'+formatBytes(r.total)+'</td></tr>';
+                            });
+                            document.getElementById('rule-monitor-body').innerHTML = tableHtml || '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">暂无转发规则</td></tr>';
+                        }
+                        
+                        // --- 更新规则页面状态 ---
                         d.rules.forEach(r => {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
