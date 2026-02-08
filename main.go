@@ -539,9 +539,9 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	}
 	
 	// [修改] 根据模式设置服务名
-	svcName := "realy" // 默认为 Master 服务名
+	svcName := "relay" // 默认为 Master 服务名
 	if mode == "agent" {
-		svcName = "gorealy" // Agent 服务名
+		svcName = "gorelay" // Agent 服务名
 	}
 
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
@@ -591,8 +591,8 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 func doSelfUninstall() {
 	log.Println("执行自毁程序...")
 	
-	// [修改] 尝试停止并清理 realy 和 gorealy 两个可能存在的服务名
-	services := []string{"realy", "gorealy"}
+	// [修改] 尝试停止并清理 relay 和 gorelay 两个可能存在的服务名
+	services := []string{"relay", "gorelay"}
 	
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
@@ -1459,8 +1459,8 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
 	
-	// [修改] 自动检测存在的服务名进行重启 (realy 或 gorealy)
-	services := []string{"realy", "gorealy"}
+	// [修改] 自动检测存在的服务名进行重启 (relay 或 gorelay)
+	services := []string{"relay", "gorelay"}
 	
 	// 1. 尝试 Systemd
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
