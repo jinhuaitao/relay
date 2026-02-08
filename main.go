@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.018"
+	AppVersion      = "v3.0.19"
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -393,61 +393,6 @@ func autoGenerateCert() error {
 	return nil
 }
 
-// --- 通用更新逻辑 (Master/Agent 共享) ---
-
-func performSelfUpdate() error {
-	arch := runtime.GOARCH
-	osName := runtime.GOOS
-	suffix := ""
-	if osName == "linux" {
-		suffix = "-linux-" + arch
-	} else if osName == "darwin" {
-		suffix = "-darwin-" + arch
-	} else if osName == "windows" {
-		suffix = "-windows-" + arch + ".exe"
-	} else {
-		return fmt.Errorf("不支持的操作系统")
-	}
-
-	targetURL := DownloadURL + suffix
-	log.Printf("正在下载更新: %s", targetURL)
-
-	resp, err := http.Get(targetURL)
-	if err != nil || resp.StatusCode != 200 {
-		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
-	}
-	defer resp.Body.Close()
-
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("无法获取运行路径: %v", err)
-	}
-
-	tmpPath := exePath + ".new"
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %v", err)
-	}
-	_, err = io.Copy(out, resp.Body)
-	out.Close()
-	if err != nil {
-		return fmt.Errorf("写入文件失败: %v", err)
-	}
-
-	os.Chmod(tmpPath, 0755)
-
-	oldPath := exePath + ".old"
-	os.Remove(oldPath) 
-	if err := os.Rename(exePath, oldPath); err != nil {
-		// Windows
-	}
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Rename(oldPath, exePath) // 还原
-		return fmt.Errorf("覆盖文件失败: %v", err)
-	}
-	return nil
-}
-
 // --- 主程序 ---
 
 func main() {
@@ -708,8 +653,7 @@ func runMaster() {
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
 	http.HandleFunc("/restart", authMiddleware(handleRestart)) // 新增重启路由
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 系统更新路由
-	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 新增系统更新路由
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -1371,32 +1315,77 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Master自我更新处理
+// 自动更新处理逻辑
 func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
-	if err := performSelfUpdate(); err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
+	// 1. 确定系统架构
+	arch := runtime.GOARCH
+	osName := runtime.GOOS
+	suffix := ""
+	if osName == "linux" {
+		suffix = "-linux-" + arch
+	} else if osName == "darwin" {
+		suffix = "-darwin-" + arch
+	} else if osName == "windows" {
+		suffix = "-windows-" + arch + ".exe"
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "不支持的操作系统"})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-	go func() { time.Sleep(1 * time.Second); doRestart() }()
-}
 
-// Master远程通知Agent更新
-func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	mu.Lock()
-	agent, ok := agents[name]
-	mu.Unlock()
-	if !ok {
-		http.Error(w, "Agent not found", 404)
+	targetURL := DownloadURL + suffix
+	log.Printf("正在下载更新: %s", targetURL)
+
+	// 2. 下载文件
+	resp, err := http.Get(targetURL)
+	if err != nil || resp.StatusCode != 200 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "下载失败"})
 		return
 	}
-	// 发送更新指令给Agent
-	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
-	w.Write([]byte("ok"))
+	defer resp.Body.Close()
+
+	exePath, err := os.Executable()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法获取运行路径"})
+		return
+	}
+
+	tmpPath := exePath + ".new"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "创建临时文件失败"})
+		return
+	}
+	_, err = io.Copy(out, resp.Body)
+	out.Close()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "写入文件失败"})
+		return
+	}
+
+	// 3. 赋予执行权限
+	os.Chmod(tmpPath, 0755)
+
+	// 4. 替换文件 (兼容 Windows)
+	oldPath := exePath + ".old"
+	os.Remove(oldPath) // 清理旧备份
+	if err := os.Rename(exePath, oldPath); err != nil {
+		// Windows 可能需要先改名
+	}
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		os.Rename(oldPath, exePath) // 还原
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "覆盖文件失败"})
+		return
+	}
+
+	// 5. 重启
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	go func() {
+		time.Sleep(1 * time.Second)
+		doRestart()
+	}()
 }
 
 func doRestart() {
@@ -1493,16 +1482,6 @@ func runAgent(name, masterAddr, token string) {
 				doSelfUninstall()
 				return
 			}
-			// --- Agent 接收更新指令 ---
-			if msg.Type == "upgrade" {
-				log.Println("收到更新指令，开始执行自我更新...")
-				if err := performSelfUpdate(); err == nil {
-					doRestart()
-				} else {
-					log.Printf("更新失败: %v", err)
-				}
-			}
-			// ------------------------
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
@@ -2308,12 +2287,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                                     <span id="load-text-{{.Name}}" style="font-size:12px;font-family:'JetBrains Mono';min-width:60px;text-align:right">0.0</span>
                                 </div>
                             </td>
-                            <td>
-                                <div style="display:flex;gap:8px">
-                                    <button class="btn icon warning" onclick="updateAgent('{{.Name}}')" title="更新节点版本"><i class="ri-refresh-line"></i></button>
-                                    <button class="btn icon danger" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button>
-                                </div>
-                            </td>
+                            <td><button class="btn danger icon" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button></td>
                         </tr>
                         {{end}}
                         </tbody>
@@ -2523,7 +2497,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 
                         <div style="background:rgba(16,185,129,0.05);padding:24px;border-radius:16px;border:1px solid rgba(16,185,129,0.2);grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">
                             <div>
-                                <h4 style="margin:0 0 6px 0;font-size:14px;color:#10b981"><i class="ri-refresh-line"></i> 系统版本更新 (Master)</h4>
+                                <h4 style="margin:0 0 6px 0;font-size:14px;color:#10b981"><i class="ri-refresh-line"></i> 系统版本更新</h4>
                                 <div style="font-size:12px;color:var(--text-sub)">当前版本: {{.Version}} | 点击检查并更新到最新版本</div>
                             </div>
                             <div>
@@ -2691,7 +2665,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     }
 
     function updateSystem() {
-        showConfirm("系统更新", "确定要下载最新版本并重启 Master 面板吗？<br>服务将短暂中断。", "warning", () => {
+        showConfirm("系统更新", "确定要下载最新版本并重启服务吗？<br>服务将短暂中断。", "warning", () => {
             const btn = document.getElementById('btn-update');
             btn.disabled = true;
             btn.innerText = '更新中...';
@@ -2707,17 +2681,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             }).catch(() => { showToast("请求失败", "warn"); btn.disabled = false; btn.innerText = '立即更新'; });
         });
     }
-
-    function updateAgent(name) {
-        showConfirm("更新节点", "确定要远程更新节点 <b>"+name+"</b> 吗？<br>节点将自动下载最新版并重启。", "warning", () => {
-            fetch('/update_agent?name='+name, {method: 'POST'}).then(r => {
-                if(r.ok) showToast("已发送更新指令，请等待节点重启", "success");
-                else showToast("发送指令失败", "warn");
-            });
-        });
-    }
-
-    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
     function toggleTheme() {
         const html = document.documentElement;
@@ -2749,7 +2712,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         const btn = document.getElementById('c_btn');
         const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
-        else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认操作'; icon.innerText = '🔄'; }
+        else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认重启'; icon.innerText = '🔄'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '🤔'; }
         btn.onclick = function() { closeConfirm(); cb(); };
         document.getElementById('confirmModal').style.display = 'block';
@@ -2776,6 +2739,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，且无法恢复，确定吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的历史流量统计数据吗？", "normal", () => location.href="/reset_traffic?id="+id); }
+    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
     function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
