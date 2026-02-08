@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.27" // 版本号微调
+	AppVersion      = "v3.0.28" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -2294,7 +2294,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         <div class="page-title"><span id="page-text">仪表盘</span></div>
         <div style="display:flex;gap:16px;align-items:center">
             <a href="https://github.com/jinhuaitao/relay" target="_blank" class="theme-toggle" title="项目源码"><i class="ri-github-line"></i></a>
-            <a href="/logout" class="theme-toggle" title="退出登录"><i class="ri-logout-box-r-line"></i></a>
             <div class="theme-toggle" onclick="toggleTheme()"><i class="ri-moon-line" id="theme-icon"></i></div>
         </div>
     </header>
