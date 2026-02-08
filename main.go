@@ -2496,7 +2496,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             <div class="card">
                 <h3><i class="ri-install-line"></i> 节点安装向导</h3>
                 <p style="color:var(--text-sub);font-size:14px;line-height:1.6;max-width:800px">
-                    请在您的 VPS 或服务器（支持 Linux/macOS）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。
+                    请在您的 VPS 或服务器（支持 Linux）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。
                 </p>
                 
                 <div style="background:var(--input-bg);padding:32px;border-radius:20px;border:1px solid var(--border);margin-top:20px">
