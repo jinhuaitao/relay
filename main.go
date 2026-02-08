@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.26" // 版本号微调
+	AppVersion      = "v3.0.27" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -2294,6 +2294,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         <div class="page-title"><span id="page-text">仪表盘</span></div>
         <div style="display:flex;gap:16px;align-items:center">
             <a href="https://github.com/jinhuaitao/relay" target="_blank" class="theme-toggle" title="项目源码"><i class="ri-github-line"></i></a>
+            <a href="/logout" class="theme-toggle" title="退出登录"><i class="ri-logout-box-r-line"></i></a>
             <div class="theme-toggle" onclick="toggleTheme()"><i class="ri-moon-line" id="theme-icon"></i></div>
         </div>
     </header>
@@ -2349,8 +2350,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             <div class="card">
                 <h3><i class="ri-speed-mini-line"></i> 实时转发流量监控</h3>
                 <div class="table-container">
-                    <table>
-                        <thead><tr><th>规则名称</th><th>上传速度 (Tx)</th><th>下载速度 (Rx)</th><th>总流量消耗</th></tr></thead>
+                    <table style="table-layout: fixed;">
+                        <thead>
+                            <tr>
+                                <th>规则名称</th>
+                                <th style="width:22%">上传速度 (Tx)</th>
+                                <th style="width:22%">下载速度 (Rx)</th>
+                                <th style="width:22%">总流量消耗</th>
+                            </tr>
+                        </thead>
                         <tbody id="rule-monitor-body">
                             <tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">正在获取实时数据...</td></tr>
                         </tbody>
