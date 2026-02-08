@@ -47,11 +47,12 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.20"
+	AppVersion      = "v3.0.21" // 当前版本号
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
+	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest" // GitHub API
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
 	CopyBufferSize  = 32 * 1024
@@ -734,6 +735,7 @@ func runMaster() {
 	http.HandleFunc("/restart", authMiddleware(handleRestart)) // 新增重启路由
 	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 系统更新路由
 	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
+	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) // [新增] 检查更新路由
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -1423,10 +1425,41 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
+// [新增] 检查更新接口
+func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(GithubLatestAPI)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"has_update": false, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"has_update": false})
+		return
+	}
+
+	// 简单对比版本号
+	remoteVer := strings.TrimPrefix(data.TagName, "v")
+	currentVer := strings.TrimPrefix(AppVersion, "v")
+	
+	hasUpdate := remoteVer != currentVer // 简单对比：只要字符串不同就提示更新 (简化逻辑)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"has_update":     hasUpdate,
+		"latest_version": data.TagName,
+		"current":        AppVersion,
+	})
+}
+
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
 	
-	// [修改] 自动检测存在的服务名进行重启
+	// [修改] 自动检测存在的服务名进行重启 (realy 或 gorealy)
 	services := []string{"realy", "gorealy"}
 	
 	// 1. 尝试 Systemd
@@ -2257,7 +2290,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发管理</div>
         <div class="item" onclick="nav('deploy',this)"><i class="ri-rocket-2-line"></i> 节点部署</div>
         <div class="item" onclick="nav('logs',this)"><i class="ri-file-list-3-line"></i> 系统日志</div>
-        <div class="item" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i> 系统设置</div>
+        <div class="item" onclick="nav('settings',this)">
+            <i class="ri-settings-4-line"></i> 系统设置
+            <span id="settings-badge" class="badge danger" style="display:none;font-size:10px;padding:2px 6px;margin-left:auto">New</span>
+        </div>
     </div>
     <div class="user-panel">
         <div class="user-card">
@@ -2562,7 +2598,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         <div style="background:rgba(16,185,129,0.05);padding:24px;border-radius:16px;border:1px solid rgba(16,185,129,0.2);grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">
                             <div>
                                 <h4 style="margin:0 0 6px 0;font-size:14px;color:#10b981"><i class="ri-refresh-line"></i> 系统版本更新 (Master)</h4>
-                                <div style="font-size:12px;color:var(--text-sub)">当前版本: {{.Version}} | 点击检查并更新到最新版本</div>
+                                <div style="font-size:12px;color:var(--text-sub)">当前版本: {{.Version}} | <span id="new-version-text" style="color:#f59e0b;display:none">发现新版本！</span></div>
                             </div>
                             <div>
                                 <button type="button" class="btn success" onclick="updateSystem()" id="btn-update">立即更新</button>
@@ -2674,6 +2710,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             const header = document.querySelector('.group-header[data-group="'+g+'"]');
             if(header) setGroupState(header, false); 
         });
+        // 自动检查更新
+        checkUpdate();
     });
 
     function toggleGroup(header) {
@@ -2725,6 +2763,25 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             }).catch(() => {
                 showToast("请求发送失败", "warn");
             });
+        });
+    }
+
+    function checkUpdate() {
+        fetch('/check_update').then(r=>r.json()).then(d => {
+            if(d.has_update) {
+                // 显示侧边栏小红点
+                const badge = document.getElementById('settings-badge');
+                if(badge) badge.style.display = 'inline-block';
+                
+                // 显示设置页面的文字提示
+                const txt = document.getElementById('new-version-text');
+                if(txt) {
+                    txt.style.display = 'inline';
+                    txt.innerText = '发现新版本 ' + d.latest_version + '！';
+                }
+                
+                showToast("发现新版本 " + d.latest_version + "，请前往设置页面更新", "success");
+            }
         });
     }
 
