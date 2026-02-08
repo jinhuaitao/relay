@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.19"
+	AppVersion      = "v3.0.20"
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -393,6 +393,61 @@ func autoGenerateCert() error {
 	return nil
 }
 
+// --- 通用更新逻辑 (Master/Agent 共享) ---
+
+func performSelfUpdate() error {
+	arch := runtime.GOARCH
+	osName := runtime.GOOS
+	suffix := ""
+	if osName == "linux" {
+		suffix = "-linux-" + arch
+	} else if osName == "darwin" {
+		suffix = "-darwin-" + arch
+	} else if osName == "windows" {
+		suffix = "-windows-" + arch + ".exe"
+	} else {
+		return fmt.Errorf("不支持的操作系统")
+	}
+
+	targetURL := DownloadURL + suffix
+	log.Printf("正在下载更新: %s", targetURL)
+
+	resp, err := http.Get(targetURL)
+	if err != nil || resp.StatusCode != 200 {
+		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("无法获取运行路径: %v", err)
+	}
+
+	tmpPath := exePath + ".new"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %v", err)
+	}
+	_, err = io.Copy(out, resp.Body)
+	out.Close()
+	if err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	os.Chmod(tmpPath, 0755)
+
+	oldPath := exePath + ".old"
+	os.Remove(oldPath) 
+	if err := os.Rename(exePath, oldPath); err != nil {
+		// Windows
+	}
+	if err := os.Rename(tmpPath, exePath); err != nil {
+		os.Rename(oldPath, exePath) // 还原
+		return fmt.Errorf("覆盖文件失败: %v", err)
+	}
+	return nil
+}
+
 // --- 主程序 ---
 
 func main() {
@@ -481,6 +536,13 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if useTLS {
 		tlsParam = " -tls"
 	}
+	
+	// [修改] 根据模式设置服务名
+	svcName := "realy" // 默认为 Master 服务名
+	if mode == "agent" {
+		svcName = "gorealy" // Agent 服务名
+	}
+
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
 	isSys := false
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
@@ -490,49 +552,66 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		isAlpine = true
 	}
+	
 	if op == "install" {
 		if isSys {
-			c := fmt.Sprintf("[Unit]\nDescription=GoRelay\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", exe, args)
-			os.WriteFile("/etc/systemd/system/gorelay.service", []byte(c), 0644)
-			exec.Command("systemctl", "enable", "gorelay").Run()
-			exec.Command("systemctl", "restart", "gorelay").Run()
-			log.Println("Systemd 服务已安装")
+			c := fmt.Sprintf("[Unit]\nDescription=GoRelay Service (%s)\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", svcName, exe, args)
+			os.WriteFile(fmt.Sprintf("/etc/systemd/system/%s.service", svcName), []byte(c), 0644)
+			exec.Command("systemctl", "enable", svcName).Run()
+			exec.Command("systemctl", "restart", svcName).Run()
+			log.Printf("Systemd 服务 %s 已安装", svcName)
 		} else if isAlpine {
-			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"gorelay\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/gorelay.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", exe, args)
-			os.WriteFile("/etc/init.d/gorelay", []byte(c), 0755)
-			exec.Command("rc-update", "add", "gorelay", "default").Run()
-			exec.Command("rc-service", "gorelay", "restart").Run()
-			log.Println("OpenRC 服务已安装")
+			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"%s\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/%s.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", svcName, exe, args, svcName)
+			os.WriteFile(fmt.Sprintf("/etc/init.d/%s", svcName), []byte(c), 0755)
+			exec.Command("rc-update", "add", svcName, "default").Run()
+			exec.Command("rc-service", svcName, "restart").Run()
+			log.Printf("OpenRC 服务 %s 已安装", svcName)
 		} else {
 			exec.Command("nohup", exe, args, "&").Start()
 			log.Println("已通过 nohup 启动")
 		}
 	} else {
+		// 卸载
 		if isSys {
-			exec.Command("systemctl", "disable", "gorelay").Run()
-			exec.Command("systemctl", "stop", "gorelay").Run()
-			os.Remove("/etc/systemd/system/gorelay.service")
+			exec.Command("systemctl", "disable", svcName).Run()
+			exec.Command("systemctl", "stop", svcName).Run()
+			os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", svcName))
 			exec.Command("systemctl", "daemon-reload").Run()
 		}
 		if isAlpine {
-			exec.Command("rc-update", "del", "gorelay", "default").Run()
-			exec.Command("rc-service", "gorelay", "stop").Run()
-			os.Remove("/etc/init.d/gorelay")
+			exec.Command("rc-update", "del", svcName, "default").Run()
+			exec.Command("rc-service", svcName, "stop").Run()
+			os.Remove(fmt.Sprintf("/etc/init.d/%s", svcName))
 		}
-		log.Println("服务已卸载")
+		log.Printf("服务 %s 已卸载", svcName)
 	}
 }
 
 func doSelfUninstall() {
 	log.Println("执行自毁程序...")
+	
+	// [修改] 尝试停止并清理 realy 和 gorealy 两个可能存在的服务名
+	services := []string{"realy", "gorealy"}
+	
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
-		exec.Command("systemctl", "disable", "gorelay").Run()
-		os.Remove("/etc/systemd/system/gorelay.service")
+		for _, s := range services {
+			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
+				exec.Command("systemctl", "disable", s).Run()
+				exec.Command("systemctl", "stop", s).Run()
+				os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", s))
+			}
+		}
 		exec.Command("systemctl", "daemon-reload").Run()
 	} else if _, err := os.Stat("/etc/alpine-release"); err == nil {
-		exec.Command("rc-update", "del", "gorelay", "default").Run()
-		os.Remove("/etc/init.d/gorelay")
+		for _, s := range services {
+			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
+				exec.Command("rc-update", "del", s, "default").Run()
+				exec.Command("rc-service", s, "stop").Run()
+				os.Remove(fmt.Sprintf("/etc/init.d/%s", s))
+			}
+		}
 	}
+	
 	exe, err := os.Executable()
 	if err == nil {
 		realPath, err := filepath.EvalSymlinks(exe)
@@ -653,7 +732,8 @@ func runMaster() {
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
 	http.HandleFunc("/restart", authMiddleware(handleRestart)) // 新增重启路由
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 新增系统更新路由
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem)) // 系统更新路由
+	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -1315,95 +1395,64 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// 自动更新处理逻辑
+// Master自我更新处理
 func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
-	// 1. 确定系统架构
-	arch := runtime.GOARCH
-	osName := runtime.GOOS
-	suffix := ""
-	if osName == "linux" {
-		suffix = "-linux-" + arch
-	} else if osName == "darwin" {
-		suffix = "-darwin-" + arch
-	} else if osName == "windows" {
-		suffix = "-windows-" + arch + ".exe"
-	} else {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "不支持的操作系统"})
+	if err := performSelfUpdate(); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
-
-	targetURL := DownloadURL + suffix
-	log.Printf("正在下载更新: %s", targetURL)
-
-	// 2. 下载文件
-	resp, err := http.Get(targetURL)
-	if err != nil || resp.StatusCode != 200 {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "下载失败"})
-		return
-	}
-	defer resp.Body.Close()
-
-	exePath, err := os.Executable()
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法获取运行路径"})
-		return
-	}
-
-	tmpPath := exePath + ".new"
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "创建临时文件失败"})
-		return
-	}
-	_, err = io.Copy(out, resp.Body)
-	out.Close()
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "写入文件失败"})
-		return
-	}
-
-	// 3. 赋予执行权限
-	os.Chmod(tmpPath, 0755)
-
-	// 4. 替换文件 (兼容 Windows)
-	oldPath := exePath + ".old"
-	os.Remove(oldPath) // 清理旧备份
-	if err := os.Rename(exePath, oldPath); err != nil {
-		// Windows 可能需要先改名
-	}
-	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Rename(oldPath, exePath) // 还原
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "覆盖文件失败"})
-		return
-	}
-
-	// 5. 重启
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-	go func() {
-		time.Sleep(1 * time.Second)
-		doRestart()
-	}()
+	go func() { time.Sleep(1 * time.Second); doRestart() }()
+}
+
+// Master远程通知Agent更新
+func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	mu.Lock()
+	agent, ok := agents[name]
+	mu.Unlock()
+	if !ok {
+		http.Error(w, "Agent not found", 404)
+		return
+	}
+	// 发送更新指令给Agent
+	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+	w.Write([]byte("ok"))
 }
 
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
+	
+	// [修改] 自动检测存在的服务名进行重启
+	services := []string{"realy", "gorealy"}
+	
 	// 1. 尝试 Systemd
-	if _, err := os.Stat("/etc/systemd/system/relay.service"); err == nil {
-		exec.Command("systemctl", "restart", "relay").Start()
-		time.Sleep(1 * time.Second)
-		os.Exit(0)
-		return
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		for _, s := range services {
+			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
+				exec.Command("systemctl", "restart", s).Start()
+				time.Sleep(1 * time.Second)
+				os.Exit(0)
+				return
+			}
+		}
 	}
+	
 	// 2. 尝试 OpenRC
-	if _, err := os.Stat("/etc/init.d/relay"); err == nil {
-		exec.Command("rc-service", "relay", "restart").Start()
-		time.Sleep(1 * time.Second)
-		os.Exit(0)
-		return
+	if _, err := os.Stat("/etc/init.d"); err == nil {
+		for _, s := range services {
+			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
+				exec.Command("rc-service", s, "restart").Start()
+				time.Sleep(1 * time.Second)
+				os.Exit(0)
+				return
+			}
+		}
 	}
+	
 	// 3. 直接二进制重启 (Standalone/Docker/Manual)
 	argv0, err := os.Executable()
 	if err != nil {
@@ -1482,6 +1531,16 @@ func runAgent(name, masterAddr, token string) {
 				doSelfUninstall()
 				return
 			}
+			// --- Agent 接收更新指令 ---
+			if msg.Type == "upgrade" {
+				log.Println("收到更新指令，开始执行自我更新...")
+				if err := performSelfUpdate(); err == nil {
+					doRestart()
+				} else {
+					log.Printf("更新失败: %v", err)
+				}
+			}
+			// ------------------------
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
@@ -2287,7 +2346,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                                     <span id="load-text-{{.Name}}" style="font-size:12px;font-family:'JetBrains Mono';min-width:60px;text-align:right">0.0</span>
                                 </div>
                             </td>
-                            <td><button class="btn danger icon" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button></td>
+                            <td>
+                                <div style="display:flex;gap:8px">
+                                    <button class="btn icon warning" onclick="updateAgent('{{.Name}}')" title="更新节点版本"><i class="ri-refresh-line"></i></button>
+                                    <button class="btn icon danger" onclick="delAgent('{{.Name}}')" title="卸载节点"><i class="ri-delete-bin-line"></i></button>
+                                </div>
+                            </td>
                         </tr>
                         {{end}}
                         </tbody>
@@ -2497,7 +2561,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 
                         <div style="background:rgba(16,185,129,0.05);padding:24px;border-radius:16px;border:1px solid rgba(16,185,129,0.2);grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">
                             <div>
-                                <h4 style="margin:0 0 6px 0;font-size:14px;color:#10b981"><i class="ri-refresh-line"></i> 系统版本更新</h4>
+                                <h4 style="margin:0 0 6px 0;font-size:14px;color:#10b981"><i class="ri-refresh-line"></i> 系统版本更新 (Master)</h4>
                                 <div style="font-size:12px;color:var(--text-sub)">当前版本: {{.Version}} | 点击检查并更新到最新版本</div>
                             </div>
                             <div>
@@ -2665,7 +2729,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     }
 
     function updateSystem() {
-        showConfirm("系统更新", "确定要下载最新版本并重启服务吗？<br>服务将短暂中断。", "warning", () => {
+        showConfirm("系统更新", "确定要下载最新版本并重启 Master 面板吗？<br>服务将短暂中断。", "warning", () => {
             const btn = document.getElementById('btn-update');
             btn.disabled = true;
             btn.innerText = '更新中...';
@@ -2681,6 +2745,17 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
             }).catch(() => { showToast("请求失败", "warn"); btn.disabled = false; btn.innerText = '立即更新'; });
         });
     }
+
+    function updateAgent(name) {
+        showConfirm("更新节点", "确定要远程更新节点 <b>"+name+"</b> 吗？<br>节点将自动下载最新版并重启。", "warning", () => {
+            fetch('/update_agent?name='+name, {method: 'POST'}).then(r => {
+                if(r.ok) showToast("已发送更新指令，请等待节点重启", "success");
+                else showToast("发送指令失败", "warn");
+            });
+        });
+    }
+
+    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
     function toggleTheme() {
         const html = document.documentElement;
@@ -2712,7 +2787,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
         const btn = document.getElementById('c_btn');
         const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
-        else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认重启'; icon.innerText = '🔄'; }
+        else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认操作'; icon.innerText = '🔄'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '🤔'; }
         btn.onclick = function() { closeConfirm(); cb(); };
         document.getElementById('confirmModal').style.display = 'block';
@@ -2739,7 +2814,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
     function delRule(id) { showConfirm("删除规则", "删除后该端口将立即停止服务，且无法恢复，确定吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零该规则的历史流量统计数据吗？", "normal", () => location.href="/reset_traffic?id="+id); }
-    function delAgent(name) { showConfirm("卸载节点", "确定要卸载节点 <b>"+name+"</b> 吗？<br>系统将向该节点发送自毁指令。", "danger", () => location.href="/delete_agent?name="+name); }
 
     function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
         document.getElementById('e_id').value = id;
