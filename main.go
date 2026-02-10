@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.28" // 版本号微调
+	AppVersion      = "v3.0.30" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1610,13 +1610,39 @@ func runAgent(name, masterAddr, token string) {
 
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
-	activeTargets.Range(func(key, value interface{}) bool {
-		targets := strings.Split(value.(string), ",")
+
+	// 修改：遍历 activeTasks 以便获取任务的 Protocol 字段
+	activeTasks.Range(func(key, value interface{}) bool {
+		task := value.(ForwardTask)
+
+		// 获取最新的目标地址 (优先从 activeTargets 获取，以支持 IP 变动热更新)
+		targetStr := task.Target
+		if v, ok := activeTargets.Load(task.ID); ok {
+			targetStr = v.(string)
+		}
+
+		targets := strings.Split(targetStr, ",")
 		var bestLat int64 = -1
+
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+
 			start := time.Now()
-			c, err := net.DialTimeout("tcp", target, 2*time.Second)
+
+			// --- 核心修复开始 ---
+			// 根据规则协议动态选择检测方式
+			networkType := "tcp"
+			if task.Protocol == "udp" {
+				networkType = "udp"
+			}
+			// 注意：对于 UDP，DialTimeout 仅检测地址是否合法/可解析，不会进行握手。
+			// 这会返回接近 0ms 的延迟，但这对于 UDP 转发保活检测是符合预期的。
+			c, err := net.DialTimeout(networkType, target, 2*time.Second)
+			// --- 核心修复结束 ---
+
 			if err == nil {
 				c.Close()
 				lat := time.Since(start).Milliseconds()
@@ -1628,9 +1654,11 @@ func checkTargetHealth(conn net.Conn) {
 				targetHealthMap.Store(target, false)
 			}
 		}
-		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
+		
+		results = append(results, HealthReport{TaskID: task.ID, Latency: bestLat})
 		return true
 	})
+
 	if len(results) > 0 {
 		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
 	}
