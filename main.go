@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.30" // 版本号微调
+	AppVersion      = "v3.0.31" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1610,39 +1610,28 @@ func runAgent(name, masterAddr, token string) {
 
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
-
-	// 修改：遍历 activeTasks 以便获取任务的 Protocol 字段
-	activeTasks.Range(func(key, value interface{}) bool {
-		task := value.(ForwardTask)
-
-		// 获取最新的目标地址 (优先从 activeTargets 获取，以支持 IP 变动热更新)
-		targetStr := task.Target
-		if v, ok := activeTargets.Load(task.ID); ok {
-			targetStr = v.(string)
-		}
-
-		targets := strings.Split(targetStr, ",")
-		var bestLat int64 = -1
-
-		for _, target := range targets {
-			target = strings.TrimSpace(target)
-			if target == "" {
-				continue
-			}
-
-			start := time.Now()
-
-			// --- 核心修复开始 ---
-			// 根据规则协议动态选择检测方式
-			networkType := "tcp"
-			if task.Protocol == "udp" {
+	activeTargets.Range(func(key, value interface{}) bool {
+		// --- 新增：获取任务协议类型 ---
+		networkType := "tcp"
+		// 从 activeTasks 中查找该 ID 对应的任务信息
+		if tVal, ok := activeTasks.Load(key); ok {
+			// 如果是 UDP 或 Both 模式，都使用 UDP 方式检测（更宽松，只要解析成功即视为在线）
+			if t, ok := tVal.(ForwardTask); ok && (t.Protocol == "udp" || t.Protocol == "both") {
 				networkType = "udp"
 			}
-			// 注意：对于 UDP，DialTimeout 仅检测地址是否合法/可解析，不会进行握手。
-			// 这会返回接近 0ms 的延迟，但这对于 UDP 转发保活检测是符合预期的。
-			c, err := net.DialTimeout(networkType, target, 2*time.Second)
-			// --- 核心修复结束 ---
+		}
+		// ---------------------------
 
+		targets := strings.Split(value.(string), ",")
+		var bestLat int64 = -1
+		for _, target := range targets {
+			target = strings.TrimSpace(target)
+			start := time.Now()
+			
+			// --- 修改：使用动态的 networkType ---
+			c, err := net.DialTimeout(networkType, target, 2*time.Second)
+			// --------------------------------
+			
 			if err == nil {
 				c.Close()
 				lat := time.Since(start).Milliseconds()
@@ -1654,11 +1643,9 @@ func checkTargetHealth(conn net.Conn) {
 				targetHealthMap.Store(target, false)
 			}
 		}
-		
-		results = append(results, HealthReport{TaskID: task.ID, Latency: bestLat})
+		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
 		return true
 	})
-
 	if len(results) > 0 {
 		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
 	}
