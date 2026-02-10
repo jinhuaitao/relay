@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.31" // 版本号微调
+	AppVersion      = "v3.0.32" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
