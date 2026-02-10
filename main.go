@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.32" // 版本号微调
+	AppVersion      = "v3.0.28" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1611,66 +1611,12 @@ func runAgent(name, masterAddr, token string) {
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
-		// --- 新增：获取任务协议类型 ---
-		networkType := "tcp"
-		// 从 activeTasks 中查找该 ID 对应的任务信息
-		if tVal, ok := activeTasks.Load(key); ok {
-			// 如果是 UDP 或 Both 模式，都使用 UDP 方式检测（更宽松，只要解析成功即视为在线）
-			func checkTargetHealth(conn net.Conn) {
-	var results []HealthReport
-	activeTargets.Range(func(key, value interface{}) bool {
-		// --- 新增：获取任务协议类型 ---
-		networkType := "tcp"
-		// 从 activeTasks 中查找该 ID 对应的任务信息
-		if tVal, ok := activeTasks.Load(key); ok {
-			// 如果任务存在且协议明确为 udp，则切换检测模式
-			if t, ok := tVal.(ForwardTask); ok && t.Protocol == "udp" {
-				networkType = "udp"
-			}
-		}
-		// ---------------------------
-
 		targets := strings.Split(value.(string), ",")
 		var bestLat int64 = -1
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
 			start := time.Now()
-			
-			// --- 修改：使用动态的 networkType ---
-			c, err := net.DialTimeout(networkType, target, 2*time.Second)
-			// --------------------------------
-			
-			if err == nil {
-				c.Close()
-				lat := time.Since(start).Milliseconds()
-				if bestLat == -1 || lat < bestLat {
-					bestLat = lat
-				}
-				targetHealthMap.Store(target, true)
-			} else {
-				targetHealthMap.Store(target, false)
-			}
-		}
-		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
-		return true
-	})
-	if len(results) > 0 {
-		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
-	}
-}
-		}
-		// ---------------------------
-
-		targets := strings.Split(value.(string), ",")
-		var bestLat int64 = -1
-		for _, target := range targets {
-			target = strings.TrimSpace(target)
-			start := time.Now()
-			
-			// --- 修改：使用动态的 networkType ---
-			c, err := net.DialTimeout(networkType, target, 2*time.Second)
-			// --------------------------------
-			
+			c, err := net.DialTimeout("tcp", target, 2*time.Second)
 			if err == nil {
 				c.Close()
 				lat := time.Since(start).Milliseconds()
