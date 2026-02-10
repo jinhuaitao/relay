@@ -1425,34 +1425,60 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // [新增] 检查更新接口
-func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(GithubLatestAPI)
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"has_update": false, "error": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
+func checkTargetHealth(conn net.Conn) {
+	var results []HealthReport
 
-	var data struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"has_update": false})
-		return
-	}
+	// 修改：遍历 activeTasks 以便获取任务的 Protocol 字段
+	activeTasks.Range(func(key, value interface{}) bool {
+		task := value.(ForwardTask)
 
-	// 简单对比版本号
-	remoteVer := strings.TrimPrefix(data.TagName, "v")
-	currentVer := strings.TrimPrefix(AppVersion, "v")
+		// 获取最新的目标地址 (优先从 activeTargets 获取，以支持 IP 变动热更新)
+		targetStr := task.Target
+		if v, ok := activeTargets.Load(task.ID); ok {
+			targetStr = v.(string)
+		}
 
-	hasUpdate := remoteVer != currentVer // 简单对比：只要字符串不同就提示更新 (简化逻辑)
+		targets := strings.Split(targetStr, ",")
+		var bestLat int64 = -1
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"has_update":     hasUpdate,
-		"latest_version": data.TagName,
-		"current":        AppVersion,
+		for _, target := range targets {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+
+			start := time.Now()
+
+			// --- 核心修复开始 ---
+			// 根据规则协议动态选择检测方式
+			networkType := "tcp"
+			if task.Protocol == "udp" {
+				networkType = "udp"
+			}
+			// 注意：对于 UDP，DialTimeout 仅检测地址是否合法/可解析，不会进行握手。
+			// 这会返回接近 0ms 的延迟，但这对于 UDP 转发保活检测是符合预期的。
+			c, err := net.DialTimeout(networkType, target, 2*time.Second)
+			// --- 核心修复结束 ---
+
+			if err == nil {
+				c.Close()
+				lat := time.Since(start).Milliseconds()
+				if bestLat == -1 || lat < bestLat {
+					bestLat = lat
+				}
+				targetHealthMap.Store(target, true)
+			} else {
+				targetHealthMap.Store(target, false)
+			}
+		}
+		
+		results = append(results, HealthReport{TaskID: task.ID, Latency: bestLat})
+		return true
 	})
+
+	if len(results) > 0 {
+		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
+	}
 }
 
 func doRestart() {
