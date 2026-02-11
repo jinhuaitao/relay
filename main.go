@@ -2210,6 +2210,26 @@ const dashboardHtml = `
     --shadow-sm: none; --shadow-md: none; --shadow-lg: none;
 }
 
+/* 新增：迷你图表容器样式 */
+.chart-cell {
+    position: relative;
+    height: 40px;
+    width: 140px; /* 控制图表宽度 */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+.mini-canvas {
+    width: 100% !important;
+    height: 25px !important; /* 图表高度 */
+}
+.speed-text {
+    font-size: 10px;
+    font-family: 'JetBrains Mono';
+    margin-bottom: 2px;
+    font-weight: 600;
+}
+
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
 body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; font-size: 14px; letter-spacing: -0.01em; }
 body::before { content: ''; position: fixed; top: -10%; left: -10%; width: 50%; height: 50%; background: radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 60%); z-index: -1; pointer-events: none; filter: blur(60px); }
@@ -2235,26 +2255,6 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 .avatar { width: 42px; height: 42px; background: linear-gradient(135deg, #818cf8, #4f46e5); border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 18px; box-shadow: 0 4px 10px rgba(99,102,241,0.3); }
 .btn-logout { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.05); color: #ef4444; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: var(--trans); text-decoration: none; font-weight: 600; }
 .btn-logout:hover { background: rgba(239,68,68,0.1); transform: translateY(-1px); }
-
-/* 新增：迷你图表容器样式 */
-.chart-cell {
-    position: relative;
-    height: 40px;
-    width: 140px; /* 控制图表宽度 */
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-}
-.mini-canvas {
-    width: 100% !important;
-    height: 25px !important; /* 图表高度 */
-}
-.speed-text {
-    font-size: 10px;
-    font-family: 'JetBrains Mono';
-    margin-bottom: 2px;
-    font-weight: 600;
-}
 
 .main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; min-width: 0; }
 .header { height: 80px; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; z-index: 40; }
@@ -3044,7 +3044,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update('none');
                         
-                        // --- [修改后] 更新实时流量表格 (支持迷你图表) ---
+// --- [修改后] 更新实时流量表格 (支持迷你图表) ---
 if(document.getElementById('dashboard').classList.contains('active')) {
     const tbody = document.getElementById('rule-monitor-body');
     
