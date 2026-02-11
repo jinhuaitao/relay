@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.34" // 版本号微调
+	AppVersion      = "v3.0.35" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1645,12 +1645,15 @@ func doPing(address string) (int64, bool) {
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
-		// 默认检测模式为 TCP Dial
+		// 1. 获取检测模式
 		checkMode := "tcp" 
-		
 		if tVal, ok := activeTasks.Load(key); ok {
-			if t, ok := tVal.(ForwardTask); ok && t.Protocol == "udp" {
-				checkMode = "ping" // 纯 UDP 任务改用 Ping
+			if t, ok := tVal.(ForwardTask); ok {
+				if t.Protocol == "udp" {
+					checkMode = "ping" // 纯 UDP -> 只测 Ping
+				} else if t.Protocol == "both" {
+					checkMode = "mixed" // TCP+UDP -> 混合双打
+				}
 			}
 		}
 
@@ -1664,11 +1667,27 @@ func checkTargetHealth(conn net.Conn) {
 			var success bool
 			var lat int64
 
+			// 2. 根据模式执行检测
 			if checkMode == "ping" {
-				// --- 真实 UDP 检测：使用 ICMP Ping ---
+				// --- 模式 A: 只测 Ping (适用于纯 UDP) ---
 				lat, success = doPing(target)
+
+			} else if checkMode == "mixed" {
+				// --- 模式 B: 混合检测 (适用于 Both) ---
+				// 第一步：先尝试 TCP (最准)
+				start := time.Now()
+				c, err := net.DialTimeout("tcp", target, 2*time.Second)
+				if err == nil {
+					c.Close()
+					lat = time.Since(start).Milliseconds()
+					success = true
+				} else {
+					// 第二步：TCP 失败了？别急，可能是纯 UDP 节点，试一下 Ping
+					lat, success = doPing(target)
+				}
+
 			} else {
-				// --- 真实 TCP 检测：使用 TCP 握手 ---
+				// --- 模式 C: 只测 TCP (适用于纯 TCP) ---
 				start := time.Now()
 				c, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err == nil {
@@ -1680,6 +1699,7 @@ func checkTargetHealth(conn net.Conn) {
 				}
 			}
 
+			// 3. 记录结果
 			if success {
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
