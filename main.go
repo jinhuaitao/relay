@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.33" // 版本号微调
+	AppVersion      = "v3.0.34" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1607,21 +1607,50 @@ func runAgent(name, masterAddr, token string) {
 		time.Sleep(3 * time.Second)
 	}
 }
+// doPing 使用系统 Ping 命令检测目标主机存活 (耗时作为延迟参考)
+func doPing(address string) (int64, bool) {
+	// 去掉端口号，Ping 只需要 IP 或域名
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		// 如果没有端口号（本身就是纯 IP），直接用
+		if strings.Contains(err.Error(), "missing port") {
+			host = address
+		} else {
+			return -1, false
+		}
+	}
+
+	var cmd *exec.Cmd
+	// 根据系统不同构建命令
+	if runtime.GOOS == "windows" {
+		// Windows: -n 1 (次数), -w 1000 (超时ms)
+		cmd = exec.Command("ping", "-n", "1", "-w", "1000", host)
+	} else {
+		// Linux/Mac: -c 1 (次数), -W 1 (超时s)
+		cmd = exec.Command("ping", "-c", "1", "-W", "1", host)
+	}
+
+	// 记录开始时间
+	start := time.Now()
+	// 执行命令 (如果目标不可达，Run() 会返回 error)
+	err = cmd.Run()
+	latency := time.Since(start).Milliseconds()
+
+	if err != nil {
+		return -1, false
+	}
+	return latency, true
+}
 
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
-		// 1. 默认使用 TCP，因为 TCP 检查才是真实的
-		networkType := "tcp"
+		// 默认检测模式为 TCP Dial
+		checkMode := "tcp" 
 		
-		// 2. 获取任务信息
 		if tVal, ok := activeTasks.Load(key); ok {
-			if t, ok := tVal.(ForwardTask); ok {
-				// 只有当任务是纯 UDP 时，才不得已切换到 udp 模式
-				// 注意：这会导致无法检测服务器是否宕机，但能避免被误判为红色离线
-				if t.Protocol == "udp" {
-					networkType = "udp"
-				}
+			if t, ok := tVal.(ForwardTask); ok && t.Protocol == "udp" {
+				checkMode = "ping" // 纯 UDP 任务改用 Ping
 			}
 		}
 
@@ -1632,36 +1661,40 @@ func checkTargetHealth(conn net.Conn) {
 			target = strings.TrimSpace(target)
 			if target == "" { continue }
 
-			start := time.Now()
-			
-			// --- 执行检测 ---
-			c, err := net.DialTimeout(networkType, target, 2*time.Second)
-			
-			if err == nil {
-				c.Close()
-				lat := time.Since(start).Milliseconds()
+			var success bool
+			var lat int64
 
-				// [补丁] 如果是 UDP，latency 几乎为 0，这会误导用户以为速度极快。
-				// 我们可以手动给它设一个标识值，或者保留原样但心里清楚这是假的。
-				// 这里保留原样，但你要知道这个数值没有参考意义。
-				
+			if checkMode == "ping" {
+				// --- 真实 UDP 检测：使用 ICMP Ping ---
+				lat, success = doPing(target)
+			} else {
+				// --- 真实 TCP 检测：使用 TCP 握手 ---
+				start := time.Now()
+				c, err := net.DialTimeout("tcp", target, 2*time.Second)
+				if err == nil {
+					c.Close()
+					lat = time.Since(start).Milliseconds()
+					success = true
+				} else {
+					success = false
+				}
+			}
+
+			if success {
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
 				}
 				targetHealthMap.Store(target, true)
 			} else {
-				// 如果连 UDP Dial 都失败（通常是 DNS 解析失败或本地路由错误），那确实是挂了
 				targetHealthMap.Store(target, false)
 			}
 		}
 		
-		// 即使 bestLat 是 -1 (全失败)，也要汇报，以便前端显示红灯
 		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
 		return true
 	})
-
+	
 	if len(results) > 0 {
-		// 发送结果前检查 conn 是否正常（虽然 Write 会报错，但防御性编程更好）
 		_ = json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
 	}
 }
