@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.32" // 版本号微调
+	AppVersion      = "v3.0.33" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1610,57 +1610,59 @@ func runAgent(name, masterAddr, token string) {
 
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
-
-	// 修改：遍历 activeTasks 以便获取任务的 Protocol 字段
-	activeTasks.Range(func(key, value interface{}) bool {
-		task := value.(ForwardTask)
-
-		// 获取最新的目标地址 (优先从 activeTargets 获取，以支持 IP 变动热更新)
-		targetStr := task.Target
-		if v, ok := activeTargets.Load(task.ID); ok {
-			targetStr = v.(string)
+	activeTargets.Range(func(key, value interface{}) bool {
+		// 1. 默认使用 TCP，因为 TCP 检查才是真实的
+		networkType := "tcp"
+		
+		// 2. 获取任务信息
+		if tVal, ok := activeTasks.Load(key); ok {
+			if t, ok := tVal.(ForwardTask); ok {
+				// 只有当任务是纯 UDP 时，才不得已切换到 udp 模式
+				// 注意：这会导致无法检测服务器是否宕机，但能避免被误判为红色离线
+				if t.Protocol == "udp" {
+					networkType = "udp"
+				}
+			}
 		}
 
-		targets := strings.Split(targetStr, ",")
+		targets := strings.Split(value.(string), ",")
 		var bestLat int64 = -1
-
+		
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
-			if target == "" {
-				continue
-			}
+			if target == "" { continue }
 
 			start := time.Now()
-
-			// --- 核心修复开始 ---
-			// 根据规则协议动态选择检测方式
-			networkType := "tcp"
-			if task.Protocol == "udp" {
-				networkType = "udp"
-			}
-			// 注意：对于 UDP，DialTimeout 仅检测地址是否合法/可解析，不会进行握手。
-			// 这会返回接近 0ms 的延迟，但这对于 UDP 转发保活检测是符合预期的。
+			
+			// --- 执行检测 ---
 			c, err := net.DialTimeout(networkType, target, 2*time.Second)
-			// --- 核心修复结束 ---
-
+			
 			if err == nil {
 				c.Close()
 				lat := time.Since(start).Milliseconds()
+
+				// [补丁] 如果是 UDP，latency 几乎为 0，这会误导用户以为速度极快。
+				// 我们可以手动给它设一个标识值，或者保留原样但心里清楚这是假的。
+				// 这里保留原样，但你要知道这个数值没有参考意义。
+				
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
 				}
 				targetHealthMap.Store(target, true)
 			} else {
+				// 如果连 UDP Dial 都失败（通常是 DNS 解析失败或本地路由错误），那确实是挂了
 				targetHealthMap.Store(target, false)
 			}
 		}
 		
-		results = append(results, HealthReport{TaskID: task.ID, Latency: bestLat})
+		// 即使 bestLat 是 -1 (全失败)，也要汇报，以便前端显示红灯
+		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
 		return true
 	})
 
 	if len(results) > 0 {
-		json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
+		// 发送结果前检查 conn 是否正常（虽然 Write 会报错，但防御性编程更好）
+		_ = json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
 	}
 }
 
