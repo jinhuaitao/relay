@@ -2236,6 +2236,26 @@ body::after { content: ''; position: fixed; bottom: -10%; right: -10%; width: 50
 .btn-logout { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(239,68,68,0.2); background: rgba(239,68,68,0.05); color: #ef4444; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: var(--trans); text-decoration: none; font-weight: 600; }
 .btn-logout:hover { background: rgba(239,68,68,0.1); transform: translateY(-1px); }
 
+/* 新增：迷你图表容器样式 */
+.chart-cell {
+    position: relative;
+    height: 40px;
+    width: 140px; /* 控制图表宽度 */
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+.mini-canvas {
+    width: 100% !important;
+    height: 25px !important; /* 图表高度 */
+}
+.speed-text {
+    font-size: 10px;
+    font-family: 'JetBrains Mono';
+    margin-bottom: 2px;
+    font-weight: 600;
+}
+
 .main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; min-width: 0; }
 .header { height: 80px; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; z-index: 40; }
 .page-title { font-weight: 800; font-size: 26px; display: flex; align-items: center; gap: 12px; color: var(--text-main); }
@@ -3024,25 +3044,124 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update('none');
                         
-                        // --- 更新实时流量表格 ---
-                        if(document.getElementById('dashboard').classList.contains('active')) {
-                            let tableHtml = '';
-                            d.rules.forEach(r => {
-                                let stx = 0, srx = 0;
-                                if (lastRuleStats[r.id]) {
-                                    stx = r.tx - lastRuleStats[r.id].tx;
-                                    srx = r.rx - lastRuleStats[r.id].rx;
-                                    if(stx < 0) stx = 0; if(srx < 0) srx = 0;
-                                }
-                                lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
+                        // --- [修改后] 更新实时流量表格 (支持迷你图表) ---
+if(document.getElementById('dashboard').classList.contains('active')) {
+    const tbody = document.getElementById('rule-monitor-body');
+    
+    // 1. 标记当前所有存在的规则ID，用于检测删除
+    const currentIds = new Set(d.rules.map(r => r.id));
 
-                                tableHtml += '<tr><td><div style="font-weight:700">'+(r.name||'未命名')+'</div></td>'+
-                                             '<td style="color:#818cf8;font-family:\'JetBrains Mono\'"><i class="ri-arrow-up-line"></i> '+formatSpeed(stx)+'</td>'+
-                                             '<td style="color:#06b6d4;font-family:\'JetBrains Mono\'"><i class="ri-arrow-down-line"></i> '+formatSpeed(srx)+'</td>'+
-                                             '<td style="color:var(--text-sub);font-family:\'JetBrains Mono\'">'+formatBytes(r.total)+'</td></tr>';
-                            });
-                            document.getElementById('rule-monitor-body').innerHTML = tableHtml || '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">暂无转发规则</td></tr>';
-                        }
+    // 2. 清理已删除的规则行
+    Array.from(tbody.children).forEach(row => {
+        if (row.id !== 'no-data-row' && !currentIds.has(row.getAttribute('data-id'))) {
+            // 销毁图表实例防止内存泄漏
+            const rid = row.getAttribute('data-id');
+            if(window.miniCharts && window.miniCharts[rid]) {
+                if(window.miniCharts[rid].tx) window.miniCharts[rid].tx.destroy();
+                if(window.miniCharts[rid].rx) window.miniCharts[rid].rx.destroy();
+                delete window.miniCharts[rid];
+            }
+            row.remove();
+        }
+    });
+
+    // 3. 如果没有数据
+    if (d.rules.length === 0) {
+        if(!document.getElementById('no-data-row')) {
+            tbody.innerHTML = '<tr id="no-data-row"><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">暂无转发规则</td></tr>';
+        }
+    } else {
+        const noDataRow = document.getElementById('no-data-row');
+        if(noDataRow) noDataRow.remove();
+
+        // 初始化全局图表存储对象
+        if (!window.miniCharts) window.miniCharts = {};
+
+        d.rules.forEach(r => {
+            // 计算速度
+            let stx = 0, srx = 0;
+            if (lastRuleStats[r.id]) {
+                stx = r.tx - lastRuleStats[r.id].tx;
+                srx = r.rx - lastRuleStats[r.id].rx;
+                if(stx < 0) stx = 0; if(srx < 0) srx = 0;
+            }
+            lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
+
+            let row = document.getElementById('rule-row-' + r.id);
+
+            // A. 如果行不存在，创建新行和图表
+            if (!row) {
+                row = document.createElement('tr');
+                row.id = 'rule-row-' + r.id;
+                row.setAttribute('data-id', r.id);
+                row.innerHTML = `
+                    <td><div style="font-weight:700">${r.name||'未命名'}</div></td>
+                    <td>
+                        <div class="chart-cell">
+                            <div class="speed-text" id="txt-tx-${r.id}" style="color:#818cf8">0 B/s</div>
+                            <canvas id="chart-tx-${r.id}" class="mini-canvas"></canvas>
+                        </div>
+                    </td>
+                    <td>
+                        <div class="chart-cell">
+                            <div class="speed-text" id="txt-rx-${r.id}" style="color:#06b6d4">0 B/s</div>
+                            <canvas id="chart-rx-${r.id}" class="mini-canvas"></canvas>
+                        </div>
+                    </td>
+                    <td style="color:var(--text-sub);font-family:'JetBrains Mono'" id="txt-total-${r.id}">${formatBytes(r.total)}</td>
+                `;
+                tbody.appendChild(row);
+
+                // 创建 Chart.js 实例配置
+                const commonConfig = {
+                    type: 'line',
+                    data: { labels: Array(20).fill(''), datasets: [{ data: Array(20).fill(0), borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.3 }] },
+                    options: {
+                        responsive: true, maintainAspectRatio: false, animation: false,
+                        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                        scales: { x: { display: false }, y: { display: false, min: 0 } }
+                    }
+                };
+
+                // 初始化 Tx 图表
+                const ctxTx = document.getElementById(`chart-tx-${r.id}`).getContext('2d');
+                const cfgTx = JSON.parse(JSON.stringify(commonConfig)); // 深拷贝配置
+                cfgTx.data.datasets[0].borderColor = '#818cf8';
+                cfgTx.data.datasets[0].backgroundColor = 'rgba(129, 140, 248, 0.2)';
+                
+                // 初始化 Rx 图表
+                const ctxRx = document.getElementById(`chart-rx-${r.id}`).getContext('2d');
+                const cfgRx = JSON.parse(JSON.stringify(commonConfig));
+                cfgRx.data.datasets[0].borderColor = '#06b6d4';
+                cfgRx.data.datasets[0].backgroundColor = 'rgba(6, 182, 212, 0.2)';
+
+                window.miniCharts[r.id] = {
+                    tx: new Chart(ctxTx, cfgTx),
+                    rx: new Chart(ctxRx, cfgRx)
+                };
+            }
+
+            // B. 更新数据 (文本 + 图表)
+            // 更新文本
+            document.getElementById(`txt-tx-${r.id}`).innerHTML = `<i class="ri-arrow-up-line"></i> ${formatSpeed(stx)}`;
+            document.getElementById(`txt-rx-${r.id}`).innerHTML = `<i class="ri-arrow-down-line"></i> ${formatSpeed(srx)}`;
+            document.getElementById(`txt-total-${r.id}`).innerText = formatBytes(r.total);
+
+            // 更新图表
+            const charts = window.miniCharts[r.id];
+            if(charts) {
+                // Tx
+                charts.tx.data.datasets[0].data.push(stx);
+                charts.tx.data.datasets[0].data.shift();
+                charts.tx.update('none'); // 'none' 模式不播放动画，性能更好
+                // Rx
+                charts.rx.data.datasets[0].data.push(srx);
+                charts.rx.data.datasets[0].data.shift();
+                charts.rx.update('none');
+            }
+        });
+    }
+}
                         
                         // --- 更新规则页面状态 ---
                         d.rules.forEach(r => {
