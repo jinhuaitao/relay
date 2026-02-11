@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.35" // 版本号微调
+	AppVersion      = "v3.0.36" // 版本号微调
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1607,6 +1607,7 @@ func runAgent(name, masterAddr, token string) {
 		time.Sleep(3 * time.Second)
 	}
 }
+
 // doPing 使用系统 Ping 命令检测目标主机存活 (耗时作为延迟参考)
 func doPing(address string) (int64, bool) {
 	// 去掉端口号，Ping 只需要 IP 或域名
@@ -1646,7 +1647,7 @@ func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
 		// 1. 获取检测模式
-		checkMode := "tcp" 
+		checkMode := "tcp"
 		if tVal, ok := activeTasks.Load(key); ok {
 			if t, ok := tVal.(ForwardTask); ok {
 				if t.Protocol == "udp" {
@@ -1659,10 +1660,12 @@ func checkTargetHealth(conn net.Conn) {
 
 		targets := strings.Split(value.(string), ",")
 		var bestLat int64 = -1
-		
+
 		for _, target := range targets {
 			target = strings.TrimSpace(target)
-			if target == "" { continue }
+			if target == "" {
+				continue
+			}
 
 			var success bool
 			var lat int64
@@ -1709,11 +1712,11 @@ func checkTargetHealth(conn net.Conn) {
 				targetHealthMap.Store(target, false)
 			}
 		}
-		
+
 		results = append(results, HealthReport{TaskID: key.(string), Latency: bestLat})
 		return true
 	})
-	
+
 	if len(results) > 0 {
 		_ = json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
 	}
@@ -2183,7 +2186,6 @@ const dashboardHtml = `
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-/* --- 样式保持不变，为了节省篇幅，沿用原版样式 --- */
 :root {
     --primary: #818cf8; --primary-hover: #6366f1; --primary-light: rgba(129, 140, 248, 0.15);
     --bg-body: #f8fafc; --bg-sidebar: #ffffff; --bg-card: #ffffff;
@@ -2208,26 +2210,6 @@ const dashboardHtml = `
     --danger-bg: rgba(239, 68, 68, 0.15); --danger-text: #f87171;
     --warning-bg: rgba(245, 158, 11, 0.15); --warning-text: #fbbf24;
     --shadow-sm: none; --shadow-md: none; --shadow-lg: none;
-}
-
-/* 新增：迷你图表容器样式 */
-.chart-cell {
-    position: relative;
-    height: 40px;
-    width: 140px; /* 控制图表宽度 */
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-}
-.mini-canvas {
-    width: 100% !important;
-    height: 25px !important; /* 图表高度 */
-}
-.speed-text {
-    font-size: 10px;
-    font-family: 'JetBrains Mono';
-    margin-bottom: 2px;
-    font-weight: 600;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
@@ -2291,9 +2273,26 @@ h3 i { color: var(--primary); background: var(--primary-light); padding: 8px; bo
 .table-container { overflow-x: auto; border-radius: 16px; border: 1px solid var(--border); background: var(--bg-card); }
 table { width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
 th { text-align: left; padding: 18px 24px; color: var(--text-sub); font-size: 12px; font-weight: 600; text-transform: uppercase; background: var(--input-bg); border-bottom: 1px solid var(--border); }
-td { padding: 16px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; transition: background 0.2s; }
+td { padding: 12px 24px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; transition: background 0.2s; }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--input-bg); }
+
+.mini-chart-container {
+    width: 120px;
+    height: 40px;
+    display: inline-block;
+    vertical-align: middle;
+    position: relative;
+}
+.speed-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-block;
+    width: 70px;
+    text-align: right;
+    vertical-align: middle;
+}
 
 .group-header { background: linear-gradient(90deg, var(--primary-light) 0%, transparent 100%); cursor: pointer; user-select: none; position: relative; }
 .group-header:hover { background: rgba(129, 140, 248, 0.2); }
@@ -2456,14 +2455,13 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         <thead>
                             <tr>
                                 <th>规则名称</th>
-                                <th style="width:22%">上传速度 (Tx)</th>
-                                <th style="width:22%">下载速度 (Rx)</th>
-                                <th style="width:22%">总流量消耗</th>
+                                <th style="width:25%">上传趋势 (Tx)</th>
+                                <th style="width:25%">下载趋势 (Rx)</th>
+                                <th style="width:20%">总流量</th>
                             </tr>
                         </thead>
                         <tbody id="rule-monitor-body">
-                            <tr><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">正在获取实时数据...</td></tr>
-                        </tbody>
+                            </tbody>
                     </table>
                 </div>
             </div>
@@ -2786,6 +2784,38 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
 <script>
     var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
     var lastRuleStats = {}; // 用于存储上一次的规则流量数据，计算速度
+    var ruleCharts = {}; // 存储每个规则的图表实例 { ruleID: { tx: chartObj, rx: chartObj } }
+    
+    // --- 辅助函数：创建迷你图表配置 ---
+    function createMiniChartConfig(color) {
+        const ctxGrad = document.createElement('canvas').getContext('2d').createLinearGradient(0, 0, 0, 40);
+        ctxGrad.addColorStop(0, color.replace(')', ', 0.5)').replace('rgb', 'rgba'));
+        ctxGrad.addColorStop(1, color.replace(')', ', 0)').replace('rgb', 'rgba'));
+
+        return {
+            type: 'line',
+            data: {
+                labels: Array(20).fill(''), // 保留20个数据点
+                datasets: [{
+                    data: Array(20).fill(0),
+                    borderColor: color,
+                    backgroundColor: ctxGrad,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.4 // 平滑曲线
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false, // 禁用动画以提高性能
+                plugins: { legend: {display: false}, tooltip: {enabled: false} },
+                scales: { x: {display: false}, y: {display: false, min: 0} },
+                elements: { line: { borderJoinStyle: 'round' } }
+            }
+        };
+    }
 
     function nav(id, el) {
         document.querySelectorAll('.page').forEach(e => e.classList.remove('active'));
@@ -3044,126 +3074,69 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 4px 
                         pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
                         pieChart.update('none');
                         
-// --- [修改后] 更新实时流量表格 (支持迷你图表) ---
-if(document.getElementById('dashboard').classList.contains('active')) {
-    const tbody = document.getElementById('rule-monitor-body');
-    
-    // 1. 标记当前所有存在的规则ID，用于检测删除
-    const currentIds = new Set(d.rules.map(r => r.id));
+                        // 更新实时监控表格 (迷你图表 + 增量更新)
+                        const tbody = document.getElementById('rule-monitor-body');
+                        if(document.getElementById('dashboard').classList.contains('active')) {
+                            const activeIds = new Set();
 
-    // 2. 清理已删除的规则行
-    Array.from(tbody.children).forEach(row => {
-        if (row.id !== 'no-data-row' && !currentIds.has(row.getAttribute('data-id'))) {
-            // 销毁图表实例防止内存泄漏
-            const rid = row.getAttribute('data-id');
-            if(window.miniCharts && window.miniCharts[rid]) {
-                if(window.miniCharts[rid].tx) window.miniCharts[rid].tx.destroy();
-                if(window.miniCharts[rid].rx) window.miniCharts[rid].rx.destroy();
-                delete window.miniCharts[rid];
-            }
-            row.remove();
-        }
-    });
+                            d.rules.forEach(r => {
+                                activeIds.add(r.id);
+                                
+                                let stx = 0, srx = 0;
+                                if (lastRuleStats[r.id]) {
+                                    stx = r.tx - lastRuleStats[r.id].tx;
+                                    srx = r.rx - lastRuleStats[r.id].rx;
+                                    if(stx < 0) stx = 0; if(srx < 0) srx = 0;
+                                }
+                                lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
 
-    // 3. 如果没有数据
-    if (d.rules.length === 0) {
-        if(!document.getElementById('no-data-row')) {
-            tbody.innerHTML = '<tr id="no-data-row"><td colspan="4" style="text-align:center;padding:20px;color:var(--text-sub)">暂无转发规则</td></tr>';
-        }
-    } else {
-        const noDataRow = document.getElementById('no-data-row');
-        if(noDataRow) noDataRow.remove();
+                                let row = document.getElementById('rule-row-mon-' + r.id);
+                                if (!row) {
+                                    row = tbody.insertRow();
+                                    row.id = 'rule-row-mon-' + r.id;
+                                    row.innerHTML = '<td><div style="font-weight:700;font-size:13px">'+(r.name||'未命名')+'</div><div style="font-size:11px;color:var(--text-sub)">'+r.id+'</div></td>'+
+                                        '<td><div class="mini-chart-container"><canvas id="chart-tx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#818cf8" id="text-tx-'+r.id+'">0 B/s</div></td>'+
+                                        '<td><div class="mini-chart-container"><canvas id="chart-rx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#06b6d4" id="text-rx-'+r.id+'">0 B/s</div></td>'+
+                                        '<td style="font-family:\'JetBrains Mono\'" id="text-total-'+r.id+'">'+formatBytes(r.total)+'</td>';
 
-        // 初始化全局图表存储对象
-        if (!window.miniCharts) window.miniCharts = {};
+                                    const ctxTx = document.getElementById('chart-tx-'+r.id).getContext('2d');
+                                    const ctxRx = document.getElementById('chart-rx-'+r.id).getContext('2d');
+                                    
+                                    ruleCharts[r.id] = {
+                                        tx: new Chart(ctxTx, createMiniChartConfig('#818cf8')),
+                                        rx: new Chart(ctxRx, createMiniChartConfig('#06b6d4'))
+                                    };
+                                } else {
+                                    document.getElementById('text-tx-'+r.id).innerText = formatSpeed(stx);
+                                    document.getElementById('text-rx-'+r.id).innerText = formatSpeed(srx);
+                                    document.getElementById('text-total-'+r.id).innerText = formatBytes(r.total);
+                                }
 
-        d.rules.forEach(r => {
-            // 计算速度
-            let stx = 0, srx = 0;
-            if (lastRuleStats[r.id]) {
-                stx = r.tx - lastRuleStats[r.id].tx;
-                srx = r.rx - lastRuleStats[r.id].rx;
-                if(stx < 0) stx = 0; if(srx < 0) srx = 0;
-            }
-            lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
+                                const charts = ruleCharts[r.id];
+                                if (charts) {
+                                    charts.tx.data.datasets[0].data.push(stx);
+                                    charts.tx.data.datasets[0].data.shift();
+                                    charts.tx.update('none');
 
-            let row = document.getElementById('rule-row-' + r.id);
+                                    charts.rx.data.datasets[0].data.push(srx);
+                                    charts.rx.data.datasets[0].data.shift();
+                                    charts.rx.update('none');
+                                }
+                            });
 
-            // A. 如果行不存在，创建新行和图表
-            if (!row) {
-                row = document.createElement('tr');
-                row.id = 'rule-row-' + r.id;
-                row.setAttribute('data-id', r.id);
-                row.innerHTML = `
-                    <td><div style="font-weight:700">${r.name||'未命名'}</div></td>
-                    <td>
-                        <div class="chart-cell">
-                            <div class="speed-text" id="txt-tx-${r.id}" style="color:#818cf8">0 B/s</div>
-                            <canvas id="chart-tx-${r.id}" class="mini-canvas"></canvas>
-                        </div>
-                    </td>
-                    <td>
-                        <div class="chart-cell">
-                            <div class="speed-text" id="txt-rx-${r.id}" style="color:#06b6d4">0 B/s</div>
-                            <canvas id="chart-rx-${r.id}" class="mini-canvas"></canvas>
-                        </div>
-                    </td>
-                    <td style="color:var(--text-sub);font-family:'JetBrains Mono'" id="txt-total-${r.id}">${formatBytes(r.total)}</td>
-                `;
-                tbody.appendChild(row);
-
-                // 创建 Chart.js 实例配置
-                const commonConfig = {
-                    type: 'line',
-                    data: { labels: Array(20).fill(''), datasets: [{ data: Array(20).fill(0), borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.3 }] },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: false,
-                        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-                        scales: { x: { display: false }, y: { display: false, min: 0 } }
-                    }
-                };
-
-                // 初始化 Tx 图表
-                const ctxTx = document.getElementById(`chart-tx-${r.id}`).getContext('2d');
-                const cfgTx = JSON.parse(JSON.stringify(commonConfig)); // 深拷贝配置
-                cfgTx.data.datasets[0].borderColor = '#818cf8';
-                cfgTx.data.datasets[0].backgroundColor = 'rgba(129, 140, 248, 0.2)';
-                
-                // 初始化 Rx 图表
-                const ctxRx = document.getElementById(`chart-rx-${r.id}`).getContext('2d');
-                const cfgRx = JSON.parse(JSON.stringify(commonConfig));
-                cfgRx.data.datasets[0].borderColor = '#06b6d4';
-                cfgRx.data.datasets[0].backgroundColor = 'rgba(6, 182, 212, 0.2)';
-
-                window.miniCharts[r.id] = {
-                    tx: new Chart(ctxTx, cfgTx),
-                    rx: new Chart(ctxRx, cfgRx)
-                };
-            }
-
-            // B. 更新数据 (文本 + 图表)
-            // 更新文本
-            document.getElementById(`txt-tx-${r.id}`).innerHTML = `<i class="ri-arrow-up-line"></i> ${formatSpeed(stx)}`;
-            document.getElementById(`txt-rx-${r.id}`).innerHTML = `<i class="ri-arrow-down-line"></i> ${formatSpeed(srx)}`;
-            document.getElementById(`txt-total-${r.id}`).innerText = formatBytes(r.total);
-
-            // 更新图表
-            const charts = window.miniCharts[r.id];
-            if(charts) {
-                // Tx
-                charts.tx.data.datasets[0].data.push(stx);
-                charts.tx.data.datasets[0].data.shift();
-                charts.tx.update('none'); // 'none' 模式不播放动画，性能更好
-                // Rx
-                charts.rx.data.datasets[0].data.push(srx);
-                charts.rx.data.datasets[0].data.shift();
-                charts.rx.update('none');
-            }
-        });
-    }
-}
+                            Array.from(tbody.children).forEach(tr => {
+                                const id = tr.id.replace('rule-row-mon-', '');
+                                if (id && !activeIds.has(id)) {
+                                    if(ruleCharts[id]) {
+                                        ruleCharts[id].tx.destroy();
+                                        ruleCharts[id].rx.destroy();
+                                        delete ruleCharts[id];
+                                    }
+                                    tr.remove();
+                                }
+                            });
+                        }
                         
-                        // --- 更新规则页面状态 ---
                         d.rules.forEach(r => {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
