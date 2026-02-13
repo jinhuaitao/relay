@@ -71,7 +71,7 @@ atomic 原子操作处理流量计数，确保统计准确且高效。
 
 ## 1.一键安装脚本（推荐方式）
 ```
-curl -o go_relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/go_relay.sh && chmod +x go_relay.sh && ./go_relay.sh
+curl -o relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/relay.sh && chmod +x relay.sh && ./relay.sh
 ```
 
 ## 2.Docker
