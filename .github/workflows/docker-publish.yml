@@ -10,38 +10,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 检出仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 设置 Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 3. 登录到 Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 4. 自动提取并生成 Docker 标签 (核心修改点)
+      # 4. 自动提取并生成带日期的 Docker 标签
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: jhtone/relay
-          # 这里定义了生成两种标签：latest 和 短 commit ID (如 sha-a1b2c3d)
+          # 使用 Handlebars 模板语法生成日期标签，并设置了东八区
           tags: |
             type=raw,value=latest
-            type=sha,format=short
+            type=raw,value={{date 'YYYYMMDD', tz='Asia/Shanghai'}}
 
-      # 5. 编译并推送镜像
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # 动态引用上一步生成的多个标签
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
