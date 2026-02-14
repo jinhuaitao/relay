@@ -2380,7 +2380,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div style="flex:1;overflow:hidden">
                 <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{.User}}</div>
-                <div style="font-size:11px;color:var(--text-sub)">Admin</div>
+                <div style="font-size:11px;color:var(--text-sub)">管理员</div>
             </div>
             <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i></a>
         </div>
