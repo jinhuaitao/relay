@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.39" // UI优化版
+	AppVersion      = "v3.0.40" // UI 重构版
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1751,7 +1751,7 @@ func (t *IpTracker) Remove(addr string) {
 	}
 
 	t.refs[host]--
-
+	
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
 		// 防御性编程：确保不会减成负数
