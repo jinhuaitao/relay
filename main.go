@@ -1738,13 +1738,26 @@ func (t *IpTracker) Add(addr string) {
 	}
 }
 func (t *IpTracker) Remove(addr string) {
-	host, _, _ := net.SplitHostPort(addr)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// 关键修复：检查该 Host 是否确实存在于 map 中
+	if count, exists := t.refs[host]; !exists || count <= 0 {
+		return // 如果已经不存在或计数为0，直接忽略，避免重复扣减
+	}
+
 	t.refs[host]--
+	
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
-		atomic.AddInt64(t.count, -1)
+		// 防御性编程：确保不会减成负数
+		if atomic.LoadInt64(t.count) > 0 {
+			atomic.AddInt64(t.count, -1)
+		}
 	}
 }
 
