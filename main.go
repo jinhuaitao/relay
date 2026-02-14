@@ -2564,7 +2564,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         </div>
                         <div class="terminal-body">
                             <div class="copy-overlay"><button class="btn icon secondary" style="background:rgba(255,255,255,0.1);color:#fff;border:none" onclick="copyCmd()" title="复制"><i class="ri-file-copy-line"></i></button></div>
-                            <span style="color:#10b981">root@server:~$</span> <span id="cmdText" style="opacity:0.8">请先点击上方按钮生成命令...</span><span style="animation:blink 1s infinite">_</span>
+                            <span style="color:#10b981">root@server:~$</span> <span id="cmdText" style="opacity:0.8">请先点击上方按钮生成命令...</span><span style="animation:blink 1s infinite"></span>
                         </div>
                     </div>
                 </div>
