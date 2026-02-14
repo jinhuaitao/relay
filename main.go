@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.40" // UI 重构版
+	AppVersion      = "v3.0.40" 
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -2276,11 +2276,16 @@ h3 { margin: 0 0 20px 0; font-size: 15px; color: var(--text-main); font-weight: 
 .stat-trend { font-size: 12px; display: flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text-sub); opacity: 0.8; }
 .stat-item i.bg-icon { position: absolute; right: 20px; bottom: 20px; font-size: 64px; opacity: 0.03; transform: rotate(-10deg); pointer-events: none; color: var(--text-main); }
 
+/* 核心布局修复：移动端强制单列堆叠，确保图表卡片全宽 */
 .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; margin-bottom: 24px; }
 .chart-box { height: 320px; width: 100%; position: relative; }
-@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1024px) { 
+    .dashboard-grid { grid-template-columns: 100%; } /* 强制单列 */
+}
 
+/* 关键修复：表格容器最小宽度，确保移动端不重叠，启用横向滚动 */
 .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-card); }
+.table-container table { min-width: 600px; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
 th { text-align: left; padding: 14px 20px; color: var(--text-sub); font-size: 12px; font-weight: 600; background: var(--input-bg); border-bottom: 1px solid var(--border); }
 td { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; }
@@ -2434,7 +2439,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="card">
                 <h3><i class="ri-table-line" style="color:var(--warning)"></i> 实时转发监控</h3>
                 <div class="table-container">
-                    <table style="table-layout: fixed;">
+                    <table>
                         <thead>
                             <tr>
                                 <th>规则名称</th>
