@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.40" 
+	AppVersion      = "v3.0.41" // 背景图形加深版
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -2226,8 +2226,37 @@ const dashboardHtml = `
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
 body { margin: 0; font-family: var(--font-main); background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; font-size: 14px; letter-spacing: -0.01em; transition: background 0.3s; }
-body::before { content: ''; position: fixed; top: -20%; right: -10%; width: 60%; height: 60%; background: radial-gradient(circle, rgba(99,102,241,0.08) 0%, transparent 70%); z-index: -1; pointer-events: none; }
-body::after { content: ''; position: fixed; bottom: -20%; left: -10%; width: 50%; height: 50%; background: radial-gradient(circle, rgba(168,85,247,0.08) 0%, transparent 70%); z-index: -1; pointer-events: none; }
+
+/* 增强背景装饰层 (圆形、星星图案) - 高对比度调整 */
+.bg-decor { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; overflow: hidden; }
+.shape { position: absolute; opacity: 0.15; } /* 基础不透明度提升至 0.15 */
+[data-theme="dark"] .shape { opacity: 0.12; } /* 深色模式下不透明度提升至 0.12 */
+
+.shape-circle { border-radius: 50%; background: var(--primary); }
+.shape-star { background: var(--text-sub); clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
+
+/* 具体的图形定位与动画 - 增加可见度 */
+.s1 { top: 10%; left: 5%; width: 300px; height: 300px; background: linear-gradient(45deg, var(--primary), var(--success)); filter: blur(60px); opacity: 0.2; } /* 渐变色块增强 */
+.s2 { bottom: 15%; right: -5%; width: 400px; height: 400px; background: linear-gradient(to top, var(--primary), #8b5cf6); filter: blur(80px); opacity: 0.2; }
+
+.shape-c1 { top: 15%; right: 15%; width: 80px; height: 80px; border: 4px solid var(--primary); background: transparent; opacity: 0.25; animation: float 10s ease-in-out infinite; } /* 圆环增强 */
+.shape-st1 { bottom: 10%; left: 8%; width: 120px; height: 120px; opacity: 0.15; background: var(--text-main); transform: rotate(-15deg); animation: float 12s ease-in-out infinite reverse; }
+.shape-c2 { bottom: 30%; right: 25%; width: 40px; height: 40px; background: var(--warning); opacity: 0.2; animation: float 8s ease-in-out infinite 1s; }
+.shape-st2 { top: 20%; left: 20%; width: 30px; height: 30px; background: var(--success); opacity: 0.25; animation: float 14s ease-in-out infinite 2s; }
+
+/* 新增的更多图形 - 同样增强可见度 */
+.shape-c3 { top: 40%; left: 15%; width: 60px; height: 60px; border: 2px dashed var(--text-sub); background: transparent; opacity: 0.15; animation: rotate 30s linear infinite; }
+.shape-st3 { top: 5%; left: 50%; width: 25px; height: 25px; background: var(--danger); opacity: 0.2; animation: float 18s ease-in-out infinite 3s; }
+.shape-c4 { bottom: 20%; left: 40%; width: 20px; height: 20px; background: var(--primary); opacity: 0.2; animation: float 10s infinite; }
+.shape-st4 { top: 60%; right: 10%; width: 50px; height: 50px; background: var(--success); opacity: 0.15; animation: float 22s infinite reverse; }
+.shape-c5 { top: 80%; left: 5%; width: 100px; height: 100px; border: 6px solid var(--danger); background: transparent; opacity: 0.1; animation: float 25s infinite; }
+.shape-st5 { top: 8%; right: 30%; width: 35px; height: 35px; background: var(--text-main); opacity: 0.15; animation: float 13s infinite; }
+.shape-c6 { bottom: 5%; left: 60%; width: 150px; height: 150px; border: 1px solid var(--text-sub); background: transparent; opacity: 0.1; animation: rotate 45s linear infinite reverse; }
+.shape-st6 { bottom: 40%; right: 40%; width: 15px; height: 15px; background: var(--warning); opacity: 0.3; animation: float 9s infinite; }
+.shape-c7 { top: 30%; left: 35%; width: 10px; height: 10px; background: var(--success); opacity: 0.3; animation: float 7s infinite; }
+
+@keyframes float { 0% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-15px) rotate(5deg); } 100% { transform: translateY(0px) rotate(0deg); } }
+@keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -2361,6 +2390,25 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 </head>
 <body>
 
+<div class="bg-decor">
+    <div class="shape shape-circle s1"></div>
+    <div class="shape shape-circle s2"></div>
+    <div class="shape shape-circle shape-c1"></div>
+    <div class="shape shape-star shape-st1"></div>
+    <div class="shape shape-circle shape-c2"></div>
+    <div class="shape shape-star shape-st2"></div>
+    
+    <div class="shape shape-circle shape-c3"></div>
+    <div class="shape shape-star shape-st3"></div>
+    <div class="shape shape-circle shape-c4"></div>
+    <div class="shape shape-star shape-st4"></div>
+    <div class="shape shape-circle shape-c5"></div>
+    <div class="shape shape-star shape-st5"></div>
+    <div class="shape shape-circle shape-c6"></div>
+    <div class="shape shape-star shape-st6"></div>
+    <div class="shape shape-circle shape-c7"></div>
+</div>
+
 <div id="toast" class="toast"><i id="t-icon"></i><span id="t-msg"></span></div>
 
 <div class="sidebar">
@@ -2380,7 +2428,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div style="flex:1;overflow:hidden">
                 <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{.User}}</div>
-                <div style="font-size:11px;color:var(--text-sub)">管理员</div>
+                <div style="font-size:11px;color:var(--text-sub)">Admin</div>
             </div>
             <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i></a>
         </div>
