@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.43" // WS 开关优化版
+	AppVersion      = "v3.0.42" // 增加入口 TLS 加密功能
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -88,8 +88,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
-	EntryTLS     bool   `json:"entry_tls"` // 入口是否开启TLS
-	WSPath       string `json:"ws_path"`   // WebSocket路径 (为空则不启用WS)
+	EntryTLS     bool   `json:"entry_tls"` // 新增：入口是否开启TLS
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -129,8 +128,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
-	EntryTLS   bool   `json:"entry_tls"`
-	WSPath     string `json:"ws_path"`
+	EntryTLS   bool   `json:"entry_tls"` // 任务下发也包含TLS配置
 }
 
 type TrafficReport struct {
@@ -197,7 +195,6 @@ type RuleStatusData struct {
 	Status    bool   `json:"status"`
 	Latency   int64  `json:"latency"`
 	EntryTLS  bool   `json:"entry_tls"`
-	WSPath    string `json:"ws_path"`
 }
 
 var (
@@ -226,49 +223,6 @@ var (
 	useTLS      bool = false
 )
 
-// --- WebSocket 适配器 (将 WS 包装为 net.Conn) ---
-
-type WSConnAdapter struct {
-	*websocket.Conn
-	reader io.Reader
-}
-
-func (w *WSConnAdapter) Read(b []byte) (int, error) {
-	for {
-		if w.reader == nil {
-			// 获取下一帧
-			msgType, r, err := w.Conn.NextReader()
-			if err != nil {
-				return 0, err
-			}
-			if msgType != websocket.BinaryMessage && msgType != websocket.TextMessage {
-				continue // 忽略非数据帧
-			}
-			w.reader = r
-		}
-		n, err := w.reader.Read(b)
-		if err == io.EOF {
-			w.reader = nil
-			continue // 当前帧读完，读下一帧
-		}
-		return n, err
-	}
-}
-
-func (w *WSConnAdapter) Write(b []byte) (int, error) {
-	err := w.Conn.WriteMessage(websocket.BinaryMessage, b)
-	if err != nil {
-		return 0, err
-	}
-	return len(b), nil
-}
-
-func (w *WSConnAdapter) SetDeadline(t time.Time) error {
-	w.Conn.SetReadDeadline(t)
-	w.Conn.SetWriteDeadline(t)
-	return nil
-}
-
 // --- 数据库初始化与优化 ---
 
 const dbSchema = `
@@ -291,7 +245,6 @@ CREATE TABLE IF NOT EXISTS rules (
     disabled INTEGER,
     speed_limit INTEGER,
     entry_tls INTEGER DEFAULT 0,
-    ws_path TEXT DEFAULT '',
     total_tx INTEGER DEFAULT 0,
     total_rx INTEGER DEFAULT 0
 );
@@ -320,10 +273,12 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
-	// 自动迁移字段
-	db.Exec("ALTER TABLE rules ADD COLUMN entry_tls INTEGER DEFAULT 0")
-	db.Exec("ALTER TABLE rules ADD COLUMN ws_path TEXT DEFAULT ''")
-	db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
+	// 自动迁移：检查是否需要添加 entry_tls 字段
+	_, err = db.Exec("ALTER TABLE rules ADD COLUMN entry_tls INTEGER DEFAULT 0")
+	if err != nil {
+		// 字段可能已存在，忽略错误
+	}
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 
 	if _, err := os.Stat(ConfigFile); err == nil {
 		var count int
@@ -364,9 +319,10 @@ func migrateOldData() {
 		if r.Disabled {
 			disabled = 1
 		}
-		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, ws_path, total_tx, total_rx) 
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, 0, "", r.TotalTx, r.TotalRx)
+		// entry_tls 默认为 0
+		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx) 
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, 0, r.TotalTx, r.TotalRx)
 	}
 	_ = os.Rename(ConfigFile, ConfigFile+".bak")
 }
@@ -411,7 +367,7 @@ func recordLoginFail(ip string) {
 	}
 }
 
-// 自动生成自签名证书 (伪装成常用域名)
+// 自动生成自签名证书 (公用)
 func autoGenerateCert() error {
 	if _, err := os.Stat(CertFile); err == nil {
 		if _, err := os.Stat(KeyFile); err == nil {
@@ -431,8 +387,8 @@ func autoGenerateCert() error {
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			Organization: []string{"Microsoft Corporation"}, // 伪装
-			CommonName:   "www.bing.com",                  // 伪装
+			Organization: []string{"GoRelay-Pro"},
+			CommonName:   "GoRelay-Node",
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
@@ -844,7 +800,6 @@ func broadcastLoop() {
 				Status:    r.TargetStatus,
 				Latency:   r.TargetLatency,
 				EntryTLS:  r.EntryTLS,
-				WSPath:    r.WSPath,
 			})
 		}
 		mu.Unlock()
@@ -1045,7 +1000,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, EntryTLS: r.EntryTLS, WSPath: r.WSPath,
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, EntryTLS: r.EntryTLS,
 			})
 		}
 	}
@@ -1303,13 +1258,6 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	entryTLS := r.FormValue("entry_tls") == "on"
 
-	// --- 修改：读取 enable_ws 开关代替直接读取 ws_path ---
-	wsPath := ""
-	if r.FormValue("enable_ws") == "on" {
-		wsPath = "/" // 默认路径
-	}
-	// --------------------------------------------------
-
 	// [还原] 移除手动指定 bridge_port，恢复随机生成
 	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
 
@@ -1328,7 +1276,6 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
 		BridgePort:   finalBridgePort,
 		EntryTLS:     entryTLS,
-		WSPath:       wsPath,
 	})
 	saveConfigNoLock()
 	mu.Unlock()
@@ -1341,13 +1288,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	entryTLS := r.FormValue("entry_tls") == "on"
-
-	// --- 修改：读取 enable_ws 开关代替直接读取 ws_path ---
-	wsPath := ""
-	if r.FormValue("enable_ws") == "on" {
-		wsPath = "/" // 默认路径
-	}
-	// --------------------------------------------------
 
 	mu.Lock()
 	for i := range rules {
@@ -1363,7 +1303,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
 			rules[i].EntryTLS = entryTLS
-			rules[i].WSPath = wsPath
 			break
 		}
 	}
@@ -1876,72 +1815,15 @@ func startProxy(t ForwardTask) {
 			var err error
 
 			// -------------------------
-			// NEW: 入口 TLS/WS 监听逻辑
+			// NEW: 入口 TLS 监听逻辑
 			// -------------------------
-			if t.WSPath != "" {
-				// 启用 WebSocket 模式 (WS 或 WSS)
-				// 我们需要启动一个 HTTP Server，通过 Handler 将连接升级为 WS
-				// 然后将 WS 连接包装为 net.Conn 扔给 pipeTCP
-				mux := http.NewServeMux()
-				upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
-				// 真正的处理逻辑
-				mux.HandleFunc(t.WSPath, func(w http.ResponseWriter, r *http.Request) {
-					wsC, err := upgrader.Upgrade(w, r, nil)
-					if err != nil {
-						return
-					}
-					// 将 WS 连接包装成 net.Conn
-					conn := &WSConnAdapter{Conn: wsC}
-
-					l.Lock()
-					if closed {
-						conn.Close()
-						l.Unlock()
-						return
-					}
-					activeConns[conn] = struct{}{}
-					l.Unlock()
-
-					ipTracker.Add(r.RemoteAddr) // WS 的 RemoteAddr 可能带端口也可能不带，视情况而定
-					go func(c net.Conn) {
-						pipeTCP(c, t.ID, t.SpeedLimit)
-						l.Lock()
-						delete(activeConns, c)
-						l.Unlock()
-						ipTracker.Remove(r.RemoteAddr)
-					}(conn)
-				})
-
-				// 兜底路由 (防止主动探测)
-				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(404)
-					w.Write([]byte("Not Found"))
-				})
-
-				server := &http.Server{Addr: t.Listen, Handler: mux}
-				l.Lock()
-				closers = append(closers, func() { server.Close() })
-				l.Unlock()
-
-				if t.EntryTLS {
-					// WSS
-					// 加载证书
-					if _, err := os.Stat(CertFile); err == nil {
-						go server.ListenAndServeTLS(CertFile, KeyFile)
-					}
-				} else {
-					// WS
-					go server.ListenAndServe()
-				}
-				return // WS 模式下，监听逻辑由 http.Server 接管，直接返回
-			}
-
-			// 普通 TCP/TLS 模式
 			if t.EntryTLS {
+				// 尝试加载证书 (agent 本地的 server.crt/key)
+				// 注意：这里复用 autoGenerateCert 生成的文件
 				cert, errCert := tls.LoadX509KeyPair(CertFile, KeyFile)
 				if errCert != nil {
-					return
+					log.Printf("❌ 任务 %s 开启 TLS 失败，无法加载证书: %v", t.ID, errCert)
+					return // 证书加载失败则不启动该端口
 				}
 				ln, err = tls.Listen("tcp", t.Listen, &tls.Config{Certificates: []tls.Certificate{cert}})
 			} else {
@@ -1969,6 +1851,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
+					// [保留] IP 动态获取，修复旧 IP 问题
 					pipeTCP(conn, t.ID, t.SpeedLimit)
 					l.Lock()
 					delete(activeConns, conn)
@@ -1979,7 +1862,6 @@ func startProxy(t ForwardTask) {
 		}()
 	}
 	if t.Protocol == "udp" || t.Protocol == "both" {
-		// UDP 不支持 WebSocket
 		go func() {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen)
 			ln, err := net.ListenUDP("udp", addr)
@@ -1989,6 +1871,7 @@ func startProxy(t ForwardTask) {
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
+			// [保留] IP 动态获取
 			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit)
 		}()
 	}
@@ -2173,13 +2056,13 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, ws_path, total_tx, total_rx FROM rules")
+	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx FROM rules")
 	if err == nil {
 		defer rRows.Close()
 		for rRows.Next() {
 			var r LogicalRule
 			var d, tls int
-			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &tls, &r.WSPath, &r.TotalTx, &r.TotalRx)
+			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &tls, &r.TotalTx, &r.TotalRx)
 			r.Disabled = (d == 1)
 			r.EntryTLS = (tls == 1)
 			rules = append(rules, r)
@@ -2223,8 +2106,8 @@ func saveConfigNoLock() {
 		if r.EntryTLS {
 			tls = 1
 		}
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, ws_path, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, tls, r.WSPath, r.TotalTx, r.TotalRx)
+		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, tls, r.TotalTx, r.TotalRx)
 	}
 	_ = tx.Commit()
 }
@@ -2600,7 +2483,7 @@ input:checked + .slider:before { transform: translateX(20px); }
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div style="flex:1;overflow:hidden">
                 <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{.User}}</div>
-                <div style="font-size:11px;color:var(--text-sub)">管理员</div>
+                <div style="font-size:11px;color:var(--text-sub)">Admin</div>
             </div>
             <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i></a>
         </div>
@@ -2699,14 +2582,7 @@ input:checked + .slider:before { transform: translateX(20px); }
                             <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启入口 TLS 加密 (HTTPS)</span>
                         </div>
 
-                        <div class="form-group" style="display:flex;align-items:center;height:42px;gap:10px">
-                            <label class="switch">
-                                <input type="checkbox" name="enable_ws">
-                                <span class="slider"></span>
-                            </label>
-                            <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启 WebSocket 传输</span>
-                        </div>
-                        <div class="form-group" style="grid-column:1/-1"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
+                        <div class="form-group"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
                     </div>
                 </form>
             </div>
@@ -2734,7 +2610,6 @@ input:checked + .slider:before { transform: translateX(20px); }
                                 <div style="font-weight:600;font-size:14px;margin-bottom:4px">
                                     {{if .Note}}{{.Note}}{{else}}未命名规则{{end}}
                                     {{if .EntryTLS}}<i class="ri-lock-2-fill" style="color:var(--success);font-size:13px;margin-left:4px" title="TLS 加密已开启"></i>{{end}}
-                                    {{if .WSPath}}<i class="ri-global-line" style="color:var(--primary);font-size:13px;margin-left:4px" title="WebSocket: {{.WSPath}}"></i>{{end}}
                                 </div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)">{{.EntryAgent}}:{{.EntryPort}}</span> 
@@ -2766,7 +2641,7 @@ input:checked + .slider:before { transform: translateX(20px); }
                             <td>
                                 <div style="display:flex;gap:6px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.EntryTLS}}', '{{.WSPath}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.EntryTLS}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -2972,21 +2847,12 @@ input:checked + .slider:before { transform: translateX(20px); }
                 <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
                 <div class="form-group"><label>限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
                 <div class="form-group"><label>限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
-                
                 <div class="form-group" style="grid-column: 1/-1;display:flex;align-items:center;height:42px;gap:10px">
                     <label class="switch">
                         <input type="checkbox" name="entry_tls" id="e_entry_tls">
                         <span class="slider"></span>
                     </label>
                     <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启入口 TLS 加密 (HTTPS)</span>
-                </div>
-                
-                <div class="form-group" style="grid-column: 1/-1;display:flex;align-items:center;height:42px;gap:10px">
-                    <label class="switch">
-                        <input type="checkbox" name="enable_ws" id="e_enable_ws">
-                        <span class="slider"></span>
-                    </label>
-                    <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启 WebSocket 传输</span>
                 </div>
                 <div class="form-group" style="grid-column: 1/-1;margin-top:10px"><button class="btn" style="width:100%;height:44px">保存修改</button></div>
             </div>
@@ -3205,7 +3071,7 @@ input:checked + .slider:before { transform: translateX(20px); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
 
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, entryTLS, wsPath) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, entryTLS) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
@@ -3218,11 +3084,6 @@ input:checked + .slider:before { transform: translateX(20px); }
         document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
         document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
         document.getElementById('e_entry_tls').checked = (entryTLS === 'true');
-        
-        // --- 修改开始: 检查路径是否为空，若不为空则打开开关 ---
-        document.getElementById('e_enable_ws').checked = (wsPath && wsPath !== "");
-        // --- 修改结束 ---
-
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
