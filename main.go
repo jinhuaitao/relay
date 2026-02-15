@@ -1183,8 +1183,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-	} else if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
-		passMatch = true
 	}
 
 	if !passMatch {
