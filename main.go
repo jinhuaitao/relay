@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.46" // 版本号微调，标识已修复路径问题
+	AppVersion      = "v3.0.46" // 包含路径修复与热更新修复
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1621,25 +1621,53 @@ func runAgent(name, masterAddr, token string) {
 					log.Printf("更新失败: %v", err)
 				}
 			}
-			// ------------------------
+			// --- 热更新逻辑修复 ---
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
 				json.Unmarshal(d, &tasks)
 				active := make(map[string]bool)
+
 				for _, t := range tasks {
 					active[t.ID] = true
 
 					// [保留] IP 变动热更新：强制更新内存中的目标地址
 					activeTargets.Store(t.ID, t.Target)
 
+					// --- 核心修复: 检测配置是否变更，变更则强制重启任务 ---
+					shouldRestart := false
+					if existingVal, loaded := activeTasks.Load(t.ID); loaded {
+						oldTask := existingVal.(ForwardTask)
+						if oldTask.Target != t.Target ||
+							oldTask.Listen != t.Listen ||
+							oldTask.EntryTLS != t.EntryTLS ||
+							oldTask.Protocol != t.Protocol ||
+							oldTask.SpeedLimit != t.SpeedLimit {
+							log.Printf("♻️ 检测到规则变更，正在重启任务: %s", t.ID)
+							shouldRestart = true
+						}
+					}
+
+					if shouldRestart {
+						if closer, ok := runningListeners.Load(t.ID); ok {
+							closer.(func())()
+						}
+						runningListeners.Delete(t.ID)
+						activeTasks.Delete(t.ID)
+					}
+
 					if _, loaded := activeTasks.LoadOrStore(t.ID, t); !loaded {
-						agentTraffic.Store(t.ID, &TrafficCounter{})
-						var uz int64 = 0
-						agentUserCounts.Store(t.ID, &uz)
+						if _, ok := agentTraffic.Load(t.ID); !ok {
+							agentTraffic.Store(t.ID, &TrafficCounter{})
+						}
+						if _, ok := agentUserCounts.Load(t.ID); !ok {
+							var uz int64 = 0
+							agentUserCounts.Store(t.ID, &uz)
+						}
 						startProxy(t)
 					}
 				}
+
 				runningListeners.Range(func(k, v interface{}) bool {
 					if !active[k.(string)] {
 						v.(func())()
