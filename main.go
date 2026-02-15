@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.43" // 增加入口 TLS 加密功能
+	AppVersion      = "v3.0.44" // 增加入口 TLS 加密功能
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -2483,7 +2483,7 @@ input:checked + .slider:before { transform: translateX(20px); }
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div style="flex:1;overflow:hidden">
                 <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{.User}}</div>
-                <div style="font-size:11px;color:var(--text-sub)">Admin</div>
+                <div style="font-size:11px;color:var(--text-sub)">管理员</div>
             </div>
             <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i></a>
         </div>
