@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.44" // 增加入口 TLS 加密功能
+	AppVersion      = "v3.0.45" // 增加入口 TLS 加密功能
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
