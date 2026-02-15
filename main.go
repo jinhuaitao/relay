@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.41" // 背景图形加深版
+	AppVersion      = "v3.0.42" // 增加入口 TLS 加密功能
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -58,6 +58,8 @@ const (
 	CopyBufferSize  = 32 * 1024
 	MaxLogEntries   = 200
 	MaxLogRetention = 1000
+	CertFile        = "server.crt"
+	KeyFile         = "server.key"
 )
 
 // 支持多个 Agent 连接端口
@@ -86,6 +88,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
+	EntryTLS     bool   `json:"entry_tls"` // 新增：入口是否开启TLS
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -125,6 +128,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
+	EntryTLS   bool   `json:"entry_tls"` // 任务下发也包含TLS配置
 }
 
 type TrafficReport struct {
@@ -190,6 +194,7 @@ type RuleStatusData struct {
 	Limit     int64  `json:"limit"`
 	Status    bool   `json:"status"`
 	Latency   int64  `json:"latency"`
+	EntryTLS  bool   `json:"entry_tls"`
 }
 
 var (
@@ -239,6 +244,7 @@ CREATE TABLE IF NOT EXISTS rules (
     traffic_limit INTEGER,
     disabled INTEGER,
     speed_limit INTEGER,
+    entry_tls INTEGER DEFAULT 0,
     total_tx INTEGER DEFAULT 0,
     total_rx INTEGER DEFAULT 0
 );
@@ -267,6 +273,11 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
+	// 自动迁移：检查是否需要添加 entry_tls 字段
+	_, err = db.Exec("ALTER TABLE rules ADD COLUMN entry_tls INTEGER DEFAULT 0")
+	if err != nil {
+		// 字段可能已存在，忽略错误
+	}
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 
 	if _, err := os.Stat(ConfigFile); err == nil {
@@ -308,9 +319,10 @@ func migrateOldData() {
 		if r.Disabled {
 			disabled = 1
 		}
-		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		// entry_tls 默认为 0
+		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx) 
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, 0, r.TotalTx, r.TotalRx)
 	}
 	_ = os.Rename(ConfigFile, ConfigFile+".bak")
 }
@@ -355,12 +367,14 @@ func recordLoginFail(ip string) {
 	}
 }
 
+// 自动生成自签名证书 (公用)
 func autoGenerateCert() error {
-	if _, err := os.Stat("server.crt"); err == nil {
-		if _, err := os.Stat("server.key"); err == nil {
+	if _, err := os.Stat(CertFile); err == nil {
+		if _, err := os.Stat(KeyFile); err == nil {
 			return nil
 		}
 	}
+	log.Println("🔑 正在生成自签名证书...")
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
@@ -374,7 +388,7 @@ func autoGenerateCert() error {
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"GoRelay-Pro"},
-			CommonName:   "GoRelay Master",
+			CommonName:   "GoRelay-Node",
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
@@ -382,15 +396,16 @@ func autoGenerateCert() error {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
+	// 包含本地回环和通配IP
+	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0"))
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
 		return err
 	}
-	certOut, _ := os.Create("server.crt")
+	certOut, _ := os.Create(CertFile)
 	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	certOut.Close()
-	keyOut, _ := os.OpenFile("server.key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyOut, _ := os.OpenFile(KeyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 	keyOut.Close()
 	return nil
@@ -657,9 +672,9 @@ func runMaster() {
 	go broadcastLoop()
 	go func() {
 		var agentTlsConfig *tls.Config
-		if _, err := os.Stat("server.crt"); err == nil {
-			if _, err := os.Stat("server.key"); err == nil {
-				if cert, err := tls.LoadX509KeyPair("server.crt", "server.key"); err == nil {
+		if _, err := os.Stat(CertFile); err == nil {
+			if _, err := os.Stat(KeyFile); err == nil {
+				if cert, err := tls.LoadX509KeyPair(CertFile, KeyFile); err == nil {
 					agentTlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 					isMasterTLS = true
 					log.Println("🔐 Master 已启用 TLS 模式")
@@ -729,10 +744,10 @@ func runMaster() {
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
-	http.HandleFunc("/restart", authMiddleware(handleRestart))          // 新增重启路由
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))  // 系统更新路由
-	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
-	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) // [新增] 检查更新路由
+	http.HandleFunc("/restart", authMiddleware(handleRestart))
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))
+	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent))
+	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -784,6 +799,7 @@ func broadcastLoop() {
 				Limit:     r.TrafficLimit,
 				Status:    r.TargetStatus,
 				Latency:   r.TargetLatency,
+				EntryTLS:  r.EntryTLS,
 			})
 		}
 		mu.Unlock()
@@ -984,7 +1000,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit,
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, EntryTLS: r.EntryTLS,
 			})
 		}
 	}
@@ -1240,6 +1256,7 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
+	entryTLS := r.FormValue("entry_tls") == "on"
 
 	// [还原] 移除手动指定 bridge_port，恢复随机生成
 	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
@@ -1258,6 +1275,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
 		BridgePort:   finalBridgePort,
+		EntryTLS:     entryTLS,
 	})
 	saveConfigNoLock()
 	mu.Unlock()
@@ -1269,6 +1287,8 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
+	entryTLS := r.FormValue("entry_tls") == "on"
+
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
@@ -1282,6 +1302,7 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].Protocol = r.FormValue("protocol")
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
+			rules[i].EntryTLS = entryTLS
 			break
 		}
 	}
@@ -1503,6 +1524,9 @@ func doRestart() {
 // ================= AGENT CORE =================
 
 func runAgent(name, masterAddr, token string) {
+	// Agent 启动时尝试生成或复用证书，供 entry_tls 功能使用
+	autoGenerateCert()
+
 	for {
 		var conn net.Conn
 		var err error
@@ -1751,7 +1775,7 @@ func (t *IpTracker) Remove(addr string) {
 	}
 
 	t.refs[host]--
-	
+
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
 		// 防御性编程：确保不会减成负数
@@ -1787,7 +1811,25 @@ func startProxy(t ForwardTask) {
 
 	if t.Protocol == "tcp" || t.Protocol == "both" {
 		go func() {
-			ln, err := net.Listen("tcp", t.Listen)
+			var ln net.Listener
+			var err error
+
+			// -------------------------
+			// NEW: 入口 TLS 监听逻辑
+			// -------------------------
+			if t.EntryTLS {
+				// 尝试加载证书 (agent 本地的 server.crt/key)
+				// 注意：这里复用 autoGenerateCert 生成的文件
+				cert, errCert := tls.LoadX509KeyPair(CertFile, KeyFile)
+				if errCert != nil {
+					log.Printf("❌ 任务 %s 开启 TLS 失败，无法加载证书: %v", t.ID, errCert)
+					return // 证书加载失败则不启动该端口
+				}
+				ln, err = tls.Listen("tcp", t.Listen, &tls.Config{Certificates: []tls.Certificate{cert}})
+			} else {
+				ln, err = net.Listen("tcp", t.Listen)
+			}
+
 			if err != nil {
 				return
 			}
@@ -2014,14 +2056,15 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
+	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx FROM rules")
 	if err == nil {
 		defer rRows.Close()
 		for rRows.Next() {
 			var r LogicalRule
-			var d int
-			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
+			var d, tls int
+			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &tls, &r.TotalTx, &r.TotalRx)
 			r.Disabled = (d == 1)
+			r.EntryTLS = (tls == 1)
 			rules = append(rules, r)
 		}
 	}
@@ -2059,8 +2102,12 @@ func saveConfigNoLock() {
 		if r.Disabled {
 			d = 1
 		}
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		tls := 0
+		if r.EntryTLS {
+			tls = 1
+		}
+		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, entry_tls, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, tls, r.TotalTx, r.TotalRx)
 	}
 	_ = tx.Commit()
 }
@@ -2343,6 +2390,14 @@ tr:hover td { background: var(--input-bg); }
 input, select { width: 100%; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-main); font-size: 14px; outline: none; transition: 0.2s; font-family: inherit; }
 input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-light); background: var(--bg-card); }
 
+/* 开关样式优化 */
+.switch { position: relative; display: inline-block; width: 44px; height: 24px; vertical-align: middle; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 34px; }
+.slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+input:checked + .slider { background-color: var(--primary); }
+input:checked + .slider:before { transform: translateX(20px); }
+
 .btn { background: var(--primary); color: #fff; border: none; padding: 10px 20px; border-radius: 10px; cursor: pointer; font-size: 13.5px; font-weight: 500; transition: 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 6px; text-decoration: none; }
 .btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
 .btn:active { transform: translateY(0); }
@@ -2428,7 +2483,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="avatar">{{printf "%.1s" .User}}</div>
             <div style="flex:1;overflow:hidden">
                 <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{.User}}</div>
-                <div style="font-size:11px;color:var(--text-sub)">管理员</div>
+                <div style="font-size:11px;color:var(--text-sub)">Admin</div>
             </div>
             <a href="/logout" class="btn-logout"><i class="ri-logout-box-r-line"></i></a>
         </div>
@@ -2518,6 +2573,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
+                        
+                        <div class="form-group" style="display:flex;align-items:center;height:42px;gap:10px">
+                            <label class="switch">
+                                <input type="checkbox" name="entry_tls">
+                                <span class="slider"></span>
+                            </label>
+                            <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启入口 TLS 加密 (HTTPS)</span>
+                        </div>
+
                         <div class="form-group"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
                     </div>
                 </form>
@@ -2543,7 +2607,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         {{end}}
                         <tr class="rule-row" data-group="{{.Group}}" style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
                             <td>
-                                <div style="font-weight:600;font-size:14px;margin-bottom:4px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
+                                <div style="font-weight:600;font-size:14px;margin-bottom:4px">
+                                    {{if .Note}}{{.Note}}{{else}}未命名规则{{end}}
+                                    {{if .EntryTLS}}<i class="ri-lock-2-fill" style="color:var(--success);font-size:13px;margin-left:4px" title="TLS 加密已开启"></i>{{end}}
+                                </div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)">{{.EntryAgent}}:{{.EntryPort}}</span> 
                                     <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
@@ -2574,7 +2641,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <td>
                                 <div style="display:flex;gap:6px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.EntryTLS}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -2780,6 +2847,13 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
                 <div class="form-group"><label>限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
                 <div class="form-group"><label>限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
+                <div class="form-group" style="grid-column: 1/-1;display:flex;align-items:center;height:42px;gap:10px">
+                    <label class="switch">
+                        <input type="checkbox" name="entry_tls" id="e_entry_tls">
+                        <span class="slider"></span>
+                    </label>
+                    <span style="font-size:13px;font-weight:500;color:var(--text-main)">开启入口 TLS 加密 (HTTPS)</span>
+                </div>
                 <div class="form-group" style="grid-column: 1/-1;margin-top:10px"><button class="btn" style="width:100%;height:44px">保存修改</button></div>
             </div>
         </form>
@@ -2997,7 +3071,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
 
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, entryTLS) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
@@ -3009,6 +3083,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('e_proto').value = proto;
         document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
         document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
+        document.getElementById('e_entry_tls').checked = (entryTLS === 'true');
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
