@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.41" // 背景图形加深版
+	AppVersion      = "v3.0.42" // 背景图形加深版
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -59,9 +59,6 @@ const (
 	MaxLogEntries   = 200
 	MaxLogRetention = 1000
 )
-
-// 支持多个 Agent 连接端口
-var ControlPorts = []string{":9999", ":10086"}
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
