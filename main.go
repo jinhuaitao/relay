@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.44" // 背景图形加深版
+	AppVersion      = "v3.0.43" // 背景图形加深版
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1871,41 +1871,31 @@ func pipeTCP(src net.Conn, tid string, limit int64) {
 		return
 	}
 	defer dst.Close()
-	v, ok := agentTraffic.Load(tid)
-	if !ok {
-		return // 任务刚刚被删除，直接安全退出
-	}
+	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx, limit)
+	copyCount(src, dst, &cnt.Rx, limit)
 }
 
 // [保留] IP 热更新逻辑
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 	udpSessions := &sync.Map{}
-	v, ok := agentTraffic.Load(tid)
-	if !ok {
-		return 
-	}
+	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 
-	done := make(chan struct{}) // 新增生命周期控制管道
 	go func() {
 		for {
-			select {
-			case <-time.After(30 * time.Second):
-				now := time.Now()
-				udpSessions.Range(func(key, value interface{}) bool {
-					s := value.(*udpSession)
-					if now.Sub(s.lastActive) > 45*time.Second {
-						s.conn.Close()
-						udpSessions.Delete(key)
-						tracker.Remove(key.(string))
-					}
-					return true
-				})
-			case <-done:
-				return // 收到监听关闭的信号，安全销毁协程
-			}
+			time.Sleep(30 * time.Second)
+			now := time.Now()
+			udpSessions.Range(func(key, value interface{}) bool {
+				s := value.(*udpSession)
+				if now.Sub(s.lastActive) > 45*time.Second {
+					s.conn.Close()
+					udpSessions.Delete(key)
+					tracker.Remove(key.(string))
+				}
+				return true
+			})
 		}
 	}()
 
@@ -1915,7 +1905,6 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
-			close(done) // 监听器被关闭（比如删除了规则），通知协程退出
 			break
 		}
 		atomic.AddInt64(&cnt.Tx, int64(n))
