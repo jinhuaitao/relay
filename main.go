@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.42" // 背景图形加深版
+	AppVersion      = "v3.0.43" // 背景图形加深版
 	DBFile          = "data.db"
 	ConfigFile      = "config.json"
 	WebPort         = ":8888"
@@ -1581,7 +1581,17 @@ func runAgent(name, masterAddr, token string) {
 					// [保留] IP 变动热更新：强制更新内存中的目标地址
 					activeTargets.Store(t.ID, t.Target)
 
-					if _, loaded := activeTasks.LoadOrStore(t.ID, t); !loaded {
+					if oldVal, loaded := activeTasks.LoadOrStore(t.ID, t); loaded {
+						oldTask := oldVal.(ForwardTask)
+						// 核心修复：检查关键配置是否发生变化，若变化则重启该代理
+						if oldTask.Protocol != t.Protocol || oldTask.Listen != t.Listen || oldTask.SpeedLimit != t.SpeedLimit {
+							if closeFunc, ok := runningListeners.Load(t.ID); ok {
+								closeFunc.(func())() // 关闭旧的端口监听
+							}
+							activeTasks.Store(t.ID, t) // 更新内存中的任务配置
+							startProxy(t)              // 使用新配置重新启动代理
+						}
+					} else {
 						agentTraffic.Store(t.ID, &TrafficCounter{})
 						var uz int64 = 0
 						agentUserCounts.Store(t.ID, &uz)
