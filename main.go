@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.45" // 背景图形加深版
+	AppVersion      = "v3.0.46" // 背景图形加深版
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -264,6 +264,7 @@ func initDB() {
 	}
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
+
 }
 
 // --- 基础工具函数 ---
@@ -1486,8 +1487,9 @@ func runAgent(name, masterAddr, token string) {
 						if val, ok := agentUserCounts.Load(k); ok {
 							uc = atomic.LoadInt64(val.(*int64))
 						}
-						// 强制上报在线任务状态，解决人数归零不上报的问题
-						reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
+						if tx > 0 || rx > 0 || uc > 0 {
+							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
+						}
 						return true
 					})
 					if len(reps) > 0 {
@@ -1759,13 +1761,6 @@ func startProxy(t ForwardTask) {
 				if e != nil {
 					break
 				}
-				
-				// [新增] 强制开启 TCP KeepAlive，应对拔网线或客户端异常崩溃的死连接
-				if tcpConn, ok := c.(*net.TCPConn); ok {
-					tcpConn.SetKeepAlive(true)
-					tcpConn.SetKeepAlivePeriod(15 * time.Second)
-				}
-
 				l.Lock()
 				if closed {
 					c.Close()
@@ -1845,11 +1840,11 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 
 	go func() {
 		for {
-			time.Sleep(10 * time.Second) // [修改] 缩短巡检间隔为 10 秒
+			time.Sleep(30 * time.Second)
 			now := time.Now()
 			udpSessions.Range(func(key, value interface{}) bool {
 				s := value.(*udpSession)
-				if now.Sub(s.lastActive) > 20*time.Second { // [修改] 超过 20 秒无数据即视为掉线
+				if now.Sub(s.lastActive) > 45*time.Second {
 					s.conn.Close()
 					udpSessions.Delete(key)
 					tracker.Remove(key.(string))
