@@ -47,9 +47,8 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.43" // 背景图形加深版
+	AppVersion      = "v3.0.44" // 背景图形加深版
 	DBFile          = "data.db"
-	ConfigFile      = "config.json"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest" // GitHub API
@@ -266,50 +265,6 @@ func initDB() {
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 
-	if _, err := os.Stat(ConfigFile); err == nil {
-		var count int
-		db.QueryRow("SELECT count(*) FROM settings").Scan(&count)
-		if count == 0 {
-			migrateOldData()
-		}
-	}
-}
-
-func migrateOldData() {
-	log.Println("🚚 执行旧配置迁移...")
-	data, err := os.ReadFile(ConfigFile)
-	if err != nil {
-		return
-	}
-	var old AppConfig
-	if err := json.Unmarshal(data, &old); err != nil {
-		return
-	}
-
-	setDBSetting := func(k, v string) { _, _ = db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
-	setDBSetting("web_user", old.WebUser)
-	setDBSetting("web_pass", old.WebPass)
-	setDBSetting("agent_token", old.AgentToken)
-	setDBSetting("agent_ports", old.AgentPorts)
-	setDBSetting("master_ip", old.MasterIP)
-	setDBSetting("master_ipv6", old.MasterIPv6)
-	setDBSetting("master_domain", old.MasterDomain)
-	setDBSetting("is_setup", strconv.FormatBool(old.IsSetup))
-	setDBSetting("tg_bot_token", old.TgBotToken)
-	setDBSetting("tg_chat_id", old.TgChatID)
-	setDBSetting("two_fa_enabled", strconv.FormatBool(old.TwoFAEnabled))
-	setDBSetting("two_fa_secret", old.TwoFASecret)
-
-	for _, r := range old.Rules {
-		disabled := 0
-		if r.Disabled {
-			disabled = 1
-		}
-		_, _ = db.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) 
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, "", r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, disabled, r.SpeedLimit, r.TotalTx, r.TotalRx)
-	}
-	_ = os.Rename(ConfigFile, ConfigFile+".bak")
 }
 
 // --- 基础工具函数 ---
@@ -1532,9 +1487,8 @@ func runAgent(name, masterAddr, token string) {
 						if val, ok := agentUserCounts.Load(k); ok {
 							uc = atomic.LoadInt64(val.(*int64))
 						}
-						if tx > 0 || rx > 0 || uc > 0 {
-							reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
-						}
+						// 强制上报在线任务状态，解决人数归零不上报的问题
+						reps = append(reps, TrafficReport{TaskID: k.(string), TxDelta: tx, RxDelta: rx, UserCount: uc})
 						return true
 					})
 					if len(reps) > 0 {
@@ -1806,6 +1760,13 @@ func startProxy(t ForwardTask) {
 				if e != nil {
 					break
 				}
+				
+				// [新增] 强制开启 TCP KeepAlive，应对拔网线或客户端异常崩溃的死连接
+				if tcpConn, ok := c.(*net.TCPConn); ok {
+					tcpConn.SetKeepAlive(true)
+					tcpConn.SetKeepAlivePeriod(15 * time.Second)
+				}
+
 				l.Lock()
 				if closed {
 					c.Close()
@@ -1885,11 +1846,11 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 
 	go func() {
 		for {
-			time.Sleep(30 * time.Second)
+			time.Sleep(10 * time.Second) // [修改] 缩短巡检间隔为 10 秒
 			now := time.Now()
 			udpSessions.Range(func(key, value interface{}) bool {
 				s := value.(*udpSession)
-				if now.Sub(s.lastActive) > 45*time.Second {
+				if now.Sub(s.lastActive) > 20*time.Second { // [修改] 超过 20 秒无数据即视为掉线
 					s.conn.Close()
 					udpSessions.Delete(key)
 					tracker.Remove(key.(string))
