@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.50" // 恢复功能 + 登录页双色主题
+	AppVersion      = "v3.0.51" // 高级负载均衡 + 底部悬浮批量操作
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -82,6 +82,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
+	LBStrategy   string `json:"lb_strategy"`
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -121,6 +122,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
+	LBStrategy string `json:"lb_strategy"` 
 }
 
 type TrafficReport struct {
@@ -196,12 +198,15 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
-	activeTargets    sync.Map // 存储最新的目标地址
+	activeTargets    sync.Map 
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
-	targetHealthMap  sync.Map
+	targetHealthMap  sync.Map 
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
+
+	rrCounters   sync.Map 
+	connCounters sync.Map 
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
@@ -236,7 +241,8 @@ CREATE TABLE IF NOT EXISTS rules (
     disabled INTEGER,
     speed_limit INTEGER,
     total_tx INTEGER DEFAULT 0,
-    total_rx INTEGER DEFAULT 0
+    total_rx INTEGER DEFAULT 0,
+    lb_strategy TEXT DEFAULT 'random'
 );
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,7 +270,7 @@ func initDB() {
 	}
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
-
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
 }
 
 // --- 基础工具函数 ---
@@ -347,8 +353,6 @@ func autoGenerateCert() error {
 	keyOut.Close()
 	return nil
 }
-
-// --- 通用更新逻辑 (Master/Agent 共享) ---
 
 func performSelfUpdate() error {
 	arch := runtime.GOARCH
@@ -674,18 +678,19 @@ func runMaster() {
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
 	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
+	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) 
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
-	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) // [新增] 恢复数据路由
+	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) 
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
-	http.HandleFunc("/restart", authMiddleware(handleRestart))          // 新增重启路由
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))  // 系统更新路由
-	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) // Agent更新路由
-	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) // [新增] 检查更新路由
+	http.HandleFunc("/restart", authMiddleware(handleRestart))          
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))  
+	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) 
+	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) 
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -928,8 +933,12 @@ func pushConfigToAll() {
 			}
 		}
 		finalTargetStr := strings.Join(targetList, ",")
+		
+		lb := r.LBStrategy
+		if lb == "" { lb = "random" }
+
 		tasksMap[r.ExitAgent] = append(tasksMap[r.ExitAgent], ForwardTask{
-			ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: finalTargetStr, SpeedLimit: r.SpeedLimit,
+			ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: finalTargetStr, SpeedLimit: r.SpeedLimit, LBStrategy: lb,
 		})
 		if exit, ok := agents[r.ExitAgent]; ok {
 			rip := exit.RemoteIP
@@ -937,7 +946,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit,
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr",
 			})
 		}
 	}
@@ -1023,7 +1032,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Config       AppConfig
 		TwoFA        bool
 		IsTLS        bool
-		Ports        []string // 新增: 传递端口列表
+		Ports        []string 
 		Version      string
 	}{al, displayRules, displayLogs, conf.AgentToken, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
 
@@ -1193,8 +1202,9 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
+	lbStrategy := r.FormValue("lb_strategy")
+	if lbStrategy == "" { lbStrategy = "random" }
 
-	// [还原] 移除手动指定 bridge_port，恢复随机生成
 	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
 
 	mu.Lock()
@@ -1211,6 +1221,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		TrafficLimit: int64(limitGB * 1024 * 1024 * 1024),
 		SpeedLimit:   int64(speedMB * 1024 * 1024),
 		BridgePort:   finalBridgePort,
+		LBStrategy:   lbStrategy,
 	})
 	saveConfigNoLock()
 	mu.Unlock()
@@ -1222,6 +1233,9 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
+	lbStrategy := r.FormValue("lb_strategy")
+	if lbStrategy == "" { lbStrategy = "random" }
+
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
@@ -1235,6 +1249,7 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].Protocol = r.FormValue("protocol")
 			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
+			rules[i].LBStrategy = lbStrategy
 			break
 		}
 	}
@@ -1289,6 +1304,48 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
+func handleBatchRule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+	action := r.FormValue("action")
+	ids := strings.Split(r.FormValue("ids"), ",")
+	
+	idMap := make(map[string]bool)
+	for _, id := range ids {
+		if id != "" {
+			idMap[id] = true
+		}
+	}
+
+	mu.Lock()
+	if action == "delete" {
+		var nr []LogicalRule
+		for _, x := range rules {
+			if !idMap[x.ID] {
+				nr = append(nr, x)
+			}
+		}
+		rules = nr
+	} else if action == "enable" || action == "disable" || action == "reset" {
+		for i := range rules {
+			if idMap[rules[i].ID] {
+				if action == "enable" { rules[i].Disabled = false }
+				if action == "disable" { rules[i].Disabled = true }
+				if action == "reset" { rules[i].TotalTx, rules[i].TotalRx = 0, 0 }
+			}
+		}
+	}
+	saveConfigNoLock()
+	mu.Unlock()
+	
+	if action != "reset" {
+		go pushConfigToAll()
+	}
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+
 func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	mu.Lock()
@@ -1306,7 +1363,7 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
 	config.AgentToken = r.FormValue("token")
-	config.AgentPorts = r.FormValue("agent_ports") // 保存新添加的端口配置
+	config.AgentPorts = r.FormValue("agent_ports") 
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
@@ -1322,7 +1379,6 @@ func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, DBFile)
 }
 
-// [新增] 接收恢复上传的数据库文件
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
@@ -1338,17 +1394,14 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// 1. 安全关闭现有的 SQLite 数据库连接
 	if db != nil {
 		db.Close()
 		db = nil
 	}
 
-	// 2. 清理可能残留的 WAL 模式缓存文件，防止恢复后数据冲突
 	os.Remove(DBFile + "-wal")
 	os.Remove(DBFile + "-shm")
 
-	// 3. 覆盖写入新的数据库文件
 	out, err := os.Create(DBFile)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
@@ -1357,7 +1410,6 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	defer out.Close()
 	io.Copy(out, file)
 
-	// 返回成功（由前端触发面板重启以重新加载最新配置）
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
@@ -1388,7 +1440,6 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Master自我更新处理
 func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
@@ -1401,7 +1452,6 @@ func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 	go func() { time.Sleep(1 * time.Second); doRestart() }()
 }
 
-// Master远程通知Agent更新
 func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	mu.Lock()
@@ -1411,12 +1461,10 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", 404)
 		return
 	}
-	// 发送更新指令给Agent
 	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
 	w.Write([]byte("ok"))
 }
 
-// [新增] 检查更新接口
 func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	client := http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(GithubLatestAPI)
@@ -1434,11 +1482,10 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 简单对比版本号
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
 
-	hasUpdate := remoteVer != currentVer // 简单对比：只要字符串不同就提示更新 (简化逻辑)
+	hasUpdate := remoteVer != currentVer 
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
@@ -1450,10 +1497,8 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
 
-	// [修改] 自动检测存在的服务名进行重启 (relay 或 gorelay)
 	services := []string{"relay", "gorelay"}
 
-	// 1. 尝试 Systemd
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
@@ -1465,7 +1510,6 @@ func doRestart() {
 		}
 	}
 
-	// 2. 尝试 OpenRC
 	if _, err := os.Stat("/etc/init.d"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
@@ -1477,7 +1521,6 @@ func doRestart() {
 		}
 	}
 
-	// 3. 直接二进制重启 (Standalone/Docker/Manual)
 	argv0, err := os.Executable()
 	if err != nil {
 		argv0 = os.Args[0]
@@ -1555,7 +1598,6 @@ func runAgent(name, masterAddr, token string) {
 				doSelfUninstall()
 				return
 			}
-			// --- Agent 接收更新指令 ---
 			if msg.Type == "upgrade" {
 				log.Println("收到更新指令，开始执行自我更新...")
 				if err := performSelfUpdate(); err == nil {
@@ -1564,7 +1606,6 @@ func runAgent(name, masterAddr, token string) {
 					log.Printf("更新失败: %v", err)
 				}
 			}
-			// ------------------------
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
@@ -1572,19 +1613,16 @@ func runAgent(name, masterAddr, token string) {
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
-
-					// [保留] IP 变动热更新：强制更新内存中的目标地址
 					activeTargets.Store(t.ID, t.Target)
 
 					if oldVal, loaded := activeTasks.LoadOrStore(t.ID, t); loaded {
 						oldTask := oldVal.(ForwardTask)
-						// 核心修复：检查关键配置是否发生变化，若变化则重启该代理
-						if oldTask.Protocol != t.Protocol || oldTask.Listen != t.Listen || oldTask.SpeedLimit != t.SpeedLimit {
+						if oldTask.Protocol != t.Protocol || oldTask.Listen != t.Listen || oldTask.SpeedLimit != t.SpeedLimit || oldTask.LBStrategy != t.LBStrategy {
 							if closeFunc, ok := runningListeners.Load(t.ID); ok {
-								closeFunc.(func())() // 关闭旧的端口监听
+								closeFunc.(func())() 
 							}
-							activeTasks.Store(t.ID, t) // 更新内存中的任务配置
-							startProxy(t)              // 使用新配置重新启动代理
+							activeTasks.Store(t.ID, t) 
+							startProxy(t)              
 						}
 					} else {
 						agentTraffic.Store(t.ID, &TrafficCounter{})
@@ -1601,6 +1639,7 @@ func runAgent(name, masterAddr, token string) {
 						agentUserCounts.Delete(k)
 						activeTargets.Delete(k)
 						activeTasks.Delete(k)
+						rrCounters.Delete(k) 
 					}
 					return true
 				})
@@ -1610,12 +1649,9 @@ func runAgent(name, masterAddr, token string) {
 	}
 }
 
-// doPing 使用系统 Ping 命令检测目标主机存活 (耗时作为延迟参考)
 func doPing(address string) (int64, bool) {
-	// 去掉端口号，Ping 只需要 IP 或域名
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		// 如果没有端口号（本身就是纯 IP），直接用
 		if strings.Contains(err.Error(), "missing port") {
 			host = address
 		} else {
@@ -1624,18 +1660,13 @@ func doPing(address string) (int64, bool) {
 	}
 
 	var cmd *exec.Cmd
-	// 根据系统不同构建命令
 	if runtime.GOOS == "windows" {
-		// Windows: -n 1 (次数), -w 1000 (超时ms)
 		cmd = exec.Command("ping", "-n", "1", "-w", "1000", host)
 	} else {
-		// Linux/Mac: -c 1 (次数), -W 1 (超时s)
 		cmd = exec.Command("ping", "-c", "1", "-W", "1", host)
 	}
 
-	// 记录开始时间
 	start := time.Now()
-	// 执行命令 (如果目标不可达，Run() 会返回 error)
 	err = cmd.Run()
 	latency := time.Since(start).Milliseconds()
 
@@ -1648,14 +1679,13 @@ func doPing(address string) (int64, bool) {
 func checkTargetHealth(conn net.Conn) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
-		// 1. 获取检测模式
 		checkMode := "tcp"
 		if tVal, ok := activeTasks.Load(key); ok {
 			if t, ok := tVal.(ForwardTask); ok {
 				if t.Protocol == "udp" {
-					checkMode = "ping" // 纯 UDP -> 只测 Ping
+					checkMode = "ping"
 				} else if t.Protocol == "both" {
-					checkMode = "mixed" // TCP+UDP -> 混合双打
+					checkMode = "mixed" 
 				}
 			}
 		}
@@ -1672,14 +1702,9 @@ func checkTargetHealth(conn net.Conn) {
 			var success bool
 			var lat int64
 
-			// 2. 根据模式执行检测
 			if checkMode == "ping" {
-				// --- 模式 A: 只测 Ping (适用于纯 UDP) ---
 				lat, success = doPing(target)
-
 			} else if checkMode == "mixed" {
-				// --- 模式 B: 混合检测 (适用于 Both) ---
-				// 第一步：先尝试 TCP (最准)
 				start := time.Now()
 				c, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err == nil {
@@ -1687,12 +1712,9 @@ func checkTargetHealth(conn net.Conn) {
 					lat = time.Since(start).Milliseconds()
 					success = true
 				} else {
-					// 第二步：TCP 失败了？别急，可能是纯 UDP 节点，试一下 Ping
 					lat, success = doPing(target)
 				}
-
 			} else {
-				// --- 模式 C: 只测 TCP (适用于纯 TCP) ---
 				start := time.Now()
 				c, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err == nil {
@@ -1704,14 +1726,13 @@ func checkTargetHealth(conn net.Conn) {
 				}
 			}
 
-			// 3. 记录结果
 			if success {
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
 				}
-				targetHealthMap.Store(target, true)
+				targetHealthMap.Store(target, lat)
 			} else {
-				targetHealthMap.Store(target, false)
+				targetHealthMap.Store(target, int64(-1))
 			}
 		}
 
@@ -1747,16 +1768,14 @@ func (t *IpTracker) Remove(addr string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// 关键修复：检查该 Host 是否确实存在于 map 中
 	if count, exists := t.refs[host]; !exists || count <= 0 {
-		return // 如果已经不存在或计数为0，直接忽略，避免重复扣减
+		return 
 	}
 
 	t.refs[host]--
 
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
-		// 防御性编程：确保不会减成负数
 		if atomic.LoadInt64(t.count) > 0 {
 			atomic.AddInt64(t.count, -1)
 		}
@@ -1811,8 +1830,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					// [保留] IP 动态获取，修复旧 IP 问题
-					pipeTCP(conn, t.ID, t.SpeedLimit)
+					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) 
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -1831,49 +1849,105 @@ func startProxy(t ForwardTask) {
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
-			// [保留] IP 动态获取
-			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit)
+			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit, t.LBStrategy)
 		}()
 	}
 }
 
-// [保留] IP 热更新逻辑
-func pipeTCP(src net.Conn, tid string, limit int64) {
+func selectTarget(tid string, targets []string, strategy string) string {
+	var valid []string
+	var latencies []int64
+
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if v, ok := targetHealthMap.Load(t); ok {
+			lat := v.(int64)
+			if lat >= 0 { 
+				valid = append(valid, t)
+				latencies = append(latencies, lat)
+			}
+		}
+	}
+
+	if len(valid) == 0 {
+		valid = targets
+		latencies = make([]int64, len(targets)) 
+	}
+
+	if len(valid) == 1 {
+		return valid[0]
+	}
+
+	switch strategy {
+	case "rr": 
+		v, _ := rrCounters.LoadOrStore(tid, new(uint64))
+		c := v.(*uint64)
+		idx := atomic.AddUint64(c, 1) % uint64(len(valid))
+		return valid[idx]
+
+	case "least_conn": 
+		var best string
+		var minConn int64 = -1
+		for _, t := range valid {
+			v, _ := connCounters.LoadOrStore(t, new(int64))
+			c := atomic.LoadInt64(v.(*int64))
+			if minConn == -1 || c < minConn {
+				minConn = c
+				best = t
+			}
+		}
+		if best == "" { best = valid[0] }
+		return best
+
+	case "fastest": 
+		var best string
+		var minLat int64 = -1
+		for i, t := range valid {
+			lat := latencies[i]
+			if minLat == -1 || lat < minLat {
+				minLat = lat
+				best = t
+			}
+		}
+		if best == "" { best = valid[0] }
+		return best
+
+	default: 
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(valid))))
+		return valid[n.Int64()]
+	}
+}
+
+func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	defer src.Close()
 
-	// [保留] 每次连接时，从 activeTargets 获取最新的 Target IP
 	var targetStr string
 	if v, ok := activeTargets.Load(tid); ok {
 		targetStr = v.(string)
 	} else {
-		return // 任务可能已被删除
+		return 
 	}
 
 	allTargets := strings.Split(targetStr, ",")
-	var candidates []string
-	for _, t := range allTargets {
-		t = strings.TrimSpace(t)
-		if status, ok := targetHealthMap.Load(t); ok && status.(bool) {
-			candidates = append(candidates, t)
-		}
-	}
-	if len(candidates) == 0 {
-		candidates = allTargets
-	}
-	randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
-	dst, err := net.DialTimeout("tcp", strings.TrimSpace(candidates[randIdx.Int64()]), 2*time.Second)
+	bestTarget := selectTarget(tid, allTargets, strategy)
+
+	vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
+	atomic.AddInt64(vConn.(*int64), 1)
+	defer atomic.AddInt64(vConn.(*int64), -1) 
+
+	dst, err := net.DialTimeout("tcp", bestTarget, 2*time.Second)
 	if err != nil {
 		return
 	}
 	defer dst.Close()
+	
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx, limit)
 	copyCount(src, dst, &cnt.Rx, limit)
 }
 
-// [保留] IP 热更新逻辑
-func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
+func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
 	udpSessions := &sync.Map{}
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
@@ -1910,7 +1984,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
 		} else {
-			// [保留] 每次建立新 UDP Session 时，获取最新的 Target IP
+			
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
@@ -1918,18 +1992,23 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 				continue
 			}
 			targets := strings.Split(currentTargetStr, ",")
+			
+			bestTarget := selectTarget(tid, targets, strategy)
 
-			randIdx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(targets))))
-			dstAddr, _ := net.ResolveUDPAddr("udp", strings.TrimSpace(targets[randIdx.Int64()]))
+			vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
+			atomic.AddInt64(vConn.(*int64), 1)
+
+			dstAddr, _ := net.ResolveUDPAddr("udp", bestTarget)
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
+				atomic.AddInt64(vConn.(*int64), -1)
 				continue
 			}
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
-			go func(c *net.UDPConn, sa *net.UDPAddr, k string) {
+			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
 				b := *bPtr
@@ -1940,12 +2019,13 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64) {
 						c.Close()
 						udpSessions.Delete(k)
 						tracker.Remove(k)
+						atomic.AddInt64(vConn.(*int64), -1) 
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
 					atomic.AddInt64(&cnt.Rx, int64(m))
 				}
-			}(newConn, srcAddr, sAddr)
+			}(newConn, srcAddr, sAddr, bestTarget)
 		}
 	}
 }
@@ -2016,13 +2096,13 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx FROM rules")
+	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy FROM rules")
 	if err == nil {
 		defer rRows.Close()
 		for rRows.Next() {
 			var r LogicalRule
 			var d int
-			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx)
+			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx, &r.LBStrategy)
 			r.Disabled = (d == 1)
 			rules = append(rules, r)
 		}
@@ -2061,8 +2141,8 @@ func saveConfigNoLock() {
 		if r.Disabled {
 			d = 1
 		}
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx)
+		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy)
 	}
 	_ = tx.Commit()
 }
@@ -2228,12 +2308,10 @@ button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
 </form>
 
 <script>
-    // 初始化图标
     document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     });
 
-    // 切换主题逻辑
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
@@ -2285,24 +2363,18 @@ const dashboardHtml = `
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; outline: none; }
 body { margin: 0; font-family: var(--font-main); background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; font-size: 14px; letter-spacing: -0.01em; transition: background 0.3s; }
 
-/* 增强背景装饰层 (圆形、星星图案) - 高对比度调整 */
 .bg-decor { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; overflow: hidden; }
-.shape { position: absolute; opacity: 0.15; } /* 基础不透明度提升至 0.15 */
-[data-theme="dark"] .shape { opacity: 0.12; } /* 深色模式下不透明度提升至 0.12 */
-
+.shape { position: absolute; opacity: 0.15; } 
+[data-theme="dark"] .shape { opacity: 0.12; } 
 .shape-circle { border-radius: 50%; background: var(--primary); }
 .shape-star { background: var(--text-sub); clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
 
-/* 具体的图形定位与动画 - 增加可见度 */
-.s1 { top: 10%; left: 5%; width: 300px; height: 300px; background: linear-gradient(45deg, var(--primary), var(--success)); filter: blur(60px); opacity: 0.2; } /* 渐变色块增强 */
+.s1 { top: 10%; left: 5%; width: 300px; height: 300px; background: linear-gradient(45deg, var(--primary), var(--success)); filter: blur(60px); opacity: 0.2; } 
 .s2 { bottom: 15%; right: -5%; width: 400px; height: 400px; background: linear-gradient(to top, var(--primary), #8b5cf6); filter: blur(80px); opacity: 0.2; }
-
-.shape-c1 { top: 15%; right: 15%; width: 80px; height: 80px; border: 4px solid var(--primary); background: transparent; opacity: 0.25; animation: float 10s ease-in-out infinite; } /* 圆环增强 */
+.shape-c1 { top: 15%; right: 15%; width: 80px; height: 80px; border: 4px solid var(--primary); background: transparent; opacity: 0.25; animation: float 10s ease-in-out infinite; } 
 .shape-st1 { bottom: 10%; left: 8%; width: 120px; height: 120px; opacity: 0.15; background: var(--text-main); transform: rotate(-15deg); animation: float 12s ease-in-out infinite reverse; }
 .shape-c2 { bottom: 30%; right: 25%; width: 40px; height: 40px; background: var(--warning); opacity: 0.2; animation: float 8s ease-in-out infinite 1s; }
 .shape-st2 { top: 20%; left: 20%; width: 30px; height: 30px; background: var(--success); opacity: 0.25; animation: float 14s ease-in-out infinite 2s; }
-
-/* 新增的更多图形 - 同样增强可见度 */
 .shape-c3 { top: 40%; left: 15%; width: 60px; height: 60px; border: 2px dashed var(--text-sub); background: transparent; opacity: 0.15; animation: rotate 30s linear infinite; }
 .shape-st3 { top: 5%; left: 50%; width: 25px; height: 25px; background: var(--danger); opacity: 0.2; animation: float 18s ease-in-out infinite 3s; }
 .shape-c4 { bottom: 20%; left: 40%; width: 20px; height: 20px; background: var(--primary); opacity: 0.2; animation: float 10s infinite; }
@@ -2363,14 +2435,10 @@ h3 { margin: 0 0 20px 0; font-size: 15px; color: var(--text-main); font-weight: 
 .stat-trend { font-size: 12px; display: flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text-sub); opacity: 0.8; }
 .stat-item i.bg-icon { position: absolute; right: 20px; bottom: 20px; font-size: 64px; opacity: 0.03; transform: rotate(-10deg); pointer-events: none; color: var(--text-main); }
 
-/* 核心布局修复：移动端强制单列堆叠，确保图表卡片全宽 */
 .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; margin-bottom: 24px; }
 .chart-box { height: 320px; width: 100%; position: relative; }
-@media (max-width: 1024px) { 
-    .dashboard-grid { grid-template-columns: 100%; } /* 强制单列 */
-}
+@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 100%; } }
 
-/* 关键修复：表格容器最小宽度，确保移动端不重叠，启用横向滚动 */
 .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--bg-card); }
 .table-container table { min-width: 600px; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; white-space: nowrap; }
@@ -2378,6 +2446,15 @@ th { text-align: left; padding: 14px 20px; color: var(--text-sub); font-size: 12
 td { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 14px; color: var(--text-main); vertical-align: middle; }
 tr:last-child td { border-bottom: none; }
 tr:hover td { background: var(--input-bg); }
+
+/* 复选框美化 */
+.custom-cb { display: flex; align-items: center; cursor: pointer; margin:0; }
+.custom-cb input { position: absolute; opacity: 0; cursor: pointer; height: 0; width: 0; }
+.checkmark { display: inline-block; width: 18px; height: 18px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px; transition: .2s; position: relative; }
+.custom-cb:hover input ~ .checkmark { border-color: var(--primary); }
+.custom-cb input:checked ~ .checkmark { background: var(--primary); border-color: var(--primary); }
+.checkmark:after { content: ""; position: absolute; display: none; left: 6px; top: 2px; width: 4px; height: 9px; border: solid white; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.custom-cb input:checked ~ .checkmark:after { display: block; }
 
 .mini-chart-container { width: 100px; height: 32px; display: inline-block; vertical-align: middle; }
 .speed-text { font-family: var(--font-mono); font-size: 12px; font-weight: 600; display: inline-block; width: 70px; text-align: right; }
@@ -2444,6 +2521,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 10px 20px; border-radius: 50px; font-size: 13px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 .toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 80px; }
+
+/* 批量操作悬浮条样式 */
+.batch-bar { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(100px); background: var(--bg-card); box-shadow: 0 20px 40px rgba(0,0,0,0.3); padding: 12px 24px; border-radius: 50px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--primary); z-index: 1000; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+.batch-bar.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+[data-theme="dark"] .batch-bar { border-color: var(--border); background: #18181b; }
 </style>
 </head>
 <body>
@@ -2570,9 +2652,18 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         <div class="form-group"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" placeholder="1024-65535" required></div>
                         <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-group"><label>目标 IP (支持多IP/域名)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1,[ IPV6 ]" required></div>
+                        <div class="form-group"><label>目标 IP (逗号分隔多IP)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1" required></div>
                         <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
 
+                        <div class="form-group">
+                            <label>负载均衡策略 <i class="ri-question-line" title="多目标IP时生效" style="color:var(--text-sub)"></i></label>
+                            <select name="lb_strategy">
+                                <option value="random">随机分配 (Random)</option>
+                                <option value="rr">轮询分配 (Round Robin)</option>
+                                <option value="least_conn">最少连接 (Least Conn)</option>
+                                <option value="fastest">最低延迟 (Fastest Ping/TCP)</option>
+                            </select>
+                        </div>
                         <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
                         <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
@@ -2581,17 +2672,31 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 </form>
             </div>
 
+            <div id="batch-bar" class="batch-bar">
+                <span style="font-weight:600;font-size:14px">已选择 <b id="batch-count" style="color:var(--primary);font-size:16px">0</b> 项</span>
+                <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
+                <button class="btn success" onclick="batchAction('enable')"><i class="ri-play-fill"></i> 启动</button>
+                <button class="btn warning" onclick="batchAction('disable')"><i class="ri-pause-fill"></i> 暂停</button>
+                <button class="btn secondary" onclick="batchAction('reset')"><i class="ri-refresh-line"></i> 清零</button>
+                <button class="btn danger" onclick="batchAction('delete')"><i class="ri-delete-bin-line"></i> 删除</button>
+            </div>
+
             <div class="card">
                 <h3><i class="ri-list-settings-line"></i> 规则列表</h3>
                 <div class="table-container">
                     <table>
-                        <thead><tr><th>链路信息</th><th>目标地址 & 延迟</th><th>流量监控</th><th>状态</th><th>操作</th></tr></thead>
+                        <thead>
+                            <tr>
+                                <th style="width:40px"><label class="custom-cb"><input type="checkbox" id="cb-all" onclick="toggleAllRules(this)"><span class="checkmark"></span></label></th>
+                                <th>链路信息</th><th>目标地址 & 延迟</th><th>流量监控</th><th>状态</th><th>操作</th>
+                            </tr>
+                        </thead>
                         <tbody>
                         {{$currentGroup := "INIT_h7&^"}}
                         {{range .Rules}}
                         {{if ne .Group $currentGroup}}
                             <tr class="group-header" onclick="toggleGroup(this)" data-group="{{.Group}}">
-                                <td colspan="5">
+                                <td colspan="6">
                                     <i class="ri-arrow-down-s-line group-icon"></i>
                                     <i class="ri-folder-3-fill" style="margin-right:4px"></i> 
                                     {{if .Group}}{{.Group}}{{else}}默认分组{{end}}
@@ -2600,6 +2705,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             {{$currentGroup = .Group}}
                         {{end}}
                         <tr class="rule-row" data-group="{{.Group}}" style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
+                            <td onclick="event.stopPropagation()"><label class="custom-cb"><input type="checkbox" class="rule-cb" value="{{.ID}}" onchange="updateBatchUI()"><span class="checkmark"></span></label></td>
                             <td>
                                 <div style="font-weight:600;font-size:14px;margin-bottom:4px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
@@ -2611,6 +2717,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <td>
                                 <div style="font-family:var(--font-mono);font-size:13px">{{.TargetIP}}:{{.TargetPort}}</div>
                                 <div style="font-size:12px;margin-top:4px;display:flex;align-items:center;gap:5px;color:var(--text-sub)" id="rule-latency-{{.ID}}"><i class="ri-loader-4-line ri-spin"></i> 检测中...</div>
+                                <div style="font-size:11px;color:var(--primary);margin-top:4px"><i class="ri-guide-line"></i> {{if eq .LBStrategy "rr"}}轮询{{else if eq .LBStrategy "least_conn"}}最少连接{{else if eq .LBStrategy "fastest"}}最低延迟{{else}}随机负载{{end}}</div>
                             </td>
                             <td style="min-width:180px">
                                 <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
@@ -2632,7 +2739,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <td>
                                 <div style="display:flex;gap:6px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.LBStrategy}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -2839,6 +2946,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (IP/域名)</label><input name="target_ip" id="e_tip"></div>
                 <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
+                <div class="form-group">
+                    <label>负载均衡策略</label>
+                    <select name="lb_strategy" id="e_lb">
+                        <option value="random">随机分配 (Random)</option>
+                        <option value="rr">轮询分配 (Round Robin)</option>
+                        <option value="least_conn">最少连接 (Least Conn)</option>
+                        <option value="fastest">最低延迟 (Fastest Ping/TCP)</option>
+                    </select>
+                </div>
                 <div class="form-group"><label>协议</label><select name="protocol" id="e_proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select></div>
                 <div class="form-group"><label>限额 (GB)</label><input type="number" step="0.1" name="traffic_limit" id="e_limit"></div>
                 <div class="form-group"><label>限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" id="e_speed"></div>
@@ -2954,6 +3070,51 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         else { header.classList.remove('group-collapsed'); rows.forEach(r => r.style.display = 'table-row'); }
     }
 
+    // [更新] 全选与更新浮动条逻辑
+    function toggleAllRules(source) {
+        const checkboxes = document.querySelectorAll('.rule-cb');
+        for(let i=0; i<checkboxes.length; i++) {
+            if(checkboxes[i].closest('tr').style.display !== 'none') {
+                checkboxes[i].checked = source.checked;
+            }
+        }
+        updateBatchUI();
+    }
+
+    function updateBatchUI() {
+        const checked = document.querySelectorAll('.rule-cb:checked');
+        const bar = document.getElementById('batch-bar');
+        if (document.getElementById('batch-count')) {
+            document.getElementById('batch-count').innerText = checked.length;
+        }
+        if (checked.length > 0) { 
+            bar.classList.add('show'); 
+        } else { 
+            bar.classList.remove('show'); 
+            const cbAll = document.getElementById('cb-all');
+            if (cbAll) cbAll.checked = false; 
+        }
+    }
+
+    function batchAction(action) {
+        const cbs = document.querySelectorAll('.rule-cb:checked');
+        if(cbs.length === 0) return;
+        let ids = [];
+        cbs.forEach(cb => ids.push(cb.value));
+
+        let actionName = action === 'enable' ? '启动' : action === 'disable' ? '暂停' : action === 'reset' ? '重置流量' : '删除';
+        showConfirm("批量" + actionName, "确定要对选中的 <b>"+cbs.length+"</b> 项规则执行" + actionName + "吗？", action === 'delete' ? 'danger' : 'warning', () => {
+            const formData = new URLSearchParams();
+            formData.append('action', action);
+            formData.append('ids', ids.join(','));
+
+            fetch('/batch', { method: 'POST', body: formData, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+            .then(r => r.json()).then(d => {
+                if(d.success) { showToast("操作成功", "success"); setTimeout(() => location.reload(), 800); }
+            }).catch(() => showToast("操作失败", "warn"));
+        });
+    }
+
     function copyText(txt) {
         if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(() => showToast("已复制", "success"));
         else {
@@ -2973,11 +3134,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         });
     }
 
-    // [新增] 恢复配置数据交互
     function restoreConfig(input) {
         if (!input.files || input.files.length === 0) return;
         
-        // 提前保存 file 引用并清空 input，避免用户取消或下次选同名文件时无法触发 onchange
         const file = input.files[0];
         input.value = ''; 
         
@@ -2991,7 +3150,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             }).then(r => r.json()).then(d => {
                 if (d.success) {
                     showToast("恢复成功，面板重启中...", "success");
-                    // 覆盖成功后，调用现有的接口重启面板以重新加载数据内存
                     fetch('/restart', {method: 'POST'}).then(() => {
                         setTimeout(() => location.reload(), 3000);
                     });
@@ -3088,7 +3246,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
 
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
@@ -3100,6 +3258,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('e_proto').value = proto;
         document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
         document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
+        if(document.getElementById('e_lb')) document.getElementById('e_lb').value = lb || 'random';
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
