@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.51" // 高级负载均衡 + 底部悬浮批量操作
+	AppVersion      = "v3.0.52" // 加入高级负载均衡与批量操作
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -82,7 +82,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
-	LBStrategy   string `json:"lb_strategy"`
+	LBStrategy   string `json:"lb_strategy"` // 新增：负载均衡策略
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -122,7 +122,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
-	LBStrategy string `json:"lb_strategy"` 
+	LBStrategy string `json:"lb_strategy"` // 新增向下发给 Agent
 }
 
 type TrafficReport struct {
@@ -198,15 +198,15 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
-	activeTargets    sync.Map 
+	activeTargets    sync.Map // 存储最新的目标地址
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
-	targetHealthMap  sync.Map 
+	targetHealthMap  sync.Map // 存储延迟: string -> int64
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
 
-	rrCounters   sync.Map 
-	connCounters sync.Map 
+	rrCounters   sync.Map // 轮询计数器 (tid -> *uint64)
+	connCounters sync.Map // 最少连接数追踪器 (target -> *int64)
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
@@ -269,11 +269,12 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
+	// 静默执行升级，兼容老版本
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
 }
 
-// --- 基础工具函数 ---
+// --- 基础工具函数 --- (省略部分保持原样，核心无改动)
 
 func generateSalt() string {
 	b := make([]byte, 16)
@@ -354,6 +355,7 @@ func autoGenerateCert() error {
 	return nil
 }
 
+// --- 通用更新逻辑 (Master/Agent 共享) ---
 func performSelfUpdate() error {
 	arch := runtime.GOARCH
 	osName := runtime.GOOS
@@ -529,7 +531,6 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 			log.Println("已通过 nohup 启动")
 		}
 	} else {
-		// 卸载
 		if isSys {
 			exec.Command("systemctl", "disable", svcName).Run()
 			exec.Command("systemctl", "stop", svcName).Run()
@@ -678,7 +679,7 @@ func runMaster() {
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
 	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
-	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) 
+	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) // [新增] 批量操作路由
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
@@ -946,7 +947,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr",
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr", // Entry 节点通常只有 1 个目标，写死 rr 即可
 			})
 		}
 	}
@@ -1304,6 +1305,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
+// [新增] 批量操作
 func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
@@ -1639,7 +1641,7 @@ func runAgent(name, masterAddr, token string) {
 						agentUserCounts.Delete(k)
 						activeTargets.Delete(k)
 						activeTasks.Delete(k)
-						rrCounters.Delete(k) 
+						rrCounters.Delete(k) // 清理轮询计数
 					}
 					return true
 				})
@@ -1726,6 +1728,7 @@ func checkTargetHealth(conn net.Conn) {
 				}
 			}
 
+			// [修改] 健康检查存储具体延迟数值，以便 Fastest 策略使用
 			if success {
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
@@ -1830,7 +1833,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) 
+					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) // 传入策略
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -1854,21 +1857,24 @@ func startProxy(t ForwardTask) {
 	}
 }
 
+// [新增] 核心负载均衡目标选择器
 func selectTarget(tid string, targets []string, strategy string) string {
 	var valid []string
 	var latencies []int64
 
+	// 过滤出健康的节点
 	for _, t := range targets {
 		t = strings.TrimSpace(t)
 		if v, ok := targetHealthMap.Load(t); ok {
 			lat := v.(int64)
-			if lat >= 0 { 
+			if lat >= 0 { // >=0 表示健康
 				valid = append(valid, t)
 				latencies = append(latencies, lat)
 			}
 		}
 	}
 
+	// 防御性：如果全部掉线或还未检测完成，回退到全部节点随机
 	if len(valid) == 0 {
 		valid = targets
 		latencies = make([]int64, len(targets)) 
@@ -1879,13 +1885,13 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 
 	switch strategy {
-	case "rr": 
+	case "rr": // 轮询
 		v, _ := rrCounters.LoadOrStore(tid, new(uint64))
 		c := v.(*uint64)
 		idx := atomic.AddUint64(c, 1) % uint64(len(valid))
 		return valid[idx]
 
-	case "least_conn": 
+	case "least_conn": // 最少连接
 		var best string
 		var minConn int64 = -1
 		for _, t := range valid {
@@ -1899,7 +1905,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		if best == "" { best = valid[0] }
 		return best
 
-	case "fastest": 
+	case "fastest": // 最低延迟
 		var best string
 		var minLat int64 = -1
 		for i, t := range valid {
@@ -1912,7 +1918,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		if best == "" { best = valid[0] }
 		return best
 
-	default: 
+	default: // "random" 默认
 		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(valid))))
 		return valid[n.Int64()]
 	}
@@ -1931,9 +1937,10 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	allTargets := strings.Split(targetStr, ",")
 	bestTarget := selectTarget(tid, allTargets, strategy)
 
+	// 最少连接数追踪 - TCP 建立
 	vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 	atomic.AddInt64(vConn.(*int64), 1)
-	defer atomic.AddInt64(vConn.(*int64), -1) 
+	defer atomic.AddInt64(vConn.(*int64), -1) // 断开时减少连接数
 
 	dst, err := net.DialTimeout("tcp", bestTarget, 2*time.Second)
 	if err != nil {
@@ -1993,8 +2000,10 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			}
 			targets := strings.Split(currentTargetStr, ",")
 			
+			// UDP 也应用负载均衡策略
 			bestTarget := selectTarget(tid, targets, strategy)
 
+			// UDP 伪连接数追踪 (以 Session 为单位)
 			vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 			atomic.AddInt64(vConn.(*int64), 1)
 
@@ -2019,7 +2028,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 						c.Close()
 						udpSessions.Delete(k)
 						tracker.Remove(k)
-						atomic.AddInt64(vConn.(*int64), -1) 
+						atomic.AddInt64(vConn.(*int64), -1) // 清理 UDP Session 追踪数
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
@@ -2096,6 +2105,7 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
+	// 读取时注意增加 lb_strategy 字段
 	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy FROM rules")
 	if err == nil {
 		defer rRows.Close()
@@ -2311,7 +2321,6 @@ button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
     document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     });
-
     function toggleTheme() {
         const html = document.documentElement;
         const curr = html.getAttribute('data-theme');
@@ -2364,29 +2373,15 @@ const dashboardHtml = `
 body { margin: 0; font-family: var(--font-main); background: var(--bg-body); color: var(--text-main); height: 100vh; display: flex; overflow: hidden; font-size: 14px; letter-spacing: -0.01em; transition: background 0.3s; }
 
 .bg-decor { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; overflow: hidden; }
-.shape { position: absolute; opacity: 0.15; } 
-[data-theme="dark"] .shape { opacity: 0.12; } 
+.shape { position: absolute; opacity: 0.15; }
+[data-theme="dark"] .shape { opacity: 0.12; }
 .shape-circle { border-radius: 50%; background: var(--primary); }
 .shape-star { background: var(--text-sub); clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); }
 
-.s1 { top: 10%; left: 5%; width: 300px; height: 300px; background: linear-gradient(45deg, var(--primary), var(--success)); filter: blur(60px); opacity: 0.2; } 
+.s1 { top: 10%; left: 5%; width: 300px; height: 300px; background: linear-gradient(45deg, var(--primary), var(--success)); filter: blur(60px); opacity: 0.2; }
 .s2 { bottom: 15%; right: -5%; width: 400px; height: 400px; background: linear-gradient(to top, var(--primary), #8b5cf6); filter: blur(80px); opacity: 0.2; }
-.shape-c1 { top: 15%; right: 15%; width: 80px; height: 80px; border: 4px solid var(--primary); background: transparent; opacity: 0.25; animation: float 10s ease-in-out infinite; } 
-.shape-st1 { bottom: 10%; left: 8%; width: 120px; height: 120px; opacity: 0.15; background: var(--text-main); transform: rotate(-15deg); animation: float 12s ease-in-out infinite reverse; }
-.shape-c2 { bottom: 30%; right: 25%; width: 40px; height: 40px; background: var(--warning); opacity: 0.2; animation: float 8s ease-in-out infinite 1s; }
-.shape-st2 { top: 20%; left: 20%; width: 30px; height: 30px; background: var(--success); opacity: 0.25; animation: float 14s ease-in-out infinite 2s; }
-.shape-c3 { top: 40%; left: 15%; width: 60px; height: 60px; border: 2px dashed var(--text-sub); background: transparent; opacity: 0.15; animation: rotate 30s linear infinite; }
-.shape-st3 { top: 5%; left: 50%; width: 25px; height: 25px; background: var(--danger); opacity: 0.2; animation: float 18s ease-in-out infinite 3s; }
-.shape-c4 { bottom: 20%; left: 40%; width: 20px; height: 20px; background: var(--primary); opacity: 0.2; animation: float 10s infinite; }
-.shape-st4 { top: 60%; right: 10%; width: 50px; height: 50px; background: var(--success); opacity: 0.15; animation: float 22s infinite reverse; }
-.shape-c5 { top: 80%; left: 5%; width: 100px; height: 100px; border: 6px solid var(--danger); background: transparent; opacity: 0.1; animation: float 25s infinite; }
-.shape-st5 { top: 8%; right: 30%; width: 35px; height: 35px; background: var(--text-main); opacity: 0.15; animation: float 13s infinite; }
-.shape-c6 { bottom: 5%; left: 60%; width: 150px; height: 150px; border: 1px solid var(--text-sub); background: transparent; opacity: 0.1; animation: rotate 45s linear infinite reverse; }
-.shape-st6 { bottom: 40%; right: 40%; width: 15px; height: 15px; background: var(--warning); opacity: 0.3; animation: float 9s infinite; }
-.shape-c7 { top: 30%; left: 35%; width: 10px; height: 10px; background: var(--success); opacity: 0.3; animation: float 7s infinite; }
 
 @keyframes float { 0% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-15px) rotate(5deg); } 100% { transform: translateY(0px) rotate(0deg); } }
-@keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -2522,10 +2517,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 10px 20px; border-radius: 50px; font-size: 13px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 .toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 80px; }
 
-/* 批量操作悬浮条样式 */
-.batch-bar { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(100px); background: var(--bg-card); box-shadow: 0 20px 40px rgba(0,0,0,0.3); padding: 12px 24px; border-radius: 50px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--primary); z-index: 1000; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
-.batch-bar.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
-[data-theme="dark"] .batch-bar { border-color: var(--border); background: #18181b; }
+/* 批量操作浮动条 */
+.batch-bar { display: none; background: var(--card-bg); backdrop-filter: blur(10px); padding: 12px 20px; border-radius: 12px; margin-bottom: 20px; align-items: center; gap: 12px; border: 1px solid var(--primary); box-shadow: 0 10px 25px -5px rgba(99,102,241,0.2); animation: fadeIn 0.3s; }
+.batch-bar.active { display: flex; }
 </style>
 </head>
 <body>
@@ -2533,20 +2527,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 <div class="bg-decor">
     <div class="shape shape-circle s1"></div>
     <div class="shape shape-circle s2"></div>
-    <div class="shape shape-circle shape-c1"></div>
-    <div class="shape shape-star shape-st1"></div>
-    <div class="shape shape-circle shape-c2"></div>
-    <div class="shape shape-star shape-st2"></div>
-    
-    <div class="shape shape-circle shape-c3"></div>
-    <div class="shape shape-star shape-st3"></div>
-    <div class="shape shape-circle shape-c4"></div>
-    <div class="shape shape-star shape-st4"></div>
-    <div class="shape shape-circle shape-c5"></div>
-    <div class="shape shape-star shape-st5"></div>
-    <div class="shape shape-circle shape-c6"></div>
-    <div class="shape shape-star shape-st6"></div>
-    <div class="shape shape-circle shape-c7"></div>
 </div>
 
 <div id="toast" class="toast"><i id="t-icon"></i><span id="t-msg"></span></div>
@@ -2673,12 +2653,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             </div>
 
             <div id="batch-bar" class="batch-bar">
-                <span style="font-weight:600;font-size:14px">已选择 <b id="batch-count" style="color:var(--primary);font-size:16px">0</b> 项</span>
-                <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
+                <span style="font-weight:600;font-size:14px;color:var(--primary)"><i class="ri-checkbox-multiple-line"></i> 已选择 <span id="sel-count" style="font-size:16px">0</span> 项</span>
                 <button class="btn success" onclick="batchAction('enable')"><i class="ri-play-fill"></i> 启动</button>
                 <button class="btn warning" onclick="batchAction('disable')"><i class="ri-pause-fill"></i> 暂停</button>
-                <button class="btn secondary" onclick="batchAction('reset')"><i class="ri-refresh-line"></i> 清零</button>
-                <button class="btn danger" onclick="batchAction('delete')"><i class="ri-delete-bin-line"></i> 删除</button>
+                <button class="btn secondary" onclick="batchAction('reset')"><i class="ri-refresh-line"></i> 重置流量</button>
+                <div style="flex:1"></div>
+                <button class="btn danger" onclick="batchAction('delete')"><i class="ri-delete-bin-line"></i> 批量删除</button>
             </div>
 
             <div class="card">
@@ -2944,7 +2924,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 <div class="form-group"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" id="e_eport"></div>
                 <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (IP/域名)</label><input name="target_ip" id="e_tip"></div>
+                <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (逗号分隔多IP)</label><input name="target_ip" id="e_tip"></div>
                 <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
                 <div class="form-group">
                     <label>负载均衡策略</label>
@@ -3001,26 +2981,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
         return {
             type: 'line',
-            data: {
-                labels: Array(15).fill(''),
-                datasets: [{
-                    data: Array(15).fill(0),
-                    borderColor: color,
-                    backgroundColor: ctxGrad,
-                    borderWidth: 1.5,
-                    pointRadius: 0,
-                    fill: true,
-                    tension: 0.4
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: false,
-                plugins: { legend: {display: false}, tooltip: {enabled: false} },
-                scales: { x: {display: false}, y: {display: false, min: 0} },
-                elements: { line: { borderJoinStyle: 'round' } }
-            }
+            data: { labels: Array(15).fill(''), datasets: [{ data: Array(15).fill(0), borderColor: color, backgroundColor: ctxGrad, borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.4 }] },
+            options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: {display: false}, tooltip: {enabled: false} }, scales: { x: {display: false}, y: {display: false, min: 0} }, elements: { line: { borderJoinStyle: 'round' } } }
         };
     }
 
@@ -3070,7 +3032,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         else { header.classList.remove('group-collapsed'); rows.forEach(r => r.style.display = 'table-row'); }
     }
 
-    // [更新] 全选与更新浮动条逻辑
+    // [新增] 批量操作全选与状态更新逻辑
     function toggleAllRules(source) {
         const checkboxes = document.querySelectorAll('.rule-cb');
         for(let i=0; i<checkboxes.length; i++) {
@@ -3082,18 +3044,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
 
     function updateBatchUI() {
-        const checked = document.querySelectorAll('.rule-cb:checked');
+        const cbs = document.querySelectorAll('.rule-cb:checked');
         const bar = document.getElementById('batch-bar');
-        if (document.getElementById('batch-count')) {
-            document.getElementById('batch-count').innerText = checked.length;
-        }
-        if (checked.length > 0) { 
-            bar.classList.add('show'); 
-        } else { 
-            bar.classList.remove('show'); 
-            const cbAll = document.getElementById('cb-all');
-            if (cbAll) cbAll.checked = false; 
-        }
+        document.getElementById('sel-count').innerText = cbs.length;
+        if(cbs.length > 0) { bar.classList.add('active'); } else { bar.classList.remove('active'); document.getElementById('cb-all').checked = false; }
     }
 
     function batchAction(action) {
@@ -3136,26 +3090,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
     function restoreConfig(input) {
         if (!input.files || input.files.length === 0) return;
-        
-        const file = input.files[0];
-        input.value = ''; 
-        
+        const file = input.files[0]; input.value = ''; 
         showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "danger", () => {
-            const formData = new FormData();
-            formData.append('db_file', file);
-            
-            fetch('/upload_config', {
-                method: 'POST',
-                body: formData
-            }).then(r => r.json()).then(d => {
-                if (d.success) {
-                    showToast("恢复成功，面板重启中...", "success");
-                    fetch('/restart', {method: 'POST'}).then(() => {
-                        setTimeout(() => location.reload(), 3000);
-                    });
-                } else {
-                    showToast("恢复失败: " + (d.error || "未知错误"), "warn");
-                }
+            const formData = new FormData(); formData.append('db_file', file);
+            fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
+                if (d.success) { showToast("恢复成功，面板重启中...", "success"); fetch('/restart', {method: 'POST'}).then(() => { setTimeout(() => location.reload(), 3000); }); } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
             }).catch(() => showToast("上传请求失败", "warn"));
         });
     }
@@ -3182,9 +3121,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
     function updateAgent(name) {
         showConfirm("更新节点", "确定要远程更新节点 <b>"+name+"</b> 吗？", "warning", () => {
-            fetch('/update_agent?name='+name, {method: 'POST'}).then(r => {
-                if(r.ok) showToast("指令已发送", "success"); else showToast("发送失败", "warn");
-            });
+            fetch('/update_agent?name='+name, {method: 'POST'}).then(r => { if(r.ok) showToast("指令已发送", "success"); else showToast("发送失败", "warn"); });
         });
     }
 
@@ -3269,57 +3206,32 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else showToast("验证码错误", "warn"); }); }
     function disable2FA() { showConfirm("关闭 2FA", "账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
-    // Chart.js Configuration
     Chart.defaults.font.family = "'Inter', sans-serif";
     Chart.defaults.color = '#94a3b8';
     
     var ctx = document.getElementById('trafficChart').getContext('2d');
     var txGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.2)');
-    txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
+    txGrad.addColorStop(0, 'rgba(139, 92, 246, 0.2)'); txGrad.addColorStop(1, 'rgba(139, 92, 246, 0)');
     
     var rxGrad = ctx.createLinearGradient(0, 0, 0, 300);
-    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.2)');
-    rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
+    rxGrad.addColorStop(0, 'rgba(6, 182, 212, 0.2)'); rxGrad.addColorStop(1, 'rgba(6, 182, 212, 0)');
 
     var chart = new Chart(ctx, {
         type: 'line',
-        data: {
-            labels: Array(30).fill(''),
-            datasets: [
-                { label: 'Tx', data: Array(30).fill(0), borderColor: '#8b5cf6', backgroundColor: txGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 },
-                { label: 'Rx', data: Array(30).fill(0), borderColor: '#06b6d4', backgroundColor: rxGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 }
-            ]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#f8fafc', bodyColor: '#cbd5e1', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 10, displayColors: true } },
-            scales: {
-                x: { display: false },
-                y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { callback: v => formatBytes(v)+'/s', font: {size: 10}, maxTicksLimit: 5 } }
-            },
-            interaction: { mode: 'nearest', axis: 'x', intersect: false }
-        }
+        data: { labels: Array(30).fill(''), datasets: [ { label: 'Tx', data: Array(30).fill(0), borderColor: '#8b5cf6', backgroundColor: txGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 }, { label: 'Rx', data: Array(30).fill(0), borderColor: '#06b6d4', backgroundColor: rxGrad, borderWidth: 2, pointRadius: 0, fill: true, tension: 0.4 } ] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#f8fafc', bodyColor: '#cbd5e1', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 10, displayColors: true } }, scales: { x: { display: false }, y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { callback: v => formatBytes(v)+'/s', font: {size: 10}, maxTicksLimit: 5 } } }, interaction: { mode: 'nearest', axis: 'x', intersect: false } }
     });
 
     var ctxPie = document.getElementById('pieChart').getContext('2d');
     var pieChart = new Chart(ctxPie, {
         type: 'doughnut',
-        data: {
-            labels: [],
-            datasets: [{ data: [], backgroundColor: ['#818cf8', '#f472b6', '#fbbf24', '#34d399', '#60a5fa'], borderWidth: 0, hoverOffset: 4 }]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, usePointStyle: true, padding: 20, font: {size: 11} } } },
-            cutout: '75%'
-        }
+        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#818cf8', '#f472b6', '#fbbf24', '#34d399', '#60a5fa'], borderWidth: 0, hoverOffset: 4 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, usePointStyle: true, padding: 20, font: {size: 11} } } }, cutout: '75%' }
     });
 
     function updateChartTheme(theme) {
         const gridColor = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
-        chart.options.scales.y.grid.color = gridColor;
-        chart.update();
+        chart.options.scales.y.grid.color = gridColor; chart.update();
     }
 
     function formatBytes(b) {
@@ -3327,10 +3239,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const u = 1024, i = Math.floor(Math.log(b)/Math.log(u));
         return parseFloat((b / Math.pow(u, i)).toFixed(2)) + " " + ["B","KB","MB","GB","TB"][i];
     }
-    function formatSpeed(b) {
-        if(b<=0) return "0 B/s";
-        return formatBytes(b)+"/s";
-    }
+    function formatSpeed(b) { if(b<=0) return "0 B/s"; return formatBytes(b)+"/s"; }
 
     function connectWS() {
         const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
@@ -3359,17 +3268,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             d.rules.forEach(r => {
                                 activeIds.add(r.id);
                                 let stx = 0, srx = 0;
-                                if (lastRuleStats[r.id]) {
-                                    stx = r.tx - lastRuleStats[r.id].tx;
-                                    srx = r.rx - lastRuleStats[r.id].rx;
-                                    if(stx < 0) stx = 0; if(srx < 0) srx = 0;
-                                }
+                                if (lastRuleStats[r.id]) { stx = r.tx - lastRuleStats[r.id].tx; srx = r.rx - lastRuleStats[r.id].rx; if(stx < 0) stx = 0; if(srx < 0) srx = 0; }
                                 lastRuleStats[r.id] = {tx: r.tx, rx: r.rx};
 
                                 let row = document.getElementById('rule-row-mon-' + r.id);
                                 if (!row) {
-                                    row = tbody.insertRow();
-                                    row.id = 'rule-row-mon-' + r.id;
+                                    row = tbody.insertRow(); row.id = 'rule-row-mon-' + r.id;
                                     row.innerHTML = '<td><div style="font-weight:600;font-size:13px;margin-bottom:2px">'+(r.name||'未命名')+'</div><div style="font-size:11px;color:var(--text-sub);font-family:var(--font-mono)">'+r.id.substring(0,8)+'...</div></td>'+
                                         '<td><div class="mini-chart-container"><canvas id="chart-tx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#8b5cf6" id="text-tx-'+r.id+'">0 B/s</div></td>'+
                                         '<td><div class="mini-chart-container"><canvas id="chart-rx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#06b6d4" id="text-rx-'+r.id+'">0 B/s</div></td>'+
@@ -3379,22 +3283,14 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                     const ctxRx = document.getElementById('chart-rx-'+r.id).getContext('2d');
                                     ruleCharts[r.id] = { tx: new Chart(ctxTx, createMiniChartConfig('#8b5cf6')), rx: new Chart(ctxRx, createMiniChartConfig('#06b6d4')) };
                                 } else {
-                                    document.getElementById('text-tx-'+r.id).innerText = formatSpeed(stx);
-                                    document.getElementById('text-rx-'+r.id).innerText = formatSpeed(srx);
-                                    document.getElementById('text-total-'+r.id).innerText = formatBytes(r.total);
+                                    document.getElementById('text-tx-'+r.id).innerText = formatSpeed(stx); document.getElementById('text-rx-'+r.id).innerText = formatSpeed(srx); document.getElementById('text-total-'+r.id).innerText = formatBytes(r.total);
                                 }
                                 const charts = ruleCharts[r.id];
-                                if (charts) {
-                                    charts.tx.data.datasets[0].data.push(stx); charts.tx.data.datasets[0].data.shift(); charts.tx.update('none');
-                                    charts.rx.data.datasets[0].data.push(srx); charts.rx.data.datasets[0].data.shift(); charts.rx.update('none');
-                                }
+                                if (charts) { charts.tx.data.datasets[0].data.push(stx); charts.tx.data.datasets[0].data.shift(); charts.tx.update('none'); charts.rx.data.datasets[0].data.push(srx); charts.rx.data.datasets[0].data.shift(); charts.rx.update('none'); }
                             });
                             Array.from(tbody.children).forEach(tr => {
                                 const id = tr.id.replace('rule-row-mon-', '');
-                                if (id && !activeIds.has(id)) {
-                                    if(ruleCharts[id]) { ruleCharts[id].tx.destroy(); ruleCharts[id].rx.destroy(); delete ruleCharts[id]; }
-                                    tr.remove();
-                                }
+                                if (id && !activeIds.has(id)) { if(ruleCharts[id]) { ruleCharts[id].tx.destroy(); ruleCharts[id].rx.destroy(); delete ruleCharts[id]; } tr.remove(); }
                             });
                         }
                         
@@ -3404,20 +3300,14 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             const lat = document.getElementById('rule-latency-'+r.id);
                             const dot = document.getElementById('rule-status-dot-'+r.id);
                             if(lat && dot) {
-                                if(r.status) {
-                                    lat.innerHTML = '<span style="color:#10b981;font-weight:600">'+r.latency+' ms</span>';
-                                    dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中';
-                                } else {
-                                    lat.innerHTML = '<span style="color:#ef4444">离线</span>';
-                                    dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常';
-                                }
+                                if(r.status) { lat.innerHTML = '<span style="color:#10b981;font-weight:600">'+r.latency+' ms</span>'; dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中'; } 
+                                else { lat.innerHTML = '<span style="color:#ef4444">离线</span>'; dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常'; }
                             }
                             if(r.limit > 0) {
                                 let pct = (r.total / r.limit) * 100; if(pct > 100) pct = 100;
                                 const bar = document.getElementById('rule-bar-'+r.id);
                                 if(bar) { bar.style.width = pct + '%'; bar.style.background = pct > 90 ? '#ef4444' : '#6366f1'; }
-                                const txt = document.getElementById('rule-limit-text-'+r.id);
-                                if(txt) txt.innerText = pct.toFixed(1) + '%';
+                                const txt = document.getElementById('rule-limit-text-'+r.id); if(txt) txt.innerText = pct.toFixed(1) + '%';
                             }
                         });
                     }
@@ -3439,9 +3329,9 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         const tbody = document.getElementById('log-table-body');
                         let html = '';
                         d.logs.forEach(l => {
-                            html += '<tr><td style="font-family:var(--font-mono);color:var(--text-sub)">'+l.time+'</td>'+
-                                    '<td>'+l.ip+'</td>'+
-                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">'+l.action+'</span></td>'+
+                            html += '<tr><td style="font-family:var(--font-mono);color:var(--text-sub)">'+l.time+'</td>' +
+                                    '<td>'+l.ip+'</td>' +
+                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">'+l.action+'</span></td>' +
                                     '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
