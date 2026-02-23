@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.49" // 背景图形加深版 + 恢复功能
+	AppVersion      = "v3.0.50" // 恢复功能 + 登录页双色主题
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2142,18 +2142,52 @@ button:hover { background: #4f46e5; }
 </html>`
 
 const loginHtml = `<!DOCTYPE html>
-<html lang="zh" data-theme="dark">
+<html lang="zh">
 <head>
 <title>登录 - GoRelay Pro</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+    // 在页面渲染前及早应用主题，防止闪烁
+    const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', savedTheme);
+</script>
 <style>
-:root { --primary: #6366f1; --bg: #09090b; --card-bg: #18181b; --text: #fafafa; --text-sub: #a1a1aa; --border: #27272a; --input-bg: #27272a; }
-body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; position: relative; }
+/* 浅色模式默认变量 */
+:root { 
+    --primary: #6366f1; 
+    --bg: #f8fafc; 
+    --card-bg: rgba(255, 255, 255, 0.85); 
+    --text: #0f172a; 
+    --text-sub: #64748b; 
+    --border: #e2e8f0; 
+    --input-bg: #f1f5f9;
+    --input-focus: #ffffff;
+    --card-border: rgba(0,0,0,0.08);
+    --shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.1);
+}
+/* 深色模式变量 */
+[data-theme="dark"] { 
+    --bg: #09090b; 
+    --card-bg: rgba(24, 24, 27, 0.6); 
+    --text: #fafafa; 
+    --text-sub: #a1a1aa; 
+    --border: #27272a; 
+    --input-bg: rgba(0, 0, 0, 0.2);
+    --input-focus: rgba(0,0,0,0.4);
+    --card-border: rgba(255,255,255,0.08);
+    --shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.5);
+}
+
+body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; position: relative; transition: background 0.3s, color 0.3s; }
 .bg-glow { position: absolute; width: 600px; height: 600px; background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, transparent 70%); top: -20%; left: 50%; transform: translateX(-50%); opacity: 0.6; pointer-events: none; }
 
-.card { background: rgba(24, 24, 27, 0.6); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 48px 40px; border-radius: 24px; width: 100%; max-width: 340px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.5); position: relative; z-index: 10; }
+/* 主题切换按钮 */
+.theme-toggle { position: absolute; top: 24px; right: 24px; width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--border); background: var(--card-bg); color: var(--text-sub); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; z-index: 100; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+.theme-toggle:hover { border-color: var(--primary); color: var(--primary); background: rgba(99, 102, 241, 0.1); transform: translateY(-2px); }
+
+.card { background: var(--card-bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); padding: 48px 40px; border-radius: 24px; width: 100%; max-width: 340px; border: 1px solid var(--card-border); box-shadow: var(--shadow); position: relative; z-index: 10; transition: background 0.3s, border-color 0.3s, box-shadow 0.3s; }
 .header { text-align: center; margin-bottom: 36px; }
 .logo-icon { width: 56px; height: 56px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 16px; display: inline-flex; align-items: center; justify-content: center; font-size: 32px; color: white; box-shadow: 0 10px 20px -5px rgba(99,102,241,0.4); margin-bottom: 20px; }
 .header h2 { margin: 0; font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: -0.5px; }
@@ -2161,17 +2195,22 @@ body { background: var(--bg); color: var(--text); font-family: 'Inter', system-u
 
 .input-box { margin-bottom: 16px; position: relative; }
 .input-box i { position: absolute; left: 14px; top: 13px; color: var(--text-sub); font-size: 18px; transition: .2s; }
-input { width: 100%; padding: 12px 14px 12px 44px; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-size: 14px; outline: none; transition: .2s; box-sizing: border-box; }
-input:focus { border-color: var(--primary); background: rgba(0,0,0,0.4); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+input { width: 100%; padding: 12px 14px 12px 44px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 12px; color: var(--text); font-size: 14px; outline: none; transition: .2s; box-sizing: border-box; }
+input:focus { border-color: var(--primary); background: var(--input-focus); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
 input:focus + i { color: var(--primary); }
 
-button { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 14px; font-weight: 500; cursor: pointer; transition: .2s; margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-button:hover { background: #4f46e5; transform: translateY(-1px); }
+button.submit-btn { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 14px; font-weight: 500; cursor: pointer; transition: .2s; margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
 .error-msg { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 10px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; text-align: center; border: 1px solid rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; gap: 6px; }
 </style>
 </head>
 <body>
 <div class="bg-glow"></div>
+
+<button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
+    <i class="ri-moon-line" id="theme-icon"></i>
+</button>
+
 <form class="card" method="POST">
     <div class="header">
         <div class="logo-icon"><i class="ri-globe-line"></i></div>
@@ -2185,8 +2224,25 @@ button:hover { background: #4f46e5; transform: translateY(-1px); }
     {{if .TwoFA}}
     <div class="input-box"><input name="code" placeholder="2FA 动态验证码" required pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 4px; text-align: center; padding-left: 14px; font-weight: 600; font-family: monospace"><i class="ri-shield-keyhole-line" style="left: auto; right: 14px;"></i></div>
     {{end}}
-    <button>立即登录 <i class="ri-arrow-right-line"></i></button>
+    <button class="submit-btn">立即登录 <i class="ri-arrow-right-line"></i></button>
 </form>
+
+<script>
+    // 初始化图标
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('theme-icon').className = savedTheme === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    });
+
+    // 切换主题逻辑
+    function toggleTheme() {
+        const html = document.documentElement;
+        const curr = html.getAttribute('data-theme');
+        const next = curr === 'dark' ? 'light' : 'dark';
+        html.setAttribute('data-theme', next);
+        localStorage.setItem('theme', next);
+        document.getElementById('theme-icon').className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    }
+</script>
 </body>
 </html>`
 
