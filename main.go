@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.48" // 背景图形加深版
+	AppVersion      = "v3.0.49" // 背景图形加深版 + 恢复功能
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -677,6 +677,7 @@ func runMaster() {
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
+	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) // [新增] 恢复数据路由
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
@@ -1321,6 +1322,45 @@ func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, DBFile)
 }
 
+// [新增] 接收恢复上传的数据库文件
+func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+
+	file, _, err := r.FormFile("db_file")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "读取上传文件失败"})
+		return
+	}
+	defer file.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 1. 安全关闭现有的 SQLite 数据库连接
+	if db != nil {
+		db.Close()
+		db = nil
+	}
+
+	// 2. 清理可能残留的 WAL 模式缓存文件，防止恢复后数据冲突
+	os.Remove(DBFile + "-wal")
+	os.Remove(DBFile + "-shm")
+
+	// 3. 覆盖写入新的数据库文件
+	out, err := os.Create(DBFile)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
+		return
+	}
+	defer out.Close()
+	io.Copy(out, file)
+
+	// 返回成功（由前端触发面板重启以重新加载最新配置）
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
 	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
@@ -1713,7 +1753,7 @@ func (t *IpTracker) Remove(addr string) {
 	}
 
 	t.refs[host]--
-	
+
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
 		// 防御性编程：确保不会减成负数
@@ -2707,7 +2747,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
                         <div style="display:flex;gap:12px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px;grid-column:1/-1">
                             <button class="btn" style="flex:2;height:44px">保存配置</button>
-                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px" title="备份数据库"><i class="ri-database-2-line"></i></a>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px" title="备份数据"><i class="ri-download-cloud-2-line"></i></a>
+                            
+                            <button type="button" class="btn secondary" style="flex:1;height:44px" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i></button>
+                            <input type="file" id="restore-file" style="display:none" accept=".db" onchange="restoreConfig(this)">
+                            
                             <button type="button" class="btn warning" style="flex:1;height:44px" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i></button>
                         </div>
                     </div>
@@ -2870,6 +2914,35 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 showToast("系统正在重启...", "warn");
                 setTimeout(() => location.reload(), 3000);
             }).catch(() => { showToast("请求发送失败", "warn"); });
+        });
+    }
+
+    // [新增] 恢复配置数据交互
+    function restoreConfig(input) {
+        if (!input.files || input.files.length === 0) return;
+        
+        // 提前保存 file 引用并清空 input，避免用户取消或下次选同名文件时无法触发 onchange
+        const file = input.files[0];
+        input.value = ''; 
+        
+        showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "danger", () => {
+            const formData = new FormData();
+            formData.append('db_file', file);
+            
+            fetch('/upload_config', {
+                method: 'POST',
+                body: formData
+            }).then(r => r.json()).then(d => {
+                if (d.success) {
+                    showToast("恢复成功，面板重启中...", "success");
+                    // 覆盖成功后，调用现有的接口重启面板以重新加载数据内存
+                    fetch('/restart', {method: 'POST'}).then(() => {
+                        setTimeout(() => location.reload(), 3000);
+                    });
+                } else {
+                    showToast("恢复失败: " + (d.error || "未知错误"), "warn");
+                }
+            }).catch(() => showToast("上传请求失败", "warn"));
         });
     }
 
