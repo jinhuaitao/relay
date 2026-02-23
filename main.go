@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.44" // 背景图形加深版
+	AppVersion      = "v3.0.45" // 背景图形加深版
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -264,7 +264,6 @@ func initDB() {
 	}
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
-
 }
 
 // --- 基础工具函数 ---
