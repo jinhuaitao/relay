@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.47" // 背景图形加深版
+	AppVersion      = "v3.0.48" // 背景图形加深版
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2575,7 +2575,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                     <div class="terminal-window" style="margin-top:24px">
                         <div class="terminal-header">
                             <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
-                            <span style="color:#64748b;font-size:12px;margin-left:auto">bash</span>
+                            <span style="color:#64748b;font-size:12px;margin-left:auto"></span>
                         </div>
                         <div class="terminal-body">
                             <div class="copy-overlay"><button class="btn icon secondary" style="background:rgba(255,255,255,0.1);color:#fff;border:none" onclick="copyCmd()" title="复制"><i class="ri-file-copy-line"></i></button></div>
