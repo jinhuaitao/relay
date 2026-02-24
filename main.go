@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.57"
+	AppVersion      = "v3.0.58"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -82,7 +82,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
-	LBStrategy   string `json:"lb_strategy"` 
+	LBStrategy   string `json:"lb_strategy"`
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -100,20 +100,21 @@ type OpLog struct {
 }
 
 type AppConfig struct {
-	WebUser      string        `json:"web_user"`
-	WebPass      string        `json:"web_pass"`
-	AgentToken   string        `json:"agent_token"`
-	AgentPorts   string        `json:"agent_ports"`
-	MasterIP     string        `json:"master_ip"`
-	MasterIPv6   string        `json:"master_ipv6"`
-	MasterDomain string        `json:"master_domain"`
-	IsSetup      bool          `json:"is_setup"`
-	TgBotToken   string        `json:"tg_bot_token"`
-	TgChatID     string        `json:"tg_chat_id"`
-	TwoFAEnabled bool          `json:"two_fa_enabled"`
-	TwoFASecret  string        `json:"two_fa_secret"`
-	Rules        []LogicalRule `json:"saved_rules"`
-	Logs         []OpLog       `json:"logs"`
+	WebUser      string            `json:"web_user"`
+	WebPass      string            `json:"web_pass"`
+	AgentToken   string            `json:"agent_token"` // 保留用于兼容老版本节点
+	AgentTokens  map[string]string `json:"agent_tokens"` // [新增] 每个节点独立的 UUID
+	AgentPorts   string            `json:"agent_ports"`
+	MasterIP     string            `json:"master_ip"`
+	MasterIPv6   string            `json:"master_ipv6"`
+	MasterDomain string            `json:"master_domain"`
+	IsSetup      bool              `json:"is_setup"`
+	TgBotToken   string            `json:"tg_bot_token"`
+	TgChatID     string            `json:"tg_chat_id"`
+	TwoFAEnabled bool              `json:"two_fa_enabled"`
+	TwoFASecret  string            `json:"two_fa_secret"`
+	Rules        []LogicalRule     `json:"saved_rules"`
+	Logs         []OpLog           `json:"logs"`
 }
 
 type ForwardTask struct {
@@ -122,7 +123,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
-	LBStrategy string `json:"lb_strategy"` 
+	LBStrategy string `json:"lb_strategy"`
 }
 
 type TrafficReport struct {
@@ -198,15 +199,15 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
-	activeTargets    sync.Map 
+	activeTargets    sync.Map
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
-	targetHealthMap  sync.Map 
+	targetHealthMap  sync.Map
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
 
-	rrCounters   sync.Map 
-	connCounters sync.Map 
+	rrCounters   sync.Map
+	connCounters sync.Map
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
@@ -273,14 +274,14 @@ func initDB() {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
 }
 
-// --- 基础工具函数 --- 
+// --- 基础工具函数 ---
 
 // 生成符合 UUID v4 规范的唯一随机字符串
 func generateUUID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40 
-	b[8] = (b[8] & 0x3f) | 0x80 
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
@@ -409,7 +410,7 @@ func performSelfUpdate() error {
 	if err := os.Rename(exePath, oldPath); err != nil {
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Rename(oldPath, exePath) 
+		os.Rename(oldPath, exePath)
 		return fmt.Errorf("覆盖文件失败: %v", err)
 	}
 	return nil
@@ -506,7 +507,7 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 
 	svcName := "relay"
 	if mode == "agent" {
-		svcName = "gorelay" 
+		svcName = "gorelay"
 	}
 
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
@@ -685,22 +686,46 @@ func runMaster() {
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
 	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
-	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) 
+	http.HandleFunc("/batch", authMiddleware(handleBatchRule))
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
-	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) 
+	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig))
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
-	http.HandleFunc("/restart", authMiddleware(handleRestart))          
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))  
-	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent)) 
-	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate)) 
+	http.HandleFunc("/restart", authMiddleware(handleRestart))
+	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))
+	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent))
+	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
+	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken)) // [新增] 为单个节点生成专属 Token
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
+}
+
+// [新增] 动态生成与获取独立 Agent UUID Token 的接口
+func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		w.Write([]byte(""))
+		return
+	}
+	
+	mu.Lock()
+	if config.AgentTokens == nil {
+		config.AgentTokens = make(map[string]string)
+	}
+	tk, exists := config.AgentTokens[name]
+	if !exists {
+		tk = generateUUID()
+		config.AgentTokens[name] = tk
+		saveConfigNoLock()
+	}
+	mu.Unlock()
+	
+	w.Write([]byte(tk))
 }
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
@@ -821,10 +846,21 @@ func handleAgentConn(conn net.Conn) {
 	name, _ := data["name"].(string)
 
 	mu.Lock()
-	tk := config.AgentToken
+	globalTk := config.AgentToken
+	var agentTk string
+	if config.AgentTokens != nil {
+		agentTk = config.AgentTokens[name]
+	}
 	mu.Unlock()
-	if reqToken != tk || name == "" {
+
+	// 允许使用该节点独立的 Token 或者 历史的全局 Token
+	if reqToken == "" || name == "" {
 		return
+	}
+	if (globalTk != "" && reqToken == globalTk) || (agentTk != "" && reqToken == agentTk) {
+		// 认证通过
+	} else {
+		return // 认证失败
 	}
 
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
@@ -940,9 +976,11 @@ func pushConfigToAll() {
 			}
 		}
 		finalTargetStr := strings.Join(targetList, ",")
-		
+
 		lb := r.LBStrategy
-		if lb == "" { lb = "random" }
+		if lb == "" {
+			lb = "random"
+		}
 
 		tasksMap[r.ExitAgent] = append(tasksMap[r.ExitAgent], ForwardTask{
 			ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: finalTargetStr, SpeedLimit: r.SpeedLimit, LBStrategy: lb,
@@ -953,7 +991,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr", 
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr",
 			})
 		}
 	}
@@ -989,7 +1027,6 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	copy(displayRules, rules)
 	mu.Unlock()
 
-	// 排序规则
 	sort.Slice(displayRules, func(i, j int) bool {
 		if displayRules[i].Group == displayRules[j].Group {
 			return displayRules[i].ID < displayRules[j].ID
@@ -1028,7 +1065,6 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Agents       []AgentInfo
 		Rules        []LogicalRule
 		Logs         []OpLog
-		Token        string
 		User         string
 		DownloadURL  string
 		TotalTraffic int64
@@ -1038,9 +1074,9 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Config       AppConfig
 		TwoFA        bool
 		IsTLS        bool
-		Ports        []string 
+		Ports        []string
 		Version      string
-	}{al, displayRules, displayLogs, conf.AgentToken, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
+	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -1098,7 +1134,10 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		salt := generateSalt()
 		pwdHash := hashPassword(r.FormValue("password"), salt)
 		config.WebPass = salt + "$" + pwdHash
-		config.AgentToken = r.FormValue("token")
+		config.AgentToken = generateUUID() // 幕后生成全局 Token 作为底线兜底
+		if config.AgentTokens == nil {
+			config.AgentTokens = make(map[string]string)
+		}
 		config.IsSetup = true
 		saveConfigNoLock()
 		mu.Unlock()
@@ -1106,8 +1145,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, _ := template.New("s").Parse(setupHtml)
-	// 在此处注入一个自动生成的 UUID 供前端使用
-	t.Execute(w, map[string]string{"AutoToken": generateUUID()})
+	t.Execute(w, nil)
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1210,7 +1248,9 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	lbStrategy := r.FormValue("lb_strategy")
-	if lbStrategy == "" { lbStrategy = "random" }
+	if lbStrategy == "" {
+		lbStrategy = "random"
+	}
 
 	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
 
@@ -1241,7 +1281,9 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	lbStrategy := r.FormValue("lb_strategy")
-	if lbStrategy == "" { lbStrategy = "random" }
+	if lbStrategy == "" {
+		lbStrategy = "random"
+	}
 
 	mu.Lock()
 	for i := range rules {
@@ -1311,14 +1353,13 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
-// [新增] 批量操作
 func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
 	action := r.FormValue("action")
 	ids := strings.Split(r.FormValue("ids"), ",")
-	
+
 	idMap := make(map[string]bool)
 	for _, id := range ids {
 		if id != "" {
@@ -1338,21 +1379,26 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	} else if action == "enable" || action == "disable" || action == "reset" {
 		for i := range rules {
 			if idMap[rules[i].ID] {
-				if action == "enable" { rules[i].Disabled = false }
-				if action == "disable" { rules[i].Disabled = true }
-				if action == "reset" { rules[i].TotalTx, rules[i].TotalRx = 0, 0 }
+				if action == "enable" {
+					rules[i].Disabled = false
+				}
+				if action == "disable" {
+					rules[i].Disabled = true
+				}
+				if action == "reset" {
+					rules[i].TotalTx, rules[i].TotalRx = 0, 0
+				}
 			}
 		}
 	}
 	saveConfigNoLock()
 	mu.Unlock()
-	
+
 	if action != "reset" {
 		go pushConfigToAll()
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
-
 
 func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
@@ -1370,8 +1416,8 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		salt := generateSalt()
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
-	config.AgentToken = r.FormValue("token")
-	config.AgentPorts = r.FormValue("agent_ports") 
+	// 不再从表单读取 token
+	config.AgentPorts = r.FormValue("agent_ports")
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
@@ -1493,7 +1539,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
 
-	hasUpdate := remoteVer != currentVer 
+	hasUpdate := remoteVer != currentVer
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
@@ -1627,10 +1673,10 @@ func runAgent(name, masterAddr, token string) {
 						oldTask := oldVal.(ForwardTask)
 						if oldTask.Protocol != t.Protocol || oldTask.Listen != t.Listen || oldTask.SpeedLimit != t.SpeedLimit || oldTask.LBStrategy != t.LBStrategy {
 							if closeFunc, ok := runningListeners.Load(t.ID); ok {
-								closeFunc.(func())() 
+								closeFunc.(func())()
 							}
-							activeTasks.Store(t.ID, t) 
-							startProxy(t)              
+							activeTasks.Store(t.ID, t)
+							startProxy(t)
 						}
 					} else {
 						agentTraffic.Store(t.ID, &TrafficCounter{})
@@ -1647,7 +1693,7 @@ func runAgent(name, masterAddr, token string) {
 						agentUserCounts.Delete(k)
 						activeTargets.Delete(k)
 						activeTasks.Delete(k)
-						rrCounters.Delete(k) 
+						rrCounters.Delete(k)
 					}
 					return true
 				})
@@ -1693,7 +1739,7 @@ func checkTargetHealth(conn net.Conn) {
 				if t.Protocol == "udp" {
 					checkMode = "ping"
 				} else if t.Protocol == "both" {
-					checkMode = "mixed" 
+					checkMode = "mixed"
 				}
 			}
 		}
@@ -1777,7 +1823,7 @@ func (t *IpTracker) Remove(addr string) {
 	defer t.mu.Unlock()
 
 	if count, exists := t.refs[host]; !exists || count <= 0 {
-		return 
+		return
 	}
 
 	t.refs[host]--
@@ -1838,7 +1884,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) 
+					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy)
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -1870,7 +1916,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		t = strings.TrimSpace(t)
 		if v, ok := targetHealthMap.Load(t); ok {
 			lat := v.(int64)
-			if lat >= 0 { 
+			if lat >= 0 {
 				valid = append(valid, t)
 				latencies = append(latencies, lat)
 			}
@@ -1879,7 +1925,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 
 	if len(valid) == 0 {
 		valid = targets
-		latencies = make([]int64, len(targets)) 
+		latencies = make([]int64, len(targets))
 	}
 
 	if len(valid) == 1 {
@@ -1887,13 +1933,13 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 
 	switch strategy {
-	case "rr": 
+	case "rr":
 		v, _ := rrCounters.LoadOrStore(tid, new(uint64))
 		c := v.(*uint64)
 		idx := atomic.AddUint64(c, 1) % uint64(len(valid))
 		return valid[idx]
 
-	case "least_conn": 
+	case "least_conn":
 		var best string
 		var minConn int64 = -1
 		for _, t := range valid {
@@ -1904,10 +1950,12 @@ func selectTarget(tid string, targets []string, strategy string) string {
 				best = t
 			}
 		}
-		if best == "" { best = valid[0] }
+		if best == "" {
+			best = valid[0]
+		}
 		return best
 
-	case "fastest": 
+	case "fastest":
 		var best string
 		var minLat int64 = -1
 		for i, t := range valid {
@@ -1917,10 +1965,12 @@ func selectTarget(tid string, targets []string, strategy string) string {
 				best = t
 			}
 		}
-		if best == "" { best = valid[0] }
+		if best == "" {
+			best = valid[0]
+		}
 		return best
 
-	default: 
+	default:
 		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(valid))))
 		return valid[n.Int64()]
 	}
@@ -1933,7 +1983,7 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	if v, ok := activeTargets.Load(tid); ok {
 		targetStr = v.(string)
 	} else {
-		return 
+		return
 	}
 
 	allTargets := strings.Split(targetStr, ",")
@@ -1941,14 +1991,14 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 	atomic.AddInt64(vConn.(*int64), 1)
-	defer atomic.AddInt64(vConn.(*int64), -1) 
+	defer atomic.AddInt64(vConn.(*int64), -1)
 
 	dst, err := net.DialTimeout("tcp", bestTarget, 2*time.Second)
 	if err != nil {
 		return
 	}
 	defer dst.Close()
-	
+
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx, limit)
@@ -1992,7 +2042,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
 		} else {
-			
+
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
@@ -2000,7 +2050,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 				continue
 			}
 			targets := strings.Split(currentTargetStr, ",")
-			
+
 			bestTarget := selectTarget(tid, targets, strategy)
 
 			vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
@@ -2027,7 +2077,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 						c.Close()
 						udpSessions.Delete(k)
 						tracker.Remove(k)
-						atomic.AddInt64(vConn.(*int64), -1) 
+						atomic.AddInt64(vConn.(*int64), -1)
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
@@ -2081,6 +2131,8 @@ func loadConfig() {
 				config.WebPass = v
 			case "agent_token":
 				config.AgentToken = v
+			case "agent_tokens":
+				json.Unmarshal([]byte(v), &config.AgentTokens)
 			case "agent_ports":
 				config.AgentPorts = v
 			case "master_ip":
@@ -2101,6 +2153,10 @@ func loadConfig() {
 				config.TwoFASecret = v
 			}
 		}
+	}
+
+	if config.AgentTokens == nil {
+		config.AgentTokens = make(map[string]string)
 	}
 
 	rules = []LogicalRule{}
@@ -2133,6 +2189,10 @@ func saveConfigNoLock() {
 	setS("web_user", conf.WebUser)
 	setS("web_pass", conf.WebPass)
 	setS("agent_token", conf.AgentToken)
+	if conf.AgentTokens != nil {
+		b, _ := json.Marshal(conf.AgentTokens)
+		setS("agent_tokens", string(b))
+	}
 	setS("agent_ports", conf.AgentPorts)
 	setS("master_ip", conf.MasterIP)
 	setS("master_ipv6", conf.MasterIPv6)
@@ -2216,30 +2276,13 @@ input:focus + i { color: var(--primary); }
 button { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: .2s; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 button:hover { background: #4f46e5; }
 </style>
-<script>
-    function regenToken() {
-        document.getElementById('init_token').value = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
-    }
-</script>
 </head>
 <body>
 <form class="card" method="POST">
     <h2>GoRelay Pro</h2>
-    <p>欢迎使用，请配置初始管理员账户<br>并设置通信 Token 密钥</p>
+    <p>欢迎使用，请配置初始管理员账户</p>
     <div class="input-group"><input name="username" placeholder="管理员用户名" required autocomplete="off"><i class="ri-user-line"></i></div>
     <div class="input-group"><input type="password" name="password" placeholder="登录密码" required><i class="ri-lock-password-line"></i></div>
-    
-    <div style="display:flex; gap:8px; margin-bottom:16px;">
-        <div class="input-group" style="margin-bottom:0; flex:1;">
-            <input name="token" id="init_token" value="{{.AutoToken}}" placeholder="通信 Token" required style="width:100%">
-            <i class="ri-key-2-line"></i>
-        </div>
-        <button type="button" onclick="regenToken()" title="重新生成 UUID" style="width:44px; margin-top:0; background:var(--input-bg); color:var(--text); border:1px solid var(--border);"><i class="ri-refresh-line"></i></button>
-    </div>
-
     <button>完成初始化 <i class="ri-arrow-right-line"></i></button>
 </form>
 </body>
@@ -2535,15 +2578,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 .batch-bar { display: none; background: var(--card-bg); backdrop-filter: blur(10px); padding: 12px 20px; border-radius: 12px; margin-bottom: 20px; align-items: center; gap: 12px; border: 1px solid var(--primary); box-shadow: 0 10px 25px -5px rgba(99,102,241,0.2); animation: fadeIn 0.3s; }
 .batch-bar.active { display: flex; }
 </style>
-<script>
-    function regenSysToken() {
-        document.getElementById('sys_token').value = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
-        showToast("已生成新 Token，请记得保存配置", "success");
-    }
-</script>
 </head>
 <body>
 
@@ -2759,7 +2793,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="card">
                 <h3><i class="ri-terminal-box-line" style="color:var(--text-main)"></i> 节点安装向导</h3>
                 <p style="color:var(--text-sub);font-size:14px;line-height:1.6;margin-bottom:24px">
-                    请在您的 VPS 或服务器（支持 Linux）上执行以下命令以安装 Agent 客户端。Agent 安装后将自动连接至本面板。
+                    请在您的 VPS 或服务器（支持 Linux）上执行以下命令以安装 Agent 客户端。通信 Token 将被<strong style="color:var(--primary)">全自动生成</strong>并注入到命令中。
                 </p>
                 
                 <div style="background:var(--input-bg);padding:24px;border-radius:16px;border:1px solid var(--border)">
@@ -2861,15 +2895,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         
                         <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));gap:20px">
                             <div class="form-group"><label>修改密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
-                            
-                            <div class="form-group">
-                                <label>通信 Token</label>
-                                <div style="display:flex; gap:8px;">
-                                    <input name="token" id="sys_token" value="{{.Token}}" style="flex:1;">
-                                    <button type="button" class="btn secondary icon" onclick="regenSysToken()" title="生成新 UUID"><i class="ri-refresh-line"></i></button>
-                                </div>
-                            </div>
-
                         </div>
 
                         <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px dashed var(--border);grid-column:1/-1">
@@ -3001,7 +3026,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 </div>
 
 <script>
-    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", token="{{.Token}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
     var lastRuleStats = {}; 
     var ruleCharts = {}; 
     
@@ -3192,8 +3217,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
-    function genCmd() {
+    // [新增] 异步获取独立的节点 Token 并拼装安装命令
+    async function genCmd() {
         const n = document.getElementById('agentName').value;
+        if (!n) { showToast("请输入节点名称", "warn"); return; }
+        
         const t = document.getElementById('addrType').value;
         const arch = document.getElementById('archType').value;
         const p = document.getElementById('connPort').value; 
@@ -3201,11 +3229,23 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
         if(!host || host === "[]") { showToast("请先在设置中配置面板地址", "warn"); return; }
         
-        let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+p+'" -token "'+token+'"';
-        if(is_tls) cmd += ' -tls';
-        document.getElementById('cmdText').innerText = cmd;
-        document.getElementById('cmdText').style.opacity = '1';
-        showToast("命令已生成", "success");
+        try {
+            document.getElementById('cmdText').innerText = "获取专属凭证中...";
+            document.getElementById('cmdText').style.opacity = '0.5';
+            
+            let r = await fetch('/gen_agent_token?name=' + encodeURIComponent(n));
+            let agentToken = await r.text();
+            
+            let cmd = 'curl -L -o /root/relay '+finalDwUrl+' && chmod +x /root/relay && /root/relay -service install -mode agent -name "'+n+'" -connect "'+host+':'+p+'" -token "'+agentToken+'"';
+            if(is_tls) cmd += ' -tls';
+            
+            document.getElementById('cmdText').innerText = cmd;
+            document.getElementById('cmdText').style.opacity = '1';
+            showToast("命令已生成", "success");
+        } catch(e) {
+            document.getElementById('cmdText').innerText = "获取凭证失败，请重试";
+            showToast("生成凭证失败", "warn");
+        }
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
