@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.58"
+	AppVersion      = "v3.0.59"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -276,7 +276,6 @@ func initDB() {
 
 // --- 基础工具函数 ---
 
-// 生成符合 UUID v4 规范的唯一随机字符串
 func generateUUID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -699,20 +698,19 @@ func runMaster() {
 	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))
 	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent))
 	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
-	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken)) // [新增] 为单个节点生成专属 Token
+	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken))
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
 }
 
-// [新增] 动态生成与获取独立 Agent UUID Token 的接口
 func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		w.Write([]byte(""))
 		return
 	}
-	
+
 	mu.Lock()
 	if config.AgentTokens == nil {
 		config.AgentTokens = make(map[string]string)
@@ -724,7 +722,7 @@ func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 		saveConfigNoLock()
 	}
 	mu.Unlock()
-	
+
 	w.Write([]byte(tk))
 }
 
@@ -853,7 +851,6 @@ func handleAgentConn(conn net.Conn) {
 	}
 	mu.Unlock()
 
-	// 允许使用该节点独立的 Token 或者 历史的全局 Token
 	if reqToken == "" || name == "" {
 		return
 	}
@@ -1134,7 +1131,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		salt := generateSalt()
 		pwdHash := hashPassword(r.FormValue("password"), salt)
 		config.WebPass = salt + "$" + pwdHash
-		config.AgentToken = generateUUID() // 幕后生成全局 Token 作为底线兜底
+		config.AgentToken = generateUUID()
 		if config.AgentTokens == nil {
 			config.AgentTokens = make(map[string]string)
 		}
@@ -1416,7 +1413,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		salt := generateSalt()
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
-	// 不再从表单读取 token
 	config.AgentPorts = r.FormValue("agent_ports")
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
@@ -2584,6 +2580,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 <div class="bg-decor">
     <div class="shape shape-circle s1"></div>
     <div class="shape shape-circle s2"></div>
+    
+    <div class="shape shape-star" style="top: 15%; right: 10%; width: 30px; height: 30px; animation: float 6s ease-in-out infinite;"></div>
+    <div class="shape shape-circle" style="bottom: 25%; left: 15%; width: 40px; height: 40px; border: 3px solid var(--primary); background: transparent; animation: float 8s ease-in-out infinite reverse;"></div>
+    <div class="shape" style="top: 35%; left: 45%; width: 25px; height: 25px; background: var(--warning); border-radius: 6px; transform: rotate(45deg); animation: float 7s ease-in-out infinite 1s;"></div>
+    <div class="shape shape-circle" style="top: 60%; right: 25%; width: 20px; height: 20px; background: var(--success); animation: float 5s ease-in-out infinite 2s;"></div>
+    <div class="shape" style="bottom: 10%; right: 40%; width: 35px; height: 35px; border: 3px solid var(--text-sub); background: transparent; transform: rotate(15deg); animation: float 9s ease-in-out infinite;"></div>
 </div>
 
 <div id="toast" class="toast"><i id="t-icon"></i><span id="t-msg"></span></div>
@@ -3217,7 +3219,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
 
-    // [新增] 异步获取独立的节点 Token 并拼装安装命令
     async function genCmd() {
         const n = document.getElementById('agentName').value;
         if (!n) { showToast("请输入节点名称", "warn"); return; }
