@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.59"
+	AppVersion      = "v3.0.60"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2948,12 +2948,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
                         <div style="display:flex;gap:12px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px;grid-column:1/-1">
                             <button class="btn" style="flex:2;height:44px">保存配置</button>
-                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px" title="备份数据"><i class="ri-download-cloud-2-line"></i></a>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px" title="备份数据"><i class="ri-download-cloud-2-line"></i>备份</a>
                             
-                            <button type="button" class="btn secondary" style="flex:1;height:44px" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i></button>
+                            <button type="button" class="btn secondary" style="flex:1;height:44px" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i>恢复</button>
                             <input type="file" id="restore-file" style="display:none" accept=".db" onchange="restoreConfig(this)">
                             
-                            <button type="button" class="btn warning" style="flex:1;height:44px" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i></button>
+                            <button type="button" class="btn warning" style="flex:1;height:44px" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i>重启服务</button>
                         </div>
                     </div>
                 </form>
