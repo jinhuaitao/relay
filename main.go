@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.54" // 加入高级负载均衡与批量操作
+	AppVersion      = "v3.0.55" // 加入高级负载均衡与批量操作
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2512,6 +2512,10 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     .nav-btn.active { color: var(--primary); }
     .nav-btn i { font-size: 20px; }
     .card { padding: 16px; }
+    .batch-bar { flex-wrap: wrap; justify-content: center; padding: 12px; gap: 8px; }
+    .batch-bar > span { width: 100%; text-align: center; }
+    .batch-bar > div[style="flex:1"] { display: none; }
+    .batch-bar .btn { flex: 1 1 calc(50% - 10px); padding: 10px 0; font-size: 12px; }
 }
 
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 10px 20px; border-radius: 50px; font-size: 13px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
