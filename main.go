@@ -47,11 +47,11 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.55" // 加入高级负载均衡与批量操作
+	AppVersion      = "v3.0.57"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
-	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest" // GitHub API
+	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest"
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
 	CopyBufferSize  = 32 * 1024
@@ -82,7 +82,7 @@ type LogicalRule struct {
 	TrafficLimit int64  `json:"traffic_limit"`
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
-	LBStrategy   string `json:"lb_strategy"` // 新增：负载均衡策略
+	LBStrategy   string `json:"lb_strategy"` 
 
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
@@ -122,7 +122,7 @@ type ForwardTask struct {
 	Listen     string `json:"listen"`
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
-	LBStrategy string `json:"lb_strategy"` // 新增向下发给 Agent
+	LBStrategy string `json:"lb_strategy"` 
 }
 
 type TrafficReport struct {
@@ -198,15 +198,15 @@ var (
 	mu               sync.Mutex
 	runningListeners sync.Map
 	activeTasks      sync.Map
-	activeTargets    sync.Map // 存储最新的目标地址
+	activeTargets    sync.Map 
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
-	targetHealthMap  sync.Map // 存储延迟: string -> int64
+	targetHealthMap  sync.Map 
 	sessions         = make(map[string]time.Time)
 	configDirty      int32
 
-	rrCounters   sync.Map // 轮询计数器 (tid -> *uint64)
-	connCounters sync.Map // 最少连接数追踪器 (target -> *int64)
+	rrCounters   sync.Map 
+	connCounters sync.Map 
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
@@ -269,12 +269,20 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
-	// 静默执行升级，兼容老版本
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
 }
 
-// --- 基础工具函数 --- (省略部分保持原样，核心无改动)
+// --- 基础工具函数 --- 
+
+// 生成符合 UUID v4 规范的唯一随机字符串
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 
+	b[8] = (b[8] & 0x3f) | 0x80 
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
 
 func generateSalt() string {
 	b := make([]byte, 16)
@@ -355,7 +363,6 @@ func autoGenerateCert() error {
 	return nil
 }
 
-// --- 通用更新逻辑 (Master/Agent 共享) ---
 func performSelfUpdate() error {
 	arch := runtime.GOARCH
 	osName := runtime.GOOS
@@ -400,10 +407,9 @@ func performSelfUpdate() error {
 	oldPath := exePath + ".old"
 	os.Remove(oldPath)
 	if err := os.Rename(exePath, oldPath); err != nil {
-		// Windows
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Rename(oldPath, exePath) // 还原
+		os.Rename(oldPath, exePath) 
 		return fmt.Errorf("覆盖文件失败: %v", err)
 	}
 	return nil
@@ -498,9 +504,9 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 		tlsParam = " -tls"
 	}
 
-	svcName := "relay" // 默认为 Master 服务名
+	svcName := "relay"
 	if mode == "agent" {
-		svcName = "gorelay" // Agent 服务名
+		svcName = "gorelay" 
 	}
 
 	args := fmt.Sprintf("-mode %s -name \"%s\" -connect \"%s\" -token \"%s\"%s", mode, name, connect, token, tlsParam)
@@ -679,7 +685,7 @@ func runMaster() {
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
 	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
-	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) // [新增] 批量操作路由
+	http.HandleFunc("/batch", authMiddleware(handleBatchRule)) 
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
 	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
@@ -947,7 +953,7 @@ func pushConfigToAll() {
 				rip = "[" + rip + "]"
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
-				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr", // Entry 节点通常只有 1 个目标，写死 rr 即可
+				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr", 
 			})
 		}
 	}
@@ -1006,7 +1012,6 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	conf := config
 	mu.Unlock()
 
-	// 准备端口列表给前端 (从配置中读取)
 	pStr := conf.AgentPorts
 	if pStr == "" {
 		pStr = "9999"
@@ -1101,7 +1106,8 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, _ := template.New("s").Parse(setupHtml)
-	t.Execute(w, nil)
+	// 在此处注入一个自动生成的 UUID 供前端使用
+	t.Execute(w, map[string]string{"AutoToken": generateUUID()})
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1641,7 +1647,7 @@ func runAgent(name, masterAddr, token string) {
 						agentUserCounts.Delete(k)
 						activeTargets.Delete(k)
 						activeTasks.Delete(k)
-						rrCounters.Delete(k) // 清理轮询计数
+						rrCounters.Delete(k) 
 					}
 					return true
 				})
@@ -1728,7 +1734,6 @@ func checkTargetHealth(conn net.Conn) {
 				}
 			}
 
-			// [修改] 健康检查存储具体延迟数值，以便 Fastest 策略使用
 			if success {
 				if bestLat == -1 || lat < bestLat {
 					bestLat = lat
@@ -1833,7 +1838,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) // 传入策略
+					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy) 
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -1857,24 +1862,21 @@ func startProxy(t ForwardTask) {
 	}
 }
 
-// [新增] 核心负载均衡目标选择器
 func selectTarget(tid string, targets []string, strategy string) string {
 	var valid []string
 	var latencies []int64
 
-	// 过滤出健康的节点
 	for _, t := range targets {
 		t = strings.TrimSpace(t)
 		if v, ok := targetHealthMap.Load(t); ok {
 			lat := v.(int64)
-			if lat >= 0 { // >=0 表示健康
+			if lat >= 0 { 
 				valid = append(valid, t)
 				latencies = append(latencies, lat)
 			}
 		}
 	}
 
-	// 防御性：如果全部掉线或还未检测完成，回退到全部节点随机
 	if len(valid) == 0 {
 		valid = targets
 		latencies = make([]int64, len(targets)) 
@@ -1885,13 +1887,13 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 
 	switch strategy {
-	case "rr": // 轮询
+	case "rr": 
 		v, _ := rrCounters.LoadOrStore(tid, new(uint64))
 		c := v.(*uint64)
 		idx := atomic.AddUint64(c, 1) % uint64(len(valid))
 		return valid[idx]
 
-	case "least_conn": // 最少连接
+	case "least_conn": 
 		var best string
 		var minConn int64 = -1
 		for _, t := range valid {
@@ -1905,7 +1907,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		if best == "" { best = valid[0] }
 		return best
 
-	case "fastest": // 最低延迟
+	case "fastest": 
 		var best string
 		var minLat int64 = -1
 		for i, t := range valid {
@@ -1918,7 +1920,7 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		if best == "" { best = valid[0] }
 		return best
 
-	default: // "random" 默认
+	default: 
 		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(valid))))
 		return valid[n.Int64()]
 	}
@@ -1937,10 +1939,9 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	allTargets := strings.Split(targetStr, ",")
 	bestTarget := selectTarget(tid, allTargets, strategy)
 
-	// 最少连接数追踪 - TCP 建立
 	vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 	atomic.AddInt64(vConn.(*int64), 1)
-	defer atomic.AddInt64(vConn.(*int64), -1) // 断开时减少连接数
+	defer atomic.AddInt64(vConn.(*int64), -1) 
 
 	dst, err := net.DialTimeout("tcp", bestTarget, 2*time.Second)
 	if err != nil {
@@ -2000,10 +2001,8 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			}
 			targets := strings.Split(currentTargetStr, ",")
 			
-			// UDP 也应用负载均衡策略
 			bestTarget := selectTarget(tid, targets, strategy)
 
-			// UDP 伪连接数追踪 (以 Session 为单位)
 			vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 			atomic.AddInt64(vConn.(*int64), 1)
 
@@ -2028,7 +2027,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 						c.Close()
 						udpSessions.Delete(k)
 						tracker.Remove(k)
-						atomic.AddInt64(vConn.(*int64), -1) // 清理 UDP Session 追踪数
+						atomic.AddInt64(vConn.(*int64), -1) 
 						break
 					}
 					ln.WriteToUDP(b[:m], sa)
@@ -2105,7 +2104,6 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	// 读取时注意增加 lb_strategy 字段
 	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy FROM rules")
 	if err == nil {
 		defer rRows.Close()
@@ -2218,6 +2216,14 @@ input:focus + i { color: var(--primary); }
 button { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: .2s; margin-top: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 button:hover { background: #4f46e5; }
 </style>
+<script>
+    function regenToken() {
+        document.getElementById('init_token').value = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+</script>
 </head>
 <body>
 <form class="card" method="POST">
@@ -2225,7 +2231,15 @@ button:hover { background: #4f46e5; }
     <p>欢迎使用，请配置初始管理员账户<br>并设置通信 Token 密钥</p>
     <div class="input-group"><input name="username" placeholder="管理员用户名" required autocomplete="off"><i class="ri-user-line"></i></div>
     <div class="input-group"><input type="password" name="password" placeholder="登录密码" required><i class="ri-lock-password-line"></i></div>
-    <div class="input-group"><input name="token" placeholder="通信 Token (Agent 连接密钥)" required><i class="ri-key-2-line"></i></div>
+    
+    <div style="display:flex; gap:8px; margin-bottom:16px;">
+        <div class="input-group" style="margin-bottom:0; flex:1;">
+            <input name="token" id="init_token" value="{{.AutoToken}}" placeholder="通信 Token" required style="width:100%">
+            <i class="ri-key-2-line"></i>
+        </div>
+        <button type="button" onclick="regenToken()" title="重新生成 UUID" style="width:44px; margin-top:0; background:var(--input-bg); color:var(--text); border:1px solid var(--border);"><i class="ri-refresh-line"></i></button>
+    </div>
+
     <button>完成初始化 <i class="ri-arrow-right-line"></i></button>
 </form>
 </body>
@@ -2239,12 +2253,10 @@ const loginHtml = `<!DOCTYPE html>
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
-    // 在页面渲染前及早应用主题，防止闪烁
     const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', savedTheme);
 </script>
 <style>
-/* 浅色模式默认变量 */
 :root { 
     --primary: #6366f1; 
     --bg: #f8fafc; 
@@ -2257,7 +2269,6 @@ const loginHtml = `<!DOCTYPE html>
     --card-border: rgba(0,0,0,0.08);
     --shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.1);
 }
-/* 深色模式变量 */
 [data-theme="dark"] { 
     --bg: #09090b; 
     --card-bg: rgba(24, 24, 27, 0.6); 
@@ -2273,7 +2284,6 @@ const loginHtml = `<!DOCTYPE html>
 body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; position: relative; transition: background 0.3s, color 0.3s; }
 .bg-glow { position: absolute; width: 600px; height: 600px; background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, transparent 70%); top: -20%; left: 50%; transform: translateX(-50%); opacity: 0.6; pointer-events: none; }
 
-/* 主题切换按钮 */
 .theme-toggle { position: absolute; top: 24px; right: 24px; width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--border); background: var(--card-bg); color: var(--text-sub); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; z-index: 100; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
 .theme-toggle:hover { border-color: var(--primary); color: var(--primary); background: rgba(99, 102, 241, 0.1); transform: translateY(-2px); }
 
@@ -2525,6 +2535,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 .batch-bar { display: none; background: var(--card-bg); backdrop-filter: blur(10px); padding: 12px 20px; border-radius: 12px; margin-bottom: 20px; align-items: center; gap: 12px; border: 1px solid var(--primary); box-shadow: 0 10px 25px -5px rgba(99,102,241,0.2); animation: fadeIn 0.3s; }
 .batch-bar.active { display: flex; }
 </style>
+<script>
+    function regenSysToken() {
+        document.getElementById('sys_token').value = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+        showToast("已生成新 Token，请记得保存配置", "success");
+    }
+</script>
 </head>
 <body>
 
@@ -2636,7 +2655,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         <div class="form-group"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                         <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" placeholder="1024-65535" required></div>
                         <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-group"><label>目标 IP (逗号分隔多IP)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1,[ IPV6 ]" required></div>
+                        <div class="form-group"><label>目标 IP (逗号分隔多IP)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1, [ IPV6 ]" required></div>
                         <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
 
                         <div class="form-group">
@@ -2842,7 +2861,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         
                         <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));gap:20px">
                             <div class="form-group"><label>修改密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
-                            <div class="form-group"><label>通信 Token</label><input name="token" value="{{.Token}}"></div>
+                            
+                            <div class="form-group">
+                                <label>通信 Token</label>
+                                <div style="display:flex; gap:8px;">
+                                    <input name="token" id="sys_token" value="{{.Token}}" style="flex:1;">
+                                    <button type="button" class="btn secondary icon" onclick="regenSysToken()" title="生成新 UUID"><i class="ri-refresh-line"></i></button>
+                                </div>
+                            </div>
+
                         </div>
 
                         <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px dashed var(--border);grid-column:1/-1">
@@ -3036,7 +3063,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         else { header.classList.remove('group-collapsed'); rows.forEach(r => r.style.display = 'table-row'); }
     }
 
-    // [新增] 批量操作全选与状态更新逻辑
     function toggleAllRules(source) {
         const checkboxes = document.querySelectorAll('.rule-cb');
         for(let i=0; i<checkboxes.length; i++) {
