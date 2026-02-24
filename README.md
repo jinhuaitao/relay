@@ -105,50 +105,25 @@ chmod +x relay
    ./relay -mode master
 ```
    此时终端会显示：面板启动: http://localhost:8888
- * 初始化设置：
-   * 在浏览器访问 http://<你的服务器IP>:8888。
-   * 您将看到 GoRelay Setup 界面。
-   * 设置 管理员账号、密码 以及 Agent 通信 Token (用于节点连接的密钥)。
-   * 点击 Initialize System。
- * 配置开机自启 (推荐)：
-   初始化完成后，建议停止当前进程 (Ctrl+C)，使用内置的服务安装命令让其后台常驻运行：
-   ./relay -service install -mode master
+   
+# 初始化设置：
 
-   系统会自动识别您的 OS (CentOS/Debian/Alpine) 并配置开机自启服务。
-# 第三步：部署节点 (Agent 端)
- * 登录面板：
-   访问 http://<你的服务器IP>:8888 并登录。
- * 设置面板 IP (重要)：
-   * 进入左侧菜单 ⚙️ 系统设置。
-   * 在 "面板公网IP" 中填入 Master 服务器的 公网 IP (例如 1.2.3.4)。
-   * 点击保存。这一步是为了确保生成的命令能正确连接回面板。
- * 获取安装命令：
-   * 进入左侧菜单 🚀 部署节点。
-   * 输入节点名称（例如：HK-Server-1）。
-   * 点击 生成安装命令，然后点击 复制。
- * 在节点服务器执行：
-   登录到您的 B 机器或 C 机器 (Agent)，粘贴刚才复制的命令并回车。
-   命令示例（自动处理下载、授权和开机自启）：
-   curl -L -o /root/relay ... && /root/relay -service install -mode agent ...
+ 初次运行后，请访问 http://您的服务器IP:8888，进入初始化配置向导设置管理员账号与密码。
+ 
+# 第三步：添加 Agent 节点
+登录面板，进入 “节点部署” 页面。
 
- * 验证状态：
-   回到 Web 面板的 📊 仪表盘监控，您应该能看到新节点状态显示为 “运行中”。
-第四步：添加转发规则
-假设您想通过 B机器 (入口) 转发流量到 C机器 (出口) 的 目标网站。
- * 进入 🔗 转发管理 页面。
- * 添加入口：选择 B 机器的 Agent，填写入库端口 (例如 8080)。
- * 添加出口：选择 C 机器的 Agent。
- * 填写目标：填写最终目标的 IP 和端口 (例如 1.1.1.1 和 80)。
- * 选择协议：TCP / UDP / TCP+UDP。
- * 点击 添加。
-✅ 完成！ 现在访问 B机器IP:8080，流量就会自动经过 B -> C -> 目标。
+填写节点名称并选择架构，点击 “生成安装命令”。
+
+面板将自动下发该节点专属的 UUID 通信 Token，并生成一键安装脚本。
+
+复制脚本至目标服务器 (VPS) 的终端中执行即可，节点将自动上线并连接至 Master。
+
 🛠️ 常用维护命令
 Master (面板) 维护：
  * 停止服务：relay -service uninstall (会移除开机自启并停止进程)
- * 手动重启：systemctl restart gorelay (Systemd 系统) 或 rc-service gorelay restart (Alpine 系统)
- * 查看日志：journalctl -u gorelay -f
-配置文件：
-所有配置和规则均保存在运行目录下的 config.json 文件中。
+ * 手动重启：systemctl restart relay (Systemd 系统) 或 rc-service relay restart (Alpine 系统)
+ * 查看日志：journalctl -u relay -f
 ⚠️ 注意事项
  * 防火墙：请确保 Master 机器放行了 8888 (Web面板) 和 9999 (Agent通信) 端口。Agent 机器需要放行您设置的转发端口。
  * UDP 优化：如果您主要用于转发 UDP 流量（如游戏），建议在服务器上优化 sysctl 参数以获得最佳性能。
