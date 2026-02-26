@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.60"
+	AppVersion      = "v3.0.61"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2721,8 +2721,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             </div>
 
             <div class="card">
-                <h3><i class="ri-list-settings-line"></i> 规则列表</h3>
-                <div class="table-container">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+                    <h3 style="margin:0"><i class="ri-list-settings-line"></i> 规则列表</h3>
+                    <button class="btn icon secondary" onclick="refreshSection('rules', this)" title="局部刷新"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div class="table-container" id="rules-container">
                     <table>
                         <thead>
                             <tr>
@@ -2828,8 +2831,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             </div>
 
             <div class="card">
-                <h3><i class="ri-server-line"></i> 在线节点状态</h3>
-                <div class="table-container">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+                    <h3 style="margin:0"><i class="ri-server-line"></i> 在线节点状态</h3>
+                    <button class="btn icon secondary" onclick="refreshSection('agents', this)" title="局部刷新"><i class="ri-refresh-line"></i></button>
+                </div>
+                <div class="table-container" id="agents-container">
                     {{if .Agents}}
                     <table>
                         <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
@@ -3311,6 +3317,43 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         return parseFloat((b / Math.pow(u, i)).toFixed(2)) + " " + ["B","KB","MB","GB","TB"][i];
     }
     function formatSpeed(b) { if(b<=0) return "0 B/s"; return formatBytes(b)+"/s"; }
+
+    // 局部刷新指定区块
+    function refreshSection(type, btn) {
+        const icon = btn.querySelector('i');
+        icon.classList.add('ri-spin');
+        
+        fetch(location.pathname)
+            .then(res => res.text())
+            .then(html => {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                
+                if (type === 'rules') {
+                    const newContent = doc.getElementById('rules-container');
+                    if (newContent) {
+                        document.getElementById('rules-container').innerHTML = newContent.innerHTML;
+                        const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
+                        collapsed.forEach(g => {
+                            const header = document.querySelector('.group-header[data-group="'+g+'"]');
+                            if(header) setGroupState(header, false); 
+                        });
+                        updateBatchUI();
+                    }
+                } else if (type === 'agents') {
+                    const newContent = doc.getElementById('agents-container');
+                    if (newContent) {
+                        document.getElementById('agents-container').innerHTML = newContent.innerHTML;
+                    }
+                }
+                showToast("刷新成功", "success");
+            })
+            .catch(err => {
+                showToast("获取最新数据失败", "warn");
+            })
+            .finally(() => {
+                setTimeout(() => icon.classList.remove('ri-spin'), 500);
+            });
+    }
 
     function connectWS() {
         const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
