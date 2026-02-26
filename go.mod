@@ -6,6 +6,7 @@ require (
 	github.com/boombuler/barcode v1.1.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pquerna/otp v1.5.0
+    github.com/xtaci/kcp-go/v5 v5.6.70
 	modernc.org/sqlite v1.44.3
 )
 
