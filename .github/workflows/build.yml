@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "main"
+    paths:
+      - 'main.go'  # 只有当 main.go 被修改时才会触发
   workflow_dispatch:
 
 permissions:
