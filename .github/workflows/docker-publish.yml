@@ -40,3 +40,29 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # 新增：TG Docker 镜像构建及推送成功通知
+      - name: Send Telegram Notification on Success
+        if: success()
+        uses: appleboy/telegram-action@master
+        with:
+          to: "5091290643"
+          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          message: |
+            🐳 Docker 镜像构建并推送成功！
+            
+            📦 镜像库: jhtone/relay
+            🏷️ 标签:
+            ${{ steps.meta.outputs.tags }}
+            🔍 查看 Action: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # 新增：TG Docker 镜像构建失败通知
+      - name: Send Telegram Notification on Failure
+        if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: "5091290643"
+          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          message: |
+            ❌ Docker 镜像构建或推送失败！
+            请检查 GitHub Actions 日志以定位错误：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
