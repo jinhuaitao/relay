@@ -82,3 +82,28 @@ jobs:
           files: ./artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 新增：TG 编译发布成功通知
+      - name: Send Telegram Notification
+        if: success()
+        uses: appleboy/telegram-action@master
+        with:
+          to: "5091290643"
+          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          message: |
+            🎉 Relay 转发面板新版本发布成功！
+            
+            📦 项目: ${{ github.repository }}
+            🏷️ 版本: ${{ steps.tag_version.outputs.new_tag }}
+            🔗 下载地址: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag_version.outputs.new_tag }}
+
+  # 新增：TG 编译失败通知 (可选，防止你没注意报错)
+      - name: Send Telegram Notification on Failure
+        if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: "5091290643"
+          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          message: |
+            ❌ Relay 转发面板 Action 运行失败！
+            请检查 GitHub Actions 日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
