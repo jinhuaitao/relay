@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.62"
+	AppVersion      = "v3.0.63"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1193,9 +1193,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(12 * time.Hour)
+	// 1. 服务端：将会话有效期延长至 365 天 (约 8760 小时)
+	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) 
 	mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true})
+	
+	// 2. 客户端：为 Cookie 添加 MaxAge 属性（单位为秒，365天 = 31536000秒）
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 10080})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
