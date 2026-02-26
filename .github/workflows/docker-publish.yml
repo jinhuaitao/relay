@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'main.go' # 仅当 main.go 被修改时才自动触发编译
+  # - 'Dockerfile' # 提示：如果你希望修改 Dockerfile 时也触发，可以取消这行注释
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动点击触发
 
 jobs:
   build:
