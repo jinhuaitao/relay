@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.63"
+	AppVersion      = "v3.0.64"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -100,21 +100,24 @@ type OpLog struct {
 }
 
 type AppConfig struct {
-	WebUser      string            `json:"web_user"`
-	WebPass      string            `json:"web_pass"`
-	AgentToken   string            `json:"agent_token"` // 保留用于兼容老版本节点
-	AgentTokens  map[string]string `json:"agent_tokens"` // [新增] 每个节点独立的 UUID
-	AgentPorts   string            `json:"agent_ports"`
-	MasterIP     string            `json:"master_ip"`
-	MasterIPv6   string            `json:"master_ipv6"`
-	MasterDomain string            `json:"master_domain"`
-	IsSetup      bool              `json:"is_setup"`
-	TgBotToken   string            `json:"tg_bot_token"`
-	TgChatID     string            `json:"tg_chat_id"`
-	TwoFAEnabled bool              `json:"two_fa_enabled"`
-	TwoFASecret  string            `json:"two_fa_secret"`
-	Rules        []LogicalRule     `json:"saved_rules"`
-	Logs         []OpLog           `json:"logs"`
+	WebUser            string            `json:"web_user"`
+	WebPass            string            `json:"web_pass"`
+	AgentToken         string            `json:"agent_token"`
+	AgentTokens        map[string]string `json:"agent_tokens"`
+	AgentPorts         string            `json:"agent_ports"`
+	MasterIP           string            `json:"master_ip"`
+	MasterIPv6         string            `json:"master_ipv6"`
+	MasterDomain       string            `json:"master_domain"`
+	IsSetup            bool              `json:"is_setup"`
+	TgBotToken         string            `json:"tg_bot_token"`
+	TgChatID           string            `json:"tg_chat_id"`
+	TwoFAEnabled       bool              `json:"two_fa_enabled"`
+	TwoFASecret        string            `json:"two_fa_secret"`
+	GithubClientID     string            `json:"github_client_id"`
+	GithubClientSecret string            `json:"github_client_secret"`
+	GithubAllowedUsers string            `json:"github_allowed_users"`
+	Rules              []LogicalRule     `json:"saved_rules"`
+	Logs               []OpLog           `json:"logs"`
 }
 
 type ForwardTask struct {
@@ -699,6 +702,10 @@ func runMaster() {
 	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent))
 	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
 	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken))
+	
+	// 新增 Github OAuth 路由
+	http.HandleFunc("/oauth/github/login", handleGithubLogin)
+	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
 
 	log.Printf("面板启动: http://localhost%s", WebPort)
 	log.Fatal(http.ListenAndServe(WebPort, nil))
@@ -1149,9 +1156,22 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		mu.Lock()
 		isEnabled := config.TwoFAEnabled
+		githubEnabled := config.GithubClientID != "" && config.GithubClientSecret != ""
 		mu.Unlock()
+		
+		errCode := r.URL.Query().Get("err")
+		errMsg := ""
+		if errCode == "1" { errMsg = "账号或密码错误" }
+		if errCode == "2" { errMsg = "2FA 动态码错误" }
+		if errCode == "3" { errMsg = "GitHub 授权失败" }
+		if errCode == "4" { errMsg = "该 GitHub 账号不在允许列表中" }
+
 		t, _ := template.New("l").Parse(loginHtml)
-		t.Execute(w, map[string]interface{}{"TwoFA": isEnabled})
+		t.Execute(w, map[string]interface{}{
+			"TwoFA": isEnabled,
+			"GithubEnabled": githubEnabled,
+			"Error": errMsg,
+		})
 		return
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -1194,11 +1214,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
 	// 1. 服务端：将会话有效期延长至 365 天 (约 8760 小时)
-	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) 
+	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
 	mu.Unlock()
 	
 	// 2. 客户端：为 Cookie 添加 MaxAge 属性（单位为秒，365天 = 31536000秒）
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 10080})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -1206,6 +1226,106 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
+
+// ================= GITHUB OAUTH =================
+
+func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	clientID := config.GithubClientID
+	mu.Unlock()
+
+	if clientID == "" {
+		http.Error(w, "GitHub OAuth 未配置", http.StatusInternalServerError)
+		return
+	}
+
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
+	mu.Lock()
+	clientID := config.GithubClientID
+	clientSecret := config.GithubClientSecret
+	allowedUsersStr := config.GithubAllowedUsers
+	mu.Unlock()
+
+	// 1. 用 code 换取 Access Token
+	tokenURL := fmt.Sprintf("https://github.com/login/oauth/access_token?client_id=%s&client_secret=%s&code=%s", clientID, clientSecret, code)
+	req, _ := http.NewRequest("POST", tokenURL, nil)
+	req.Header.Set("Accept", "application/json")
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+	defer resp.Body.Close()
+
+	var tokenData struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&tokenData)
+	if tokenData.AccessToken == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
+	// 2. 用 Access Token 获取用户信息
+	userReq, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
+	userReq.Header.Set("Authorization", "Bearer "+tokenData.AccessToken)
+	userReq.Header.Set("Accept", "application/json")
+	
+	userResp, err := client.Do(userReq)
+	if err != nil {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+	defer userResp.Body.Close()
+
+	var userData struct {
+		Login string `json:"login"`
+	}
+	json.NewDecoder(userResp.Body).Decode(&userData)
+
+	// 3. 验证用户是否在白名单中
+	allowedUsers := strings.Split(allowedUsersStr, ",")
+	isAllowed := false
+	for _, u := range allowedUsers {
+		if strings.TrimSpace(u) != "" && strings.EqualFold(strings.TrimSpace(u), userData.Login) {
+			isAllowed = true
+			break
+		}
+	}
+
+	if !isAllowed || userData.Login == "" {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		recordLoginFail(ip)
+		http.Redirect(w, r, "/login?err=4", http.StatusSeeOther)
+		return
+	}
+
+	// 4. 登录成功
+	sid := make([]byte, 16)
+	rand.Read(sid)
+	sidStr := hex.EncodeToString(sid)
+	
+	mu.Lock()
+	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
+	mu.Unlock()
+	
+	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 
 func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
@@ -1422,6 +1542,9 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.MasterDomain = r.FormValue("master_domain")
 	config.TgBotToken = r.FormValue("tg_bot_token")
 	config.TgChatID = r.FormValue("tg_chat_id")
+	config.GithubClientID = r.FormValue("github_client_id")
+	config.GithubClientSecret = r.FormValue("github_client_secret")
+	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
 	saveConfigNoLock()
 	mu.Unlock()
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
@@ -2150,6 +2273,12 @@ func loadConfig() {
 				config.TwoFAEnabled = (v == "true")
 			case "two_fa_secret":
 				config.TwoFASecret = v
+			case "github_client_id":
+				config.GithubClientID = v
+			case "github_client_secret":
+				config.GithubClientSecret = v
+			case "github_allowed_users":
+				config.GithubAllowedUsers = v
 			}
 		}
 	}
@@ -2201,6 +2330,9 @@ func saveConfigNoLock() {
 	setS("tg_chat_id", conf.TgChatID)
 	setS("two_fa_enabled", strconv.FormatBool(conf.TwoFAEnabled))
 	setS("two_fa_secret", conf.TwoFASecret)
+	setS("github_client_id", conf.GithubClientID)
+	setS("github_client_secret", conf.GithubClientSecret)
+	setS("github_allowed_users", conf.GithubAllowedUsers)
 
 	_, _ = tx.Exec("DELETE FROM rules")
 	for _, r := range lRules {
@@ -2361,12 +2493,24 @@ button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
     </div>
     {{if .Error}}<div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>{{end}}
     
-    <div class="input-box"><input name="username" placeholder="管理员账号" required autocomplete="off"><i class="ri-user-3-line"></i></div>
-    <div class="input-box"><input type="password" name="password" placeholder="登录密码" required><i class="ri-lock-2-line"></i></div>
+    <div class="input-box"><input name="username" placeholder="管理员账号" autocomplete="off"><i class="ri-user-3-line"></i></div>
+    <div class="input-box"><input type="password" name="password" placeholder="登录密码"><i class="ri-lock-2-line"></i></div>
     {{if .TwoFA}}
-    <div class="input-box"><input name="code" placeholder="2FA 动态验证码" required pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 4px; text-align: center; padding-left: 14px; font-weight: 600; font-family: monospace"><i class="ri-shield-keyhole-line" style="left: auto; right: 14px;"></i></div>
+    <div class="input-box"><input name="code" placeholder="2FA 动态验证码" pattern="[0-9]{6}" maxlength="6" style="letter-spacing: 4px; text-align: center; padding-left: 14px; font-weight: 600; font-family: monospace"><i class="ri-shield-keyhole-line" style="left: auto; right: 14px;"></i></div>
     {{end}}
+    
     <button class="submit-btn">立即登录 <i class="ri-arrow-right-line"></i></button>
+
+    {{if .GithubEnabled}}
+    <div style="display: flex; align-items: center; margin: 20px 0; color: var(--text-sub); font-size: 12px;">
+        <div style="flex: 1; height: 1px; background: var(--border);"></div>
+        <div style="padding: 0 10px;">或</div>
+        <div style="flex: 1; height: 1px; background: var(--border);"></div>
+    </div>
+    <a href="/oauth/github/login" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; background: #24292f; color: #fff; border-radius: 12px; font-size: 14px; font-weight: 500; text-decoration: none; transition: .2s;">
+        <i class="ri-github-fill" style="font-size: 18px;"></i> 使用 GitHub 登录
+    </a>
+    {{end}}
 </form>
 
 <script>
@@ -2922,6 +3066,22 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
                                 <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}"></div>
                                 <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}"></div>
+                            </div>
+                        </div>
+                        
+                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1">
+                            <h4 style="margin:0 0 16px 0;font-size:14px;color:#cbd5e1"><i class="ri-github-fill"></i> GitHub 一键登录配置</h4>
+                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                <div class="form-group"><label>Client ID</label><input name="github_client_id" value="{{.Config.GithubClientID}}" placeholder="留空则禁用"></div>
+                                <div class="form-group"><label>Client Secret</label><input type="password" name="github_client_secret" value="{{.Config.GithubClientSecret}}" placeholder="输入 Secret"></div>
+                            </div>
+                            <div class="form-group" style="margin-top: 16px;">
+                                <label>允许登录的 GitHub 用户名 (必须填写，多账号用逗号分隔)</label>
+                                <input name="github_allowed_users" value="{{.Config.GithubAllowedUsers}}" placeholder="例如: yourname, admin123">
+                            </div>
+                            <div style="font-size:12px;color:var(--text-sub);margin-top:10px;">
+                                * 配置前需在 GitHub -> Developer Settings -> OAuth Apps 中创建一个应用。回调地址请填写: <br/>
+                                <code style="color:var(--primary)">http(s)://你的面板域名/oauth/github/callback</code>
                             </div>
                         </div>
 
