@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.64"
+	AppVersion      = "v3.0.65"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2473,8 +2473,10 @@ input { width: 100%; padding: 12px 14px 12px 44px; background: var(--input-bg); 
 input:focus { border-color: var(--primary); background: var(--input-focus); box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
 input:focus + i { color: var(--primary); }
 
-button.submit-btn { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 14px; font-weight: 500; cursor: pointer; transition: .2s; margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; }
-button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
+.submit-btn { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 12px; font-size: 14px; font-weight: 500; cursor: pointer; transition: .2s; margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; box-sizing: border-box; text-decoration: none; }
+.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
+.github-btn { background: #24292f; margin-top: 0; }
+.github-btn:hover { background: #1b1f23; }
 .error-msg { background: rgba(239, 68, 68, 0.1); color: #ef4444; padding: 10px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; text-align: center; border: 1px solid rgba(239, 68, 68, 0.2); display: flex; align-items: center; justify-content: center; gap: 6px; }
 </style>
 </head>
@@ -2507,7 +2509,7 @@ button.submit-btn:hover { background: #4f46e5; transform: translateY(-1px); }
         <div style="padding: 0 10px;">或</div>
         <div style="flex: 1; height: 1px; background: var(--border);"></div>
     </div>
-    <a href="/oauth/github/login" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; background: #24292f; color: #fff; border-radius: 12px; font-size: 14px; font-weight: 500; text-decoration: none; transition: .2s;">
+    <a href="/oauth/github/login" class="submit-btn github-btn">
         <i class="ri-github-fill" style="font-size: 18px;"></i> 使用 GitHub 登录
     </a>
     {{end}}
