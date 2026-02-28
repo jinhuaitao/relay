@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.65"
+	AppVersion      = "v3.0.66"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1132,6 +1132,16 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func handleSetup(w http.ResponseWriter, r *http.Request) {
+	// 【新增安全防御】：检查是否已经初始化
+	mu.Lock()
+	alreadySetup := config.IsSetup
+	mu.Unlock()
+
+	if alreadySetup {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
 	if r.Method == "POST" {
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
@@ -1151,6 +1161,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	t, _ := template.New("s").Parse(setupHtml)
 	t.Execute(w, nil)
 }
+
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
