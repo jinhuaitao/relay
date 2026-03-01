@@ -45,7 +45,7 @@ import (
 
 
 const (
-	AppVersion      = "v3.0.71"
+	AppVersion      = "v3.0.72"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -3451,9 +3451,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const p = document.getElementById('connPort').value; 
         const finalDwUrl = dwUrl + "-linux-" + arch;
         
-        // 强制使用配置的节点域名
-        const host = m_domain;
-        if(!host) { showToast("请先在设置中配置【节点通信域名】", "warn"); return; }
+        // 【优化点】：如果没配置域名，弹出对话框让用户临时输入 IP
+        let host = m_domain;
+        if(!host) { 
+            host = prompt("未配置域名，将降级为普通 TCP 模式。\n请输入 Master 服务器的 IP 地址\n(注：IPv6 请用中括号包裹，例如 [240e:8a::1])");
+            if(!host) return; // 用户取消了输入
+        }
         
         try {
             document.getElementById('cmdText').innerText = "获取专属凭证中...";
