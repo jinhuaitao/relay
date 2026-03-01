@@ -45,7 +45,7 @@ import (
 
 
 const (
-	AppVersion      = "v3.0.69"
+	AppVersion      = "v3.0.70"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
