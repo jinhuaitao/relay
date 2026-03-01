@@ -47,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.66"
+	AppVersion      = "v3.0.67"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -479,14 +479,27 @@ func getSysStatus() string {
 	return fmt.Sprintf("%s | %s", cpuStr, memStr)
 }
 
-func addLog(r *http.Request, action, msg string) {
-	ip := "System"
-	if r != nil {
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
-		if f := r.Header.Get("X-Forwarded-For"); f != "" {
-			ip = f
-		}
+// --- 安全基础函数 ---
+func getClientIP(r *http.Request) string {
+	if r == nil {
+		return "System"
 	}
+	// 优先信任 Cloudflare 等安全反代的真实 IP 头
+	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
+		return ip
+	}
+	// 防伪造：提取 X-Forwarded-For 的第一个 IP（最原始客户端）
+	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+		ips := strings.Split(ip, ",")
+		return strings.TrimSpace(ips[0])
+	}
+	// 兜底：直接获取连接的物理 IP
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return ip
+}
+
+func addLog(r *http.Request, action, msg string) {
+	ip := getClientIP(r)
 	now := time.Now().Format("01-02 15:04:05")
 	_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
 }
@@ -1185,7 +1198,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := getClientIP(r)
 	if !checkLoginRateLimit(ip) {
 		http.Error(w, "尝试次数过多", 429)
 		return
@@ -1229,7 +1242,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 	
 	// 2. 客户端：为 Cookie 添加 MaxAge 属性（单位为秒，365天 = 31536000秒）
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -1317,7 +1330,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isAllowed || userData.Login == "" {
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		ip := getClientIP(r)
 		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=4", http.StatusSeeOther)
 		return
@@ -1333,7 +1346,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
