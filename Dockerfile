@@ -3,27 +3,30 @@
 # ============================
 FROM golang:1.23-alpine AS builder
 
+# 【关键修复 1】设置国内 Go 代理，解决下载依赖超时报错的问题
+ENV GOPROXY=https://goproxy.cn,direct
+# 提前声明编译环境变量
+ENV CGO_ENABLED=0 
+ENV GOOS=linux
+
+# 【关键修复 2】安装 git 工具，防止某些模块拉取时报错
+RUN apk add --no-cache git
+
 # 设置工作目录
 WORKDIR /src
 
 # 复制源代码
 COPY main.go main.go
 
-# 初始化 Go Module 并且获取依赖
-# 关键修改：
-# 1. 先 init
-# 2. 强制降低 modernc.org/sqlite 版本到 v1.33.1 (兼容纯 Go 编译的 SQLite)
-# 3. 获取我们新引入的 autocert 证书库
-# 4. 最后再运行 mod tidy 清理并下载其他依赖
+# 初始化并下载依赖 (已包含新加的 autocert)
 RUN go mod init gorelay && \
     go get modernc.org/sqlite@v1.33.1 && \
     go get golang.org/x/crypto/acme/autocert && \
     go mod tidy
 
 # 编译二进制文件
-# CGO_ENABLED=0: 禁用 CGO (必须)
 # -ldflags="-s -w": 去除符号表和调试信息，极限减小体积
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app main.go
+RUN go build -ldflags="-s -w" -o app main.go
 
 # ============================
 # 第二阶段：运行 (Runner)
