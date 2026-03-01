@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"html/template"
@@ -41,13 +37,14 @@ import (
 	"github.com/boombuler/barcode/qr"
 	"github.com/gorilla/websocket"
 	"github.com/pquerna/otp/totp"
+	"golang.org/x/crypto/acme/autocert"
 	_ "modernc.org/sqlite"
 )
 
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.67"
+	AppVersion      = "v3.0.68"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -108,6 +105,7 @@ type AppConfig struct {
 	MasterIP           string            `json:"master_ip"`
 	MasterIPv6         string            `json:"master_ipv6"`
 	MasterDomain       string            `json:"master_domain"`
+	PanelDomain        string            `json:"panel_domain"`
 	IsSetup            bool              `json:"is_setup"`
 	TgBotToken         string            `json:"tg_bot_token"`
 	TgChatID           string            `json:"tg_chat_id"`
@@ -215,7 +213,7 @@ var (
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
 
-	wsUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	wsUpgrader = websocket.Upgrader{} // 已移除危险的 CheckOrigin: return true，防范 CSWSH
 	wsClients  = make(map[*websocket.Conn]bool)
 	wsMu       sync.Mutex
 
@@ -323,47 +321,6 @@ func recordLoginFail(ip string) {
 	if count >= 5 {
 		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
 	}
-}
-
-func autoGenerateCert() error {
-	if _, err := os.Stat("server.crt"); err == nil {
-		if _, err := os.Stat("server.key"); err == nil {
-			return nil
-		}
-	}
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return err
-	}
-	notBefore := time.Now()
-	notAfter := notBefore.Add(3650 * 24 * time.Hour)
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
-
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"GoRelay-Pro"},
-			CommonName:   "GoRelay Master",
-		},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return err
-	}
-	certOut, _ := os.Create("server.crt")
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	certOut.Close()
-	keyOut, _ := os.OpenFile("server.key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
-	keyOut.Close()
-	return nil
 }
 
 func performSelfUpdate() error {
@@ -484,16 +441,13 @@ func getClientIP(r *http.Request) string {
 	if r == nil {
 		return "System"
 	}
-	// 优先信任 Cloudflare 等安全反代的真实 IP 头
 	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
 		return ip
 	}
-	// 防伪造：提取 X-Forwarded-For 的第一个 IP（最原始客户端）
 	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
 		ips := strings.Split(ip, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	// 兜底：直接获取连接的物理 IP
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
 }
@@ -622,7 +576,6 @@ func sendTelegram(text string) {
 // ================= MASTER =================
 
 func runMaster() {
-	autoGenerateCert()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
@@ -634,62 +587,92 @@ func runMaster() {
 		}
 	}()
 	go broadcastLoop()
-	go func() {
-		var agentTlsConfig *tls.Config
-		if _, err := os.Stat("server.crt"); err == nil {
-			if _, err := os.Stat("server.key"); err == nil {
-				if cert, err := tls.LoadX509KeyPair("server.crt", "server.key"); err == nil {
-					agentTlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
-					isMasterTLS = true
-					log.Println("🔐 Master 已启用 TLS 模式")
+
+	mu.Lock()
+	panelDomain := config.PanelDomain
+	nodeDomain := config.MasterDomain
+	portsStr := config.AgentPorts
+	if portsStr == "" {
+		portsStr = "9999"
+	}
+	mu.Unlock()
+
+	var tlsConfig *tls.Config
+	isMasterTLS = false
+
+	// 构建合法的域名白名单列表
+	var allowedDomains []string
+	if panelDomain != "" && !strings.Contains(panelDomain, "127.0.0.1") && !strings.Contains(panelDomain, "localhost") {
+		allowedDomains = append(allowedDomains, panelDomain)
+	}
+	if nodeDomain != "" && !strings.Contains(nodeDomain, "127.0.0.1") && !strings.Contains(nodeDomain, "localhost") {
+		if nodeDomain != panelDomain { // 防止重复
+			allowedDomains = append(allowedDomains, nodeDomain)
+		}
+	}
+
+	// 智能证书申请与绑定逻辑
+	if len(allowedDomains) > 0 {
+		log.Printf("🌐 检测到有效域名: %v，准备全自动申请合法 TLS 证书", allowedDomains)
+		
+		certManager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(allowedDomains...),
+			Cache:      autocert.DirCache("certs"),
+		}
+		tlsConfig = certManager.TLSConfig()
+		isMasterTLS = true
+
+		go func() {
+			log.Println("⚡ 启动 80 端口用于自动证书验证和 HTTPS 重定向")
+			err := http.ListenAndServe(":80", certManager.HTTPHandler(nil))
+			if err != nil {
+				log.Printf("⚠️ 80 端口启动失败 (请确保未被占用且开放了防火墙): %v", err)
+			}
+		}()
+	} else {
+		log.Println("⚠️ 未配置有效公网域名，Agent 和面板将以纯 TCP / HTTP 明文模式运行")
+	}
+
+	ports := strings.Split(portsStr, ",")
+	for _, pStr := range ports {
+		pStr = strings.TrimSpace(pStr)
+		if pStr == "" {
+			continue
+		}
+		if !strings.Contains(pStr, ":") {
+			pStr = ":" + pStr
+		}
+
+		go func(p string) {
+			var ln net.Listener
+			var err error
+
+			if isMasterTLS && tlsConfig != nil {
+				ln, err = tls.Listen("tcp", p, tlsConfig)
+			} else {
+				ln, err = net.Listen("tcp", p)
+			}
+
+			if err != nil {
+				log.Printf("❌ 监听端口 %s 失败: %v", p, err)
+				return
+			}
+			
+			if isMasterTLS {
+				log.Printf("✅ Agent 监听端口启动 (安全 TLS 模式): %s", p)
+			} else {
+				log.Printf("✅ Agent 监听端口启动 (纯 TCP 模式): %s", p)
+			}
+
+			for {
+				c, err := ln.Accept()
+				if err == nil {
+					go handleAgentConn(c)
 				}
 			}
-		}
-		if !isMasterTLS {
-			log.Println("⚠️ Master 已启用 TCP 模式 (未找到证书或加载失败)")
-		}
-
-		portsStr := config.AgentPorts
-		if portsStr == "" {
-			portsStr = "9999"
-		}
-		ports := strings.Split(portsStr, ",")
-
-		for _, pStr := range ports {
-			pStr = strings.TrimSpace(pStr)
-			if pStr == "" {
-				continue
-			}
-			if !strings.Contains(pStr, ":") {
-				pStr = ":" + pStr
-			}
-
-			go func(p string) {
-				var ln net.Listener
-				var err error
-
-				if isMasterTLS {
-					ln, err = tls.Listen("tcp", p, agentTlsConfig)
-				}
-				if ln == nil {
-					ln, err = net.Listen("tcp", p)
-				}
-
-				if err != nil {
-					log.Printf("❌ 监听端口 %s 失败: %v", p, err)
-					return
-				}
-				log.Printf("✅ Agent 监听端口启动: %s", p)
-
-				for {
-					c, err := ln.Accept()
-					if err == nil {
-						go handleAgentConn(c)
-					}
-				}
-			}(pStr)
-		}
-	}()
+		}(pStr)
+	}
 
 	http.HandleFunc("/", authMiddleware(handleDashboard))
 	http.HandleFunc("/ws", authMiddleware(handleWS))
@@ -716,12 +699,24 @@ func runMaster() {
 	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
 	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken))
 	
-	// 新增 Github OAuth 路由
 	http.HandleFunc("/oauth/github/login", handleGithubLogin)
 	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
 
-	log.Printf("面板启动: http://localhost%s", WebPort)
-	log.Fatal(http.ListenAndServe(WebPort, nil))
+	if isMasterTLS && tlsConfig != nil {
+		displayDomain := panelDomain
+		if displayDomain == "" {
+			displayDomain = nodeDomain
+		}
+		log.Printf("🚀 控制面板启动 (自动安全 HTTPS): https://%s", displayDomain)
+		server := &http.Server{
+			Addr:      ":443",
+			TLSConfig: tlsConfig,
+		}
+		log.Fatal(server.ListenAndServeTLS("", "")) 
+	} else {
+		log.Printf("🚀 控制面板启动 (普通 HTTP): http://localhost%s", WebPort)
+		log.Fatal(http.ListenAndServe(WebPort, nil))
+	}
 }
 
 func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
@@ -1088,12 +1083,13 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		MasterIP     string
 		MasterIPv6   string
 		MasterDomain string
+		PanelDomain  string
 		Config       AppConfig
 		TwoFA        bool
 		IsTLS        bool
 		Ports        []string
 		Version      string
-	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
+	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -1145,7 +1141,6 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func handleSetup(w http.ResponseWriter, r *http.Request) {
-	// 【新增安全防御】：检查是否已经初始化
 	mu.Lock()
 	alreadySetup := config.IsSetup
 	mu.Unlock()
@@ -1237,11 +1232,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	// 1. 服务端：将会话有效期延长至 365 天 (约 8760 小时)
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
 	mu.Unlock()
 	
-	// 2. 客户端：为 Cookie 添加 MaxAge 属性（单位为秒，365天 = 31536000秒）
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1280,7 +1273,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	allowedUsersStr := config.GithubAllowedUsers
 	mu.Unlock()
 
-	// 1. 用 code 换取 Access Token
 	tokenURL := fmt.Sprintf("https://github.com/login/oauth/access_token?client_id=%s&client_secret=%s&code=%s", clientID, clientSecret, code)
 	req, _ := http.NewRequest("POST", tokenURL, nil)
 	req.Header.Set("Accept", "application/json")
@@ -1302,7 +1294,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 用 Access Token 获取用户信息
 	userReq, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
 	userReq.Header.Set("Authorization", "Bearer "+tokenData.AccessToken)
 	userReq.Header.Set("Accept", "application/json")
@@ -1319,7 +1310,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(userResp.Body).Decode(&userData)
 
-	// 3. 验证用户是否在白名单中
 	allowedUsers := strings.Split(allowedUsersStr, ",")
 	isAllowed := false
 	for _, u := range allowedUsers {
@@ -1336,7 +1326,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. 登录成功
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
@@ -1564,6 +1553,7 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.MasterIP = r.FormValue("master_ip")
 	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
+	config.PanelDomain = r.FormValue("panel_domain")
 	config.TgBotToken = r.FormValue("tg_bot_token")
 	config.TgChatID = r.FormValue("tg_chat_id")
 	config.GithubClientID = r.FormValue("github_client_id")
@@ -1742,7 +1732,15 @@ func runAgent(name, masterAddr, token string) {
 		var conn net.Conn
 		var err error
 		if useTLS {
-			conn, err = tls.Dial("tcp", masterAddr, &tls.Config{InsecureSkipVerify: true})
+			host, _, errHost := net.SplitHostPort(masterAddr)
+			if errHost != nil {
+				host = masterAddr
+			}
+			// 严格证书校验防御中间人攻击 (MITM)
+			conn, err = tls.Dial("tcp", masterAddr, &tls.Config{
+				ServerName: host,
+				MinVersion: tls.VersionTLS12,
+			})
 		} else {
 			conn, err = net.Dial("tcp", masterAddr)
 		}
@@ -2287,6 +2285,8 @@ func loadConfig() {
 				config.MasterIPv6 = v
 			case "master_domain":
 				config.MasterDomain = v
+			case "panel_domain":
+				config.PanelDomain = v
 			case "is_setup":
 				config.IsSetup = (v == "true")
 			case "tg_bot_token":
@@ -2349,6 +2349,7 @@ func saveConfigNoLock() {
 	setS("master_ip", conf.MasterIP)
 	setS("master_ipv6", conf.MasterIPv6)
 	setS("master_domain", conf.MasterDomain)
+	setS("panel_domain", conf.PanelDomain)
 	setS("is_setup", strconv.FormatBool(conf.IsSetup))
 	setS("tg_bot_token", conf.TgBotToken)
 	setS("tg_chat_id", conf.TgChatID)
@@ -3086,6 +3087,22 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                 <div style="font-size:12px;color:var(--warning-text);margin-top:6px;"><i class="ri-alert-line"></i> 修改后需手动重启服务</div>
                             </div>
                         </div>
+
+						<div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1;margin-top:10px;">
+                            <h4 style="margin:0 0 16px 0;font-size:14px;"><i class="ri-global-line"></i> 网络与域名配置</h4>
+                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                <div class="form-group">
+                                    <label>面板访问域名 (Panel) <i class="ri-cloud-line" title="可套CDN开启小云朵，供浏览器访问" style="color:#3b82f6;cursor:help"></i></label>
+                                    <input name="panel_domain" value="{{.PanelDomain}}" placeholder="例如: panel.yourdomain.com">
+                                </div>
+                                <div class="form-group">
+                                    <label>节点通信域名 (Node) <i class="ri-server-line" title="必须解析真实IP(关闭云朵)，供Agent连接" style="color:#10b981;cursor:help"></i></label>
+                                    <input name="master_domain" value="{{.MasterDomain}}" placeholder="例如: node.yourdomain.com">
+                                </div>
+                                <div class="form-group"><label>Master IPv4</label><input name="master_ip" value="{{.MasterIP}}"></div>
+                                <div class="form-group"><label>Master IPv6</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
+                            </div>
+                        </div>
                         
                         <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1">
                             <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 通知</h4>
@@ -3133,12 +3150,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <div>
                                 <button type="button" class="btn success" onclick="updateSystem()" id="btn-update">检查更新</button>
                             </div>
-                        </div>
-
-                        <div class="grid-form" style="gap:16px;margin-top:10px;grid-column:1/-1;grid-template-columns: 1fr 1fr 1fr;">
-                            <div class="form-group"><label>面板域名</label><input name="master_domain" value="{{.MasterDomain}}"></div>
-                            <div class="form-group"><label>IPv4</label><input name="master_ip" value="{{.MasterIP}}"></div>
-                            <div class="form-group"><label>IPv6</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
                         </div>
 
                         <div style="display:flex;gap:12px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px;grid-column:1/-1">
