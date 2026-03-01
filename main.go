@@ -45,7 +45,7 @@ import (
 
 
 const (
-	AppVersion      = "v3.0.70"
+	AppVersion      = "v3.0.71"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -103,8 +103,6 @@ type AppConfig struct {
 	AgentToken         string            `json:"agent_token"`
 	AgentTokens        map[string]string `json:"agent_tokens"`
 	AgentPorts         string            `json:"agent_ports"`
-	MasterIP           string            `json:"master_ip"`
-	MasterIPv6         string            `json:"master_ipv6"`
 	MasterDomain       string            `json:"master_domain"`
 	PanelDomain        string            `json:"panel_domain"`
 	IsSetup            bool              `json:"is_setup"`
@@ -1112,8 +1110,6 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		User         string
 		DownloadURL  string
 		TotalTraffic int64
-		MasterIP     string
-		MasterIPv6   string
 		MasterDomain string
 		PanelDomain  string
 		Config       AppConfig
@@ -1121,7 +1117,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		IsTLS        bool
 		Ports        []string
 		Version      string
-	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterIP, conf.MasterIPv6, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
+	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -1582,8 +1578,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.WebPass = salt + "$" + hashPassword(p, salt)
 	}
 	config.AgentPorts = r.FormValue("agent_ports")
-	config.MasterIP = r.FormValue("master_ip")
-	config.MasterIPv6 = r.FormValue("master_ipv6")
 	config.MasterDomain = r.FormValue("master_domain")
 	config.PanelDomain = r.FormValue("panel_domain")
 	config.TgBotToken = r.FormValue("tg_bot_token")
@@ -2311,10 +2305,6 @@ func loadConfig() {
 				json.Unmarshal([]byte(v), &config.AgentTokens)
 			case "agent_ports":
 				config.AgentPorts = v
-			case "master_ip":
-				config.MasterIP = v
-			case "master_ipv6":
-				config.MasterIPv6 = v
 			case "master_domain":
 				config.MasterDomain = v
 			case "panel_domain":
@@ -2378,8 +2368,6 @@ func saveConfigNoLock() {
 		setS("agent_tokens", string(b))
 	}
 	setS("agent_ports", conf.AgentPorts)
-	setS("master_ip", conf.MasterIP)
-	setS("master_ipv6", conf.MasterIPv6)
 	setS("master_domain", conf.MasterDomain)
 	setS("panel_domain", conf.PanelDomain)
 	setS("is_setup", strconv.FormatBool(conf.IsSetup))
@@ -3010,7 +2998,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 <div style="background:var(--input-bg);padding:24px;border-radius:16px;border:1px solid var(--border)">
                     <div class="grid-form" style="margin-bottom:24px;grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
                         <div class="form-group"><label>1. 节点名称</label><input id="agentName" value="Node-01"></div>
-                        <div class="form-group"><label>2. 连接方式</label><select id="addrType"><option value="domain">域名 ({{.MasterDomain}})</option><option value="v4">IPv4 ({{.MasterIP}})</option><option value="v6">IPv6 ({{.MasterIPv6}})</option></select></div>
+                        <div class="form-group"><label>2. 连接域名 (Node)</label><input value="{{.MasterDomain}}" disabled style="background:var(--bg-body);opacity:0.8;cursor:not-allowed" title="为了安全，Agent 节点已强制使用域名和 TLS 加密连接"></div>
                         <div class="form-group">
                             <label>3. 通信端口</label>
                             <select id="connPort">
@@ -3131,8 +3119,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                     <label>节点通信域名 (Node) <i class="ri-server-line" title="必须解析真实IP(关闭云朵)，供Agent连接" style="color:#10b981;cursor:help"></i></label>
                                     <input name="master_domain" value="{{.MasterDomain}}" placeholder="例如: node.yourdomain.com">
                                 </div>
-                                <div class="form-group"><label>Master IPv4</label><input name="master_ip" value="{{.MasterIP}}"></div>
-                                <div class="form-group"><label>Master IPv6</label><input name="master_ipv6" value="{{.MasterIPv6}}"></div>
                             </div>
                         </div>
                         
@@ -3266,7 +3252,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 </div>
 
 <script>
-    var m_domain="{{.MasterDomain}}", m_v4="{{.MasterIP}}", m_v6="{{.MasterIPv6}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+    var m_domain="{{.MasterDomain}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
     var lastRuleStats = {}; 
     var ruleCharts = {}; 
     
@@ -3461,12 +3447,13 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const n = document.getElementById('agentName').value;
         if (!n) { showToast("请输入节点名称", "warn"); return; }
         
-        const t = document.getElementById('addrType').value;
         const arch = document.getElementById('archType').value;
         const p = document.getElementById('connPort').value; 
         const finalDwUrl = dwUrl + "-linux-" + arch;
-        const host = (t === "domain") ? (m_domain || location.hostname) : (t === "v4" ? m_v4 : '['+m_v6+']');
-        if(!host || host === "[]") { showToast("请先在设置中配置面板地址", "warn"); return; }
+        
+        // 强制使用配置的节点域名
+        const host = m_domain;
+        if(!host) { showToast("请先在设置中配置【节点通信域名】", "warn"); return; }
         
         try {
             document.getElementById('cmdText').innerText = "获取专属凭证中...";
