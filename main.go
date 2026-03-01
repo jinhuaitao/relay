@@ -703,6 +703,31 @@ func runMaster() {
 	http.HandleFunc("/oauth/github/login", handleGithubLogin)
 	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
 
+	// --- 启动 Web 面板服务 ---
+	// 【新增】域名路由拦截器：防止通过节点通信域名访问控制面板
+	webHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pDomain := config.PanelDomain
+		nDomain := config.MasterDomain
+		mu.Unlock()
+
+		// 如果同时配置了两个不同的域名，触发拦截逻辑
+		if pDomain != "" && nDomain != "" && pDomain != nDomain {
+			host := r.Host
+			// 去除可能携带的端口号
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			// 如果访客使用的是节点通信域名 (Node Domain)，直接拒绝访问，伪装成 404
+			if strings.EqualFold(host, nDomain) {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		// 正常放行（允许使用面板域名或 IP 直接访问），交给默认路由处理
+		http.DefaultServeMux.ServeHTTP(w, r)
+	})
+
 	if isMasterTLS && tlsConfig != nil {
 		displayDomain := panelDomain
 		if displayDomain == "" {
@@ -712,11 +737,17 @@ func runMaster() {
 		server := &http.Server{
 			Addr:      ":443",
 			TLSConfig: tlsConfig,
+			Handler:   webHandler, // 使用自定义的拦截器
 		}
+		// 传入空字符串，让 autocert 全权接管证书处理
 		log.Fatal(server.ListenAndServeTLS("", "")) 
 	} else {
 		log.Printf("🚀 控制面板启动 (普通 HTTP): http://localhost%s", WebPort)
-		log.Fatal(http.ListenAndServe(WebPort, nil))
+		server := &http.Server{
+			Addr:    WebPort,
+			Handler: webHandler, // 使用自定义的拦截器
+		}
+		log.Fatal(server.ListenAndServe())
 	}
 }
 
