@@ -3238,6 +3238,21 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     </div>
 </div>
 
+<div id="inputModal" class="modal">
+    <div class="modal-content" style="max-width:380px;text-align:center;padding:32px">
+        <div style="font-size:48px;margin-bottom:16px;line-height:1">🌐</div>
+        <h3 style="justify-content:center;margin-bottom:8px;font-size:18px" id="i_title">输入信息</h3>
+        <p style="color:var(--text-sub);margin-bottom:20px;line-height:1.5;font-size:13px" id="i_msg"></p>
+        <div style="margin-bottom:24px">
+            <input id="i_input" placeholder="" style="width:100%;text-align:center;font-family:var(--font-mono);font-size:15px;padding:12px;border-radius:10px;box-sizing:border-box;">
+        </div>
+        <div style="display:flex;gap:12px">
+            <button class="btn secondary" style="flex:1" id="i_btn_cancel">取消</button>
+            <button class="btn" style="flex:1" id="i_btn_confirm">确认</button>
+        </div>
+    </div>
+</div>
+
 <div id="twoFAModal" class="modal">
     <div class="modal-content" style="text-align:center;max-width:340px">
         <span class="close-modal" onclick="document.getElementById('twoFAModal').style.display='none'"><i class="ri-close-line"></i></span>
@@ -3442,7 +3457,45 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('confirmModal').style.display = 'block';
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
+    // 异步弹出自定义输入框
+    function showInput(title, msg, placeholder) {
+        return new Promise((resolve) => {
+            document.getElementById('i_title').innerText = title;
+            document.getElementById('i_msg').innerHTML = msg;
+            const inputEl = document.getElementById('i_input');
+            inputEl.placeholder = placeholder;
+            inputEl.value = '';
+            
+            const modal = document.getElementById('inputModal');
+            const btnConfirm = document.getElementById('i_btn_confirm');
+            const btnCancel = document.getElementById('i_btn_cancel');
+            
+            const cleanup = () => {
+                modal.style.display = 'none';
+                btnConfirm.onclick = null;
+                btnCancel.onclick = null;
+                inputEl.onkeydown = null;
+            };
 
+            btnConfirm.onclick = () => {
+                cleanup();
+                resolve(inputEl.value.trim());
+            };
+            btnCancel.onclick = () => {
+                cleanup();
+                resolve(null);
+            };
+            
+            // 支持回车键快速确认
+            inputEl.onkeydown = (e) => {
+                if (e.key === 'Enter') btnConfirm.click();
+            };
+            
+            modal.style.display = 'block';
+            setTimeout(() => inputEl.focus(), 100); // 自动获取焦点
+        });
+    }
+    // 替换为最新的 genCmd() 逻辑：
     async function genCmd() {
         const n = document.getElementById('agentName').value;
         if (!n) { showToast("请输入节点名称", "warn"); return; }
@@ -3451,11 +3504,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const p = document.getElementById('connPort').value; 
         const finalDwUrl = dwUrl + "-linux-" + arch;
         
-        // 【优化点】：如果没配置域名，弹出对话框让用户临时输入 IP
         let host = m_domain;
         if(!host) { 
-            host = prompt("未配置域名，将降级为普通 TCP 模式。\n请输入 Master 服务器的 IP 地址\n(注：IPv6 请用中括号包裹，例如 [240e:8a::1])");
-            if(!host) return; // 用户取消了输入
+            // 【华丽变身】：使用异步自定 UI 弹窗代替原生 prompt
+            host = await showInput(
+                "未配置域名 (降级 TCP)", 
+                "请输入 Master 服务器的真实 IP 地址<br><span style='color:var(--warning-text);font-weight:600'>注：IPv6 请用中括号包裹，例如 [240e:8a::1]</span>", 
+                "例如: 1.2.3.4 或 [240e::1]"
+            );
+            if(!host) return; // 用户点击了取消或关闭了弹窗
         }
         
         try {
@@ -3498,7 +3555,19 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
-    window.onclick = function(e) { if(e.target.className === 'modal') { closeEdit(); closeConfirm(); document.getElementById('twoFAModal').style.display='none'; } }
+    // 将原来的 window.onclick 替换为：
+    window.onclick = function(e) { 
+        if(e.target.className === 'modal') { 
+            closeEdit(); 
+            closeConfirm(); 
+            document.getElementById('twoFAModal').style.display='none'; 
+            // 如果点击了背景，且输入框正在显示，则触发取消逻辑
+            const btnCancel = document.getElementById('i_btn_cancel');
+            if(btnCancel && document.getElementById('inputModal').style.display === 'block') {
+                btnCancel.click();
+            }
+        } 
+    }
 
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
