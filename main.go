@@ -45,7 +45,7 @@ import (
 
 
 const (
-	AppVersion      = "v3.0.72"
+	AppVersion      = "v3.0.73"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -572,6 +572,151 @@ func sendTelegram(text string) {
 	go func() { http.PostForm(api, data) }()
 }
 
+// ================= TG BOT LOOP =================
+func startTgBotLoop() {
+	var offset int64 = 0
+	for {
+		mu.Lock()
+		token := config.TgBotToken
+		allowedChat := config.TgChatID
+		mu.Unlock()
+
+		if token == "" || allowedChat == "" {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		client := http.Client{Timeout: 65 * time.Second}
+		urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=60", token, offset)
+		resp, err := client.Get(urlStr)
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		var res struct {
+			Ok     bool `json:"ok"`
+			Result []struct {
+				UpdateID int64 `json:"update_id"`
+				Message  *struct {
+					Chat struct {
+						ID int64 `json:"id"`
+					} `json:"chat"`
+					Text string `json:"text"`
+				} `json:"message"`
+			} `json:"result"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			resp.Body.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		resp.Body.Close()
+
+		for _, update := range res.Result {
+			offset = update.UpdateID + 1
+			if update.Message == nil {
+				continue
+			}
+
+			chatIdStr := fmt.Sprintf("%d", update.Message.Chat.ID)
+			if chatIdStr != allowedChat {
+				continue
+			}
+
+			text := strings.TrimSpace(update.Message.Text)
+			if text == "" {
+				continue
+			}
+
+			parts := strings.Split(text, " ")
+			cmd := parts[0]
+
+			var reply string
+			switch cmd {
+			case "/start", "/help":
+				reply = "🤖 GoRelay Pro 交互终端\n\n" +
+					"/status - 查看实时节点与流量状态\n" +
+					"/rules - 查看所有转发规则列表\n" +
+					"/toggle <ID> - 启动或暂停指定规则\n" +
+					"/restart - 远程重启主控面板服务"
+			case "/status":
+				mu.Lock()
+				var tx, rx int64
+				for _, r := range rules {
+					tx += r.TotalTx
+					rx += r.TotalRx
+				}
+				reply = fmt.Sprintf("📊 系统实时状态\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点列表 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+				for _, a := range agents {
+					reply += fmt.Sprintf("🟢 %s\n状态: %s\n\n", a.Name, a.SysStatus)
+				}
+				if len(agents) == 0 {
+					reply += "暂无节点在线"
+				}
+				mu.Unlock()
+			case "/rules":
+				mu.Lock()
+				if len(rules) == 0 {
+					reply = "暂无转发规则"
+				} else {
+					reply = "📜 转发规则列表\n\n"
+					for _, r := range rules {
+						status := "🟢 运行中"
+						if r.Disabled {
+							status = "🔴 已暂停"
+						}
+						groupStr := r.Group
+						if groupStr == "" {
+							groupStr = "默认"
+						}
+						reply += fmt.Sprintf("【%s】 %s\nID: %s\n状态: %s\n流量: %s\n\n", groupStr, r.Note, r.ID, status, formatBytes(r.TotalTx+r.TotalRx))
+					}
+				}
+				mu.Unlock()
+			case "/toggle":
+				if len(parts) > 1 {
+					id := parts[1]
+					mu.Lock()
+					found := false
+					for i := range rules {
+						if rules[i].ID == id {
+							rules[i].Disabled = !rules[i].Disabled
+							state := "已启动 ▶️"
+							if rules[i].Disabled {
+								state = "已暂停 ⏸️"
+							}
+							reply = fmt.Sprintf("✅ 规则【%s】设置成功\n当前状态: %s", rules[i].Note, state)
+							saveConfigNoLock()
+							go pushConfigToAll()
+							found = true
+							break
+						}
+					}
+					mu.Unlock()
+					if !found {
+						reply = "❌ 未找到 ID 为 " + id + " 的规则"
+					}
+				} else {
+					reply = "⚠️ 请提供规则 ID，格式: /toggle 12345678"
+				}
+			case "/restart":
+				reply = "🔄 接收到安全指令，系统即将重启..."
+				go func() {
+					time.Sleep(2 * time.Second)
+					doRestart()
+				}()
+			}
+
+			if reply != "" {
+				sendTelegram(reply)
+			}
+		}
+	}
+}
+
+
 // ================= MASTER =================
 
 func runMaster() {
@@ -586,6 +731,7 @@ func runMaster() {
 		}
 	}()
 	go broadcastLoop()
+	go startTgBotLoop() // 注入 TG Bot 长轮询协程
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -700,6 +846,10 @@ func runMaster() {
 	
 	http.HandleFunc("/oauth/github/login", handleGithubLogin)
 	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
+	
+	http.HandleFunc("/manifest.json", handleManifest)
+	http.HandleFunc("/sw.js", handleServiceWorker)
+	http.HandleFunc("/icon.svg", handleIcon)
 
 	// --- 启动 Web 面板服务 ---
 	// 【新增】域名路由拦截器：防止通过节点通信域名访问控制面板
@@ -1055,6 +1205,27 @@ func pushConfigToAll() {
 
 // ================= WEB HANDLERS =================
 
+func handleManifest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(manifestJSON))
+}
+
+func handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Write([]byte(serviceWorkerJS))
+}
+
+func handleIcon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=31536000")
+	
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+		<rect width="512" height="512" fill="#6366f1"/>
+		<text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" fill="#ffffff" font-family="system-ui, sans-serif" font-size="130" font-weight="bold" letter-spacing="4">Relay</text>
+	</svg>`
+	w.Write([]byte(svg))
+}
+
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	al := make([]AgentInfo, 0)
@@ -1263,7 +1434,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
 	mu.Unlock()
 	
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: true, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -1363,7 +1534,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: true, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -2437,6 +2608,8 @@ const setupHtml = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#6366f1">
 <style>
 :root { --primary: #6366f1; --bg: #09090b; --card-bg: #18181b; --text: #fafafa; --text-sub: #a1a1aa; --border: #27272a; --input-bg: #27272a; }
 body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-image: radial-gradient(circle at 50% -20%, #2e1065, transparent 40%); }
@@ -2461,6 +2634,7 @@ button:hover { background: #4f46e5; }
     <div class="input-group"><input type="password" name="password" placeholder="登录密码" required><i class="ri-lock-password-line"></i></div>
     <button>完成初始化 <i class="ri-arrow-right-line"></i></button>
 </form>
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); }); }</script>
 </body>
 </html>`
 
@@ -2471,6 +2645,8 @@ const loginHtml = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#6366f1">
 <script>
     const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', savedTheme);
@@ -2573,6 +2749,7 @@ input:focus + i { color: var(--primary); }
         document.getElementById('theme-icon').className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
     }
 </script>
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); }); }</script>
 </body>
 </html>`
 
@@ -2585,6 +2762,8 @@ const dashboardHtml = `
 <title>GoRelay Pro Dashboard</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#6366f1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 :root {
@@ -3736,8 +3915,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         d.logs.forEach(l => {
                             html += '<tr><td style="font-family:var(--font-mono);color:var(--text-sub)">'+l.time+'</td>' +
                                     '<td>'+l.ip+'</td>' +
-                                    '<td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">'+l.action+'</span></td>' +
-                                    '<td style="color:var(--text-sub)">'+l.msg+'</td></tr>';
+                                    '<td><span class=\"badge\" style=\"background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)\">'+l.action+'</span></td>' +
+                                    '<td style=\"color:var(--text-sub)\">'+l.msg+'</td></tr>';
                         });
                         tbody.innerHTML = html;
                     }
@@ -3748,5 +3927,43 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
     connectWS();
 </script>
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js'); }); }</script>
 </body>
 </html>`
+
+const manifestJSON = `{
+  "name": "GoRelay Pro",
+  "short_name": "GoRelay",
+  "description": "安全内网穿透控制台",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#6366f1",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}`
+
+const serviceWorkerJS = `
+const CACHE_NAME = 'gorelay-pwa-v1';
+self.addEventListener('install', event => {
+    self.skipWaiting();
+});
+self.addEventListener('fetch', event => {
+    if (event.request.method !== 'GET') return;
+    event.respondWith(
+        fetch(event.request).catch(() => caches.match(event.request))
+    );
+});
+`
