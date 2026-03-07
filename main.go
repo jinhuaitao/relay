@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -43,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.74"
+	AppVersion      = "v3.0.75"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -277,7 +278,6 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
-	// 平滑升级字段
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
@@ -594,9 +594,77 @@ func sendTelegram(text string) {
 		return
 	}
 	tgRequest("sendMessage", map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
 	})
+}
+
+// --- TG 云备份功能核心 ---
+func sendTelegramDocument(filePath string, caption string) {
+	mu.Lock()
+	token := config.TgBotToken
+	chatID := config.TgChatID
+	mu.Unlock()
+	if token == "" || chatID == "" {
+		return
+	}
+
+	// 强制 SQLite 刷入磁盘以保证快照完整性
+	if db != nil {
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("chat_id", chatID)
+	_ = writer.WriteField("caption", caption)
+	_ = writer.WriteField("parse_mode", "HTML")
+
+	fileName := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
+	part, err := writer.CreateFormFile("document", fileName)
+	if err == nil {
+		io.Copy(part, file)
+	}
+	writer.Close()
+
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token)
+	req, _ := http.NewRequest("POST", urlStr, body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	client.Do(req)
+}
+
+func autoBackupLoop() {
+	var lastBackupWeek int = -1
+	for {
+		time.Sleep(1 * time.Hour)
+		now := time.Now()
+
+		mu.Lock()
+		token := config.TgBotToken
+		chatID := config.TgChatID
+		mu.Unlock()
+
+		if token == "" || chatID == "" {
+			continue
+		}
+
+		_, week := now.ISOWeek()
+
+		// 每周一凌晨 2 点自动发送数据库备份到 Telegram
+		if now.Weekday() == time.Monday && now.Hour() == 2 && lastBackupWeek != week {
+			lastBackupWeek = week
+			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
+		}
+	}
 }
 
 type InlineButton struct {
@@ -609,6 +677,7 @@ func sendTgMenu(chatID string) {
 		"inline_keyboard": [][]InlineButton{
 			{{Text: "📊 节点与流量状态", CallbackData: "cmd:status"}},
 			{{Text: "📜 规则管理 (启停)", CallbackData: "cmd:rules"}},
+			{{Text: "💾 立即云端备份", CallbackData: "cmd:backup"}},
 			{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
 		},
 	}
@@ -632,7 +701,6 @@ func buildRulesMenuMarkup() map[string]interface{} {
 		if r.Group != "" {
 			text += fmt.Sprintf(" (%s)", r.Group)
 		}
-		// 每行放一个规则按钮
 		rows = append(rows, []InlineButton{{Text: text, CallbackData: "toggle:" + r.ID}})
 	}
 	mu.Unlock()
@@ -711,8 +779,7 @@ func startTgBotLoop() {
 				if chatIdStr != allowedChat {
 					continue
 				}
-				
-				// 停止按钮的转圈动画
+
 				tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
 
 				data := update.CallbackQuery.Data
@@ -723,6 +790,7 @@ func startTgBotLoop() {
 						"inline_keyboard": [][]InlineButton{
 							{{Text: "📊 节点与流量状态", CallbackData: "cmd:status"}},
 							{{Text: "📜 规则管理 (启停)", CallbackData: "cmd:rules"}},
+							{{Text: "💾 立即云端备份", CallbackData: "cmd:backup"}},
 							{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
 						},
 					}
@@ -767,6 +835,9 @@ func startTgBotLoop() {
 						"parse_mode":   "HTML",
 						"reply_markup": buildRulesMenuMarkup(),
 					})
+				} else if data == "cmd:backup" {
+					// 异步发送文件
+					go sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
 				} else if strings.HasPrefix(data, "toggle:") {
 					id := strings.TrimPrefix(data, "toggle:")
 					mu.Lock()
@@ -780,7 +851,6 @@ func startTgBotLoop() {
 					mu.Unlock()
 					go pushConfigToAll()
 
-					// 无缝刷新列表
 					tgRequest("editMessageText", map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
@@ -808,7 +878,7 @@ func startTgBotLoop() {
 
 func trafficResetLoop() {
 	for {
-		time.Sleep(1 * time.Hour) // 每小时检查一次
+		time.Sleep(1 * time.Hour)
 		
 		mu.Lock()
 		day := config.TrafficResetDay
@@ -816,13 +886,12 @@ func trafficResetLoop() {
 		mu.Unlock()
 
 		if day <= 0 || day > 31 {
-			continue // 未开启自动重置
+			continue
 		}
 
 		now := time.Now()
 		currentM := now.Format("2006-01")
 		
-		// 如果当前日大于等于设定的重置日，且本月还没重置过
 		if now.Day() >= day && lastM != currentM {
 			mu.Lock()
 			for i := range rules {
@@ -857,7 +926,8 @@ func runMaster() {
 		}
 	}()
 	go broadcastLoop()
-	go startTgBotLoop() // 启动 TG 机器人长轮询
+	go startTgBotLoop()   // 启动 TG 机器人长轮询
+	go autoBackupLoop()   // 启动云备份监控
 	go trafficResetLoop() // 启动账单日自动清零监控
 
 	mu.Lock()
@@ -3469,7 +3539,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                 <div class="form-group" style="grid-column: 1 / -1">
                                     <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
                                     <input type="number" name="traffic_reset_day" value="{{.Config.TrafficResetDay}}" placeholder="填 0 或留空表示不开启自动重置">
-                                    <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。</div>
+                                    <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。系统每周一凌晨会自动备份数据库到您的 TG 窗口。</div>
                                 </div>
                             </div>
                         </div>
