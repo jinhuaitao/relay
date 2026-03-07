@@ -19,7 +19,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -43,9 +42,8 @@ import (
 
 // --- 配置与常量 ---
 
-
 const (
-	AppVersion      = "v3.0.73"
+	AppVersion      = "v3.0.74"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -88,6 +86,10 @@ type LogicalRule struct {
 
 	TargetStatus  bool  `json:"-"`
 	TargetLatency int64 `json:"-"`
+
+	Alert80  bool `json:"alert_80"`
+	Alert95  bool `json:"alert_95"`
+	Alert100 bool `json:"alert_100"`
 }
 
 type OpLog struct {
@@ -113,6 +115,8 @@ type AppConfig struct {
 	GithubClientID     string            `json:"github_client_id"`
 	GithubClientSecret string            `json:"github_client_secret"`
 	GithubAllowedUsers string            `json:"github_allowed_users"`
+	TrafficResetDay    int               `json:"traffic_reset_day"`
+	LastResetMonth     string            `json:"last_reset_month"`
 	Rules              []LogicalRule     `json:"saved_rules"`
 	Logs               []OpLog           `json:"logs"`
 }
@@ -212,7 +216,7 @@ var (
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
 
-	wsUpgrader = websocket.Upgrader{} // 已移除危险的 CheckOrigin: return true，防范 CSWSH
+	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
 	wsMu       sync.Mutex
 
@@ -243,7 +247,10 @@ CREATE TABLE IF NOT EXISTS rules (
     speed_limit INTEGER,
     total_tx INTEGER DEFAULT 0,
     total_rx INTEGER DEFAULT 0,
-    lb_strategy TEXT DEFAULT 'random'
+    lb_strategy TEXT DEFAULT 'random',
+    alert_80 INTEGER DEFAULT 0,
+    alert_95 INTEGER DEFAULT 0,
+    alert_100 INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,8 +277,12 @@ func initDB() {
 		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
+	// 平滑升级字段
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
 }
 
 // --- 基础工具函数 ---
@@ -435,7 +446,6 @@ func getSysStatus() string {
 	return fmt.Sprintf("%s | %s", cpuStr, memStr)
 }
 
-// --- 安全基础函数 ---
 func getClientIP(r *http.Request) string {
 	if r == nil {
 		return "System"
@@ -523,7 +533,6 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 
 func doSelfUninstall() {
 	log.Println("执行自毁程序...")
-
 	services := []string{"relay", "gorelay"}
 
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
@@ -557,22 +566,80 @@ func doSelfUninstall() {
 	os.Exit(0)
 }
 
-func sendTelegram(text string) {
+// ================= TG BOT INTERACTIVE =================
+
+func tgRequest(method string, payload interface{}) {
 	mu.Lock()
 	token := config.TgBotToken
-	chatID := config.TgChatID
 	mu.Unlock()
-	if token == "" || chatID == "" {
+	if token == "" {
 		return
 	}
-	api := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	data := url.Values{}
-	data.Set("chat_id", chatID)
-	data.Set("text", text)
-	go func() { http.PostForm(api, data) }()
+
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	b, _ := json.Marshal(payload)
+	go func() {
+		req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		client.Do(req)
+	}()
 }
 
-// ================= TG BOT LOOP =================
+func sendTelegram(text string) {
+	mu.Lock()
+	chatID := config.TgChatID
+	mu.Unlock()
+	if chatID == "" {
+		return
+	}
+	tgRequest("sendMessage", map[string]interface{}{
+		"chat_id": chatID,
+		"text":    text,
+	})
+}
+
+type InlineButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+func sendTgMenu(chatID string) {
+	markup := map[string]interface{}{
+		"inline_keyboard": [][]InlineButton{
+			{{Text: "📊 节点与流量状态", CallbackData: "cmd:status"}},
+			{{Text: "📜 规则管理 (启停)", CallbackData: "cmd:rules"}},
+			{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
+		},
+	}
+	tgRequest("sendMessage", map[string]interface{}{
+		"chat_id":      chatID,
+		"text":         "🤖 <b>GoRelay Pro 智能中控台</b>\n\n请点击下方按钮执行快捷操作：",
+		"parse_mode":   "HTML",
+		"reply_markup": markup,
+	})
+}
+
+func buildRulesMenuMarkup() map[string]interface{} {
+	var rows [][]InlineButton
+	mu.Lock()
+	for _, r := range rules {
+		status := "🟢"
+		if r.Disabled {
+			status = "🔴"
+		}
+		text := fmt.Sprintf("%s %s", status, r.Note)
+		if r.Group != "" {
+			text += fmt.Sprintf(" (%s)", r.Group)
+		}
+		// 每行放一个规则按钮
+		rows = append(rows, []InlineButton{{Text: text, CallbackData: "toggle:" + r.ID}})
+	}
+	mu.Unlock()
+	rows = append(rows, []InlineButton{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}})
+	return map[string]interface{}{"inline_keyboard": rows}
+}
+
 func startTgBotLoop() {
 	var offset int64 = 0
 	for {
@@ -595,7 +662,6 @@ func startTgBotLoop() {
 		}
 
 		var res struct {
-			Ok     bool `json:"ok"`
 			Result []struct {
 				UpdateID int64 `json:"update_id"`
 				Message  *struct {
@@ -604,6 +670,16 @@ func startTgBotLoop() {
 					} `json:"chat"`
 					Text string `json:"text"`
 				} `json:"message"`
+				CallbackQuery *struct {
+					ID      string `json:"id"`
+					Data    string `json:"data"`
+					Message *struct {
+						MessageID int64 `json:"message_id"`
+						Chat      struct {
+							ID int64 `json:"id"`
+						} `json:"chat"`
+					} `json:"message"`
+				} `json:"callback_query"`
 			} `json:"result"`
 		}
 
@@ -616,102 +692,152 @@ func startTgBotLoop() {
 
 		for _, update := range res.Result {
 			offset = update.UpdateID + 1
-			if update.Message == nil {
-				continue
+
+			// 1. 处理文字消息
+			if update.Message != nil {
+				chatIdStr := fmt.Sprintf("%d", update.Message.Chat.ID)
+				if chatIdStr != allowedChat {
+					continue
+				}
+				text := strings.TrimSpace(update.Message.Text)
+				if text == "/start" || text == "/menu" || text == "/help" {
+					sendTgMenu(chatIdStr)
+				}
 			}
 
-			chatIdStr := fmt.Sprintf("%d", update.Message.Chat.ID)
-			if chatIdStr != allowedChat {
-				continue
-			}
-
-			text := strings.TrimSpace(update.Message.Text)
-			if text == "" {
-				continue
-			}
-
-			parts := strings.Split(text, " ")
-			cmd := parts[0]
-
-			var reply string
-			switch cmd {
-			case "/start", "/help":
-				reply = "🤖 GoRelay Pro 交互终端\n\n" +
-					"/status - 查看实时节点与流量状态\n" +
-					"/rules - 查看所有转发规则列表\n" +
-					"/toggle <ID> - 启动或暂停指定规则\n" +
-					"/restart - 远程重启主控面板服务"
-			case "/status":
-				mu.Lock()
-				var tx, rx int64
-				for _, r := range rules {
-					tx += r.TotalTx
-					rx += r.TotalRx
+			// 2. 处理按钮回调
+			if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
+				chatIdStr := fmt.Sprintf("%d", update.CallbackQuery.Message.Chat.ID)
+				if chatIdStr != allowedChat {
+					continue
 				}
-				reply = fmt.Sprintf("📊 系统实时状态\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点列表 ---\n", formatBytes(tx+rx), len(agents), len(rules))
-				for _, a := range agents {
-					reply += fmt.Sprintf("🟢 %s\n状态: %s\n\n", a.Name, a.SysStatus)
-				}
-				if len(agents) == 0 {
-					reply += "暂无节点在线"
-				}
-				mu.Unlock()
-			case "/rules":
-				mu.Lock()
-				if len(rules) == 0 {
-					reply = "暂无转发规则"
-				} else {
-					reply = "📜 转发规则列表\n\n"
-					for _, r := range rules {
-						status := "🟢 运行中"
-						if r.Disabled {
-							status = "🔴 已暂停"
-						}
-						groupStr := r.Group
-						if groupStr == "" {
-							groupStr = "默认"
-						}
-						reply += fmt.Sprintf("【%s】 %s\nID: %s\n状态: %s\n流量: %s\n\n", groupStr, r.Note, r.ID, status, formatBytes(r.TotalTx+r.TotalRx))
+				
+				// 停止按钮的转圈动画
+				tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
+
+				data := update.CallbackQuery.Data
+				msgID := update.CallbackQuery.Message.MessageID
+
+				if data == "cmd:menu" {
+					markup := map[string]interface{}{
+						"inline_keyboard": [][]InlineButton{
+							{{Text: "📊 节点与流量状态", CallbackData: "cmd:status"}},
+							{{Text: "📜 规则管理 (启停)", CallbackData: "cmd:rules"}},
+							{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
+						},
 					}
-				}
-				mu.Unlock()
-			case "/toggle":
-				if len(parts) > 1 {
-					id := parts[1]
+					tgRequest("editMessageText", map[string]interface{}{
+						"chat_id":      chatIdStr,
+						"message_id":   msgID,
+						"text":         "🤖 <b>GoRelay Pro 智能中控台</b>\n\n请点击下方按钮执行快捷操作：",
+						"parse_mode":   "HTML",
+						"reply_markup": markup,
+					})
+				} else if data == "cmd:status" {
 					mu.Lock()
-					found := false
+					var tx, rx int64
+					for _, r := range rules {
+						tx += r.TotalTx
+						rx += r.TotalRx
+					}
+					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+					for _, a := range agents {
+						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ %s\n", a.Name, a.SysStatus)
+					}
+					if len(agents) == 0 {
+						reply += "暂无节点在线"
+					}
+					mu.Unlock()
+
+					markup := map[string]interface{}{
+						"inline_keyboard": [][]InlineButton{{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}, {Text: "🔄 刷新状态", CallbackData: "cmd:status"}}},
+					}
+					tgRequest("editMessageText", map[string]interface{}{
+						"chat_id":      chatIdStr,
+						"message_id":   msgID,
+						"text":         reply,
+						"parse_mode":   "HTML",
+						"reply_markup": markup,
+					})
+				} else if data == "cmd:rules" {
+					tgRequest("editMessageText", map[string]interface{}{
+						"chat_id":      chatIdStr,
+						"message_id":   msgID,
+						"text":         "📜 <b>转发规则管理</b>\n\n点击下方按钮可一键切换 启动/暂停 状态：",
+						"parse_mode":   "HTML",
+						"reply_markup": buildRulesMenuMarkup(),
+					})
+				} else if strings.HasPrefix(data, "toggle:") {
+					id := strings.TrimPrefix(data, "toggle:")
+					mu.Lock()
 					for i := range rules {
 						if rules[i].ID == id {
 							rules[i].Disabled = !rules[i].Disabled
-							state := "已启动 ▶️"
-							if rules[i].Disabled {
-								state = "已暂停 ⏸️"
-							}
-							reply = fmt.Sprintf("✅ 规则【%s】设置成功\n当前状态: %s", rules[i].Note, state)
-							saveConfigNoLock()
-							go pushConfigToAll()
-							found = true
 							break
 						}
 					}
+					saveConfigNoLock()
 					mu.Unlock()
-					if !found {
-						reply = "❌ 未找到 ID 为 " + id + " 的规则"
-					}
-				} else {
-					reply = "⚠️ 请提供规则 ID，格式: /toggle 12345678"
-				}
-			case "/restart":
-				reply = "🔄 接收到安全指令，系统即将重启..."
-				go func() {
-					time.Sleep(2 * time.Second)
-					doRestart()
-				}()
-			}
+					go pushConfigToAll()
 
-			if reply != "" {
-				sendTelegram(reply)
+					// 无缝刷新列表
+					tgRequest("editMessageText", map[string]interface{}{
+						"chat_id":      chatIdStr,
+						"message_id":   msgID,
+						"text":         "📜 <b>转发规则管理</b>\n\n状态已更新！点击下方按钮可继续切换：",
+						"parse_mode":   "HTML",
+						"reply_markup": buildRulesMenuMarkup(),
+					})
+				} else if data == "cmd:restart" {
+					tgRequest("editMessageText", map[string]interface{}{
+						"chat_id":    chatIdStr,
+						"message_id": msgID,
+						"text":       "🔄 接收到安全指令，系统正在重启...",
+					})
+					go func() {
+						time.Sleep(2 * time.Second)
+						doRestart()
+					}()
+				}
 			}
+		}
+	}
+}
+
+// ================= TRAFFIC AUTO RESET =================
+
+func trafficResetLoop() {
+	for {
+		time.Sleep(1 * time.Hour) // 每小时检查一次
+		
+		mu.Lock()
+		day := config.TrafficResetDay
+		lastM := config.LastResetMonth
+		mu.Unlock()
+
+		if day <= 0 || day > 31 {
+			continue // 未开启自动重置
+		}
+
+		now := time.Now()
+		currentM := now.Format("2006-01")
+		
+		// 如果当前日大于等于设定的重置日，且本月还没重置过
+		if now.Day() >= day && lastM != currentM {
+			mu.Lock()
+			for i := range rules {
+				rules[i].TotalTx = 0
+				rules[i].TotalRx = 0
+				rules[i].Alert80 = false
+				rules[i].Alert95 = false
+				rules[i].Alert100 = false
+			}
+			config.LastResetMonth = currentM
+			saveConfigNoLock()
+			mu.Unlock()
+			
+			sendTelegram(fmt.Sprintf("📅 <b>账单日触发</b>\n系统已自动清零本月所有规则的流量统计！", ))
+			go pushConfigToAll()
 		}
 	}
 }
@@ -731,7 +857,8 @@ func runMaster() {
 		}
 	}()
 	go broadcastLoop()
-	go startTgBotLoop() // 注入 TG Bot 长轮询协程
+	go startTgBotLoop() // 启动 TG 机器人长轮询
+	go trafficResetLoop() // 启动账单日自动清零监控
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -745,21 +872,18 @@ func runMaster() {
 	var tlsConfig *tls.Config
 	isMasterTLS = false
 
-	// 构建合法的域名白名单列表
 	var allowedDomains []string
 	if panelDomain != "" && !strings.Contains(panelDomain, "127.0.0.1") && !strings.Contains(panelDomain, "localhost") {
 		allowedDomains = append(allowedDomains, panelDomain)
 	}
 	if nodeDomain != "" && !strings.Contains(nodeDomain, "127.0.0.1") && !strings.Contains(nodeDomain, "localhost") {
-		if nodeDomain != panelDomain { // 防止重复
+		if nodeDomain != panelDomain {
 			allowedDomains = append(allowedDomains, nodeDomain)
 		}
 	}
 
-	// 智能证书申请与绑定逻辑
 	if len(allowedDomains) > 0 {
 		log.Printf("🌐 检测到有效域名: %v，准备全自动申请合法 TLS 证书", allowedDomains)
-		
 		certManager := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(allowedDomains...),
@@ -769,7 +893,6 @@ func runMaster() {
 		isMasterTLS = true
 
 		go func() {
-			log.Println("⚡ 启动 80 端口用于自动证书验证和 HTTPS 重定向")
 			err := http.ListenAndServe(":80", certManager.HTTPHandler(nil))
 			if err != nil {
 				log.Printf("⚠️ 80 端口启动失败 (请确保未被占用且开放了防火墙): %v", err)
@@ -851,28 +974,22 @@ func runMaster() {
 	http.HandleFunc("/sw.js", handleServiceWorker)
 	http.HandleFunc("/icon.svg", handleIcon)
 
-	// --- 启动 Web 面板服务 ---
-	// 【新增】域名路由拦截器：防止通过节点通信域名访问控制面板
 	webHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		pDomain := config.PanelDomain
 		nDomain := config.MasterDomain
 		mu.Unlock()
 
-		// 如果同时配置了两个不同的域名，触发拦截逻辑
 		if pDomain != "" && nDomain != "" && pDomain != nDomain {
 			host := r.Host
-			// 去除可能携带的端口号
 			if h, _, err := net.SplitHostPort(host); err == nil {
 				host = h
 			}
-			// 如果访客使用的是节点通信域名 (Node Domain)，直接拒绝访问，伪装成 404
 			if strings.EqualFold(host, nDomain) {
 				http.NotFound(w, r)
 				return
 			}
 		}
-		// 正常放行（允许使用面板域名或 IP 直接访问），交给默认路由处理
 		http.DefaultServeMux.ServeHTTP(w, r)
 	})
 
@@ -885,15 +1002,14 @@ func runMaster() {
 		server := &http.Server{
 			Addr:      ":443",
 			TLSConfig: tlsConfig,
-			Handler:   webHandler, // 使用自定义的拦截器
+			Handler:   webHandler,
 		}
-		// 传入空字符串，让 autocert 全权接管证书处理
 		log.Fatal(server.ListenAndServeTLS("", "")) 
 	} else {
 		log.Printf("🚀 控制面板启动 (普通 HTTP): http://localhost%s", WebPort)
 		server := &http.Server{
 			Addr:    WebPort,
-			Handler: webHandler, // 使用自定义的拦截器
+			Handler: webHandler,
 		}
 		log.Fatal(server.ListenAndServe())
 	}
@@ -1116,9 +1232,24 @@ func handleStatsReport(payload interface{}) {
 					rules[i].UserCount = rep.UserCount
 					atomic.StoreInt32(&configDirty, 1)
 
-					if rules[i].TrafficLimit > 0 && (rules[i].TotalTx+rules[i].TotalRx) >= rules[i].TrafficLimit {
-						limitTriggered = true
+					// --- 智能预警机制开始 ---
+					limit := rules[i].TrafficLimit
+					total := rules[i].TotalTx + rules[i].TotalRx
+					if limit > 0 {
+						pct := float64(total) / float64(limit)
+						if pct >= 1.0 && !rules[i].Alert100 {
+							rules[i].Alert100 = true
+							sendTelegram(fmt.Sprintf("🚨 <b>流量耗尽熔断</b>\n\n规则：【%s】\n状态：已切断连接\n说明：流量达到 100%%，为了您的钱包安全，该端口已自动熔断！", rules[i].Note))
+							limitTriggered = true
+						} else if pct >= 0.95 && pct < 1.0 && !rules[i].Alert95 {
+							rules[i].Alert95 = true
+							sendTelegram(fmt.Sprintf("⚠️ <b>流量极高预警</b>\n\n规则：【%s】\n状态：即将熔断\n说明：流量已使用超过 95%%，请及时检查或重置流量！", rules[i].Note))
+						} else if pct >= 0.80 && pct < 0.95 && !rules[i].Alert80 {
+							rules[i].Alert80 = true
+							sendTelegram(fmt.Sprintf("🔔 <b>流量使用预警</b>\n\n规则：【%s】\n状态：运行中\n说明：流量已使用超过 80%%。", rules[i].Note))
+						}
 					}
+					// --- 智能预警机制结束 ---
 					break
 				}
 			}
@@ -1628,7 +1759,12 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TargetIP = r.FormValue("target_ip")
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
-			rules[i].TrafficLimit = int64(limitGB * 1024 * 1024 * 1024)
+			// 流量改变时重置预警状态
+			newLimit := int64(limitGB * 1024 * 1024 * 1024)
+			if rules[i].TrafficLimit != newLimit {
+				rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
+			}
+			rules[i].TrafficLimit = newLimit
 			rules[i].SpeedLimit = int64(speedMB * 1024 * 1024)
 			rules[i].LBStrategy = lbStrategy
 			break
@@ -1661,11 +1797,14 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	for i := range rules {
 		if rules[i].ID == id {
 			rules[i].TotalTx, rules[i].TotalRx = 0, 0
+			// 重置预警状态
+			rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
 			break
 		}
 	}
 	saveConfigNoLock()
 	mu.Unlock()
+	go pushConfigToAll() // 可能会因为清零从而重新启动端口
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
@@ -1719,6 +1858,7 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 				}
 				if action == "reset" {
 					rules[i].TotalTx, rules[i].TotalRx = 0, 0
+					rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
 				}
 			}
 		}
@@ -1726,9 +1866,7 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 
-	if action != "reset" {
-		go pushConfigToAll()
-	}
+	go pushConfigToAll() // 批量操作后统一刷新配置
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -1756,6 +1894,16 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.GithubClientID = r.FormValue("github_client_id")
 	config.GithubClientSecret = r.FormValue("github_client_secret")
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
+	
+	// 处理重置日期
+	if rd := r.FormValue("traffic_reset_day"); rd != "" {
+		d, _ := strconv.Atoi(rd)
+		if d < 0 || d > 31 { d = 0 }
+		config.TrafficResetDay = d
+	} else {
+		config.TrafficResetDay = 0
+	}
+
 	saveConfigNoLock()
 	mu.Unlock()
 	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
@@ -2496,6 +2644,11 @@ func loadConfig() {
 				config.GithubClientSecret = v
 			case "github_allowed_users":
 				config.GithubAllowedUsers = v
+			case "traffic_reset_day":
+				d, _ := strconv.Atoi(v)
+				config.TrafficResetDay = d
+			case "last_reset_month":
+				config.LastResetMonth = v
 			}
 		}
 	}
@@ -2505,14 +2658,17 @@ func loadConfig() {
 	}
 
 	rules = []LogicalRule{}
-	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy FROM rules")
+	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100 FROM rules")
 	if err == nil {
 		defer rRows.Close()
 		for rRows.Next() {
 			var r LogicalRule
-			var d int
-			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx, &r.LBStrategy)
+			var d, a80, a95, a100 int
+			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx, &r.LBStrategy, &a80, &a95, &a100)
 			r.Disabled = (d == 1)
+			r.Alert80 = (a80 == 1)
+			r.Alert95 = (a95 == 1)
+			r.Alert100 = (a100 == 1)
 			rules = append(rules, r)
 		}
 	}
@@ -2549,15 +2705,19 @@ func saveConfigNoLock() {
 	setS("github_client_id", conf.GithubClientID)
 	setS("github_client_secret", conf.GithubClientSecret)
 	setS("github_allowed_users", conf.GithubAllowedUsers)
+	setS("traffic_reset_day", strconv.Itoa(conf.TrafficResetDay))
+	setS("last_reset_month", conf.LastResetMonth)
 
 	_, _ = tx.Exec("DELETE FROM rules")
 	for _, r := range lRules {
-		d := 0
-		if r.Disabled {
-			d = 1
-		}
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy)
+		d, a80, a95, a100 := 0, 0, 0, 0
+		if r.Disabled { d = 1 }
+		if r.Alert80 { a80 = 1 }
+		if r.Alert95 { a95 = 1 }
+		if r.Alert100 { a100 = 1 }
+
+		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy, a80, a95, a100)
 	}
 	_ = tx.Commit()
 }
@@ -3302,10 +3462,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         </div>
                         
                         <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1">
-                            <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 通知</h4>
+                            <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 机器人与自动任务</h4>
                             <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
                                 <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}"></div>
                                 <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}"></div>
+                                <div class="form-group" style="grid-column: 1 / -1">
+                                    <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
+                                    <input type="number" name="traffic_reset_day" value="{{.Config.TrafficResetDay}}" placeholder="填 0 或留空表示不开启自动重置">
+                                    <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。</div>
+                                </div>
                             </div>
                         </div>
                         
