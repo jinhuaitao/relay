@@ -117,7 +117,7 @@ Telegram 通知配置：
 
 复制脚本至目标服务器 (VPS) 的终端中执行即可，节点将使用安全的 TLS 隧道自动接入 Master。
 
-🛠️ 常用维护命令
+# 🛠️ 常用维护命令
 Master (面板) 维护：
 
 停止/卸载服务：relay -service uninstall (会移除开机自启并停止进程)
