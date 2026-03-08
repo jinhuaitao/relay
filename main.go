@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.75"
+	AppVersion      = "v3.0.76"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -223,6 +223,10 @@ var (
 
 	isMasterTLS bool = false
 	useTLS      bool = false
+
+	cpuMu        sync.Mutex
+	lastCPUIdle  uint64
+	lastCPUTotal uint64
 )
 
 // --- 数据库初始化与优化 ---
@@ -430,20 +434,74 @@ func setRLimit() {
 	}
 }
 
+// 探针系统：底层硬核抓取物理机的真实 CPU、内存、硬盘
 func getSysStatus() string {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	memStr := fmt.Sprintf("Mem: %dMB", m.Alloc/1024/1024)
-	cpuStr := fmt.Sprintf("Go: %d", runtime.NumGoroutine())
+	var cpuPct, memPct, diskPct float64
+
 	if runtime.GOOS == "linux" {
-		if data, err := os.ReadFile("/proc/loadavg"); err == nil {
-			parts := strings.Fields(string(data))
-			if len(parts) > 0 {
-				cpuStr = "Load: " + parts[0]
+		// 1. 获取真实 CPU 使用率
+		if data, err := os.ReadFile("/proc/stat"); err == nil {
+			lines := strings.Split(string(data), "\n")
+			if len(lines) > 0 {
+				fields := strings.Fields(lines[0])
+				if len(fields) > 4 && fields[0] == "cpu" {
+					var ticks [8]uint64
+					for i := 1; i < len(fields) && i <= 8; i++ {
+						ticks[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
+					}
+					user, nice, system, idle, iowait, irq, softirq, steal := ticks[0], ticks[1], ticks[2], ticks[3], ticks[4], ticks[5], ticks[6], ticks[7]
+					
+					idleTicks := idle + iowait
+					totalTicks := user + nice + system + idle + iowait + irq + softirq + steal
+
+					cpuMu.Lock()
+					diffIdle := idleTicks - lastCPUIdle
+					diffTotal := totalTicks - lastCPUTotal
+					if diffTotal > 0 {
+						cpuPct = (float64(diffTotal-diffIdle) / float64(diffTotal)) * 100
+					}
+					lastCPUIdle = idleTicks
+					lastCPUTotal = totalTicks
+					cpuMu.Unlock()
+				}
 			}
 		}
+
+		// 2. 获取真实可用内存
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			var total, available uint64
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					val, _ := strconv.ParseUint(fields[1], 10, 64)
+					if strings.HasPrefix(fields[0], "MemTotal") { total = val }
+					if strings.HasPrefix(fields[0], "MemAvailable") { available = val }
+				}
+			}
+			if total > 0 && available > 0 {
+				memPct = (float64(total-available) / float64(total)) * 100
+			}
+		}
+
+		// 3. 获取系统根目录硬盘使用率
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs("/", &stat); err == nil {
+			total := uint64(stat.Blocks) * uint64(stat.Bsize)
+			free := uint64(stat.Bavail) * uint64(stat.Bsize)
+			if total > 0 {
+				diskPct = (float64(total-free) / float64(total)) * 100
+			}
+		}
+	} else {
+		// Mac / Windows 的优雅兜底伪装 (防止面板报错)
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		memPct = 1.0 
+		cpuPct = float64(runtime.NumGoroutine()) 
 	}
-	return fmt.Sprintf("%s | %s", cpuStr, memStr)
+
+	return fmt.Sprintf("CPU:%.1f|MEM:%.1f|DSK:%.1f", cpuPct, memPct, diskPct)
 }
 
 func getClientIP(r *http.Request) string {
@@ -659,7 +717,6 @@ func autoBackupLoop() {
 
 		_, week := now.ISOWeek()
 
-		// 每周一凌晨 2 点自动发送数据库备份到 Telegram
 		if now.Weekday() == time.Monday && now.Hour() == 2 && lastBackupWeek != week {
 			lastBackupWeek = week
 			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
@@ -810,7 +867,9 @@ func startTgBotLoop() {
 					}
 					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
 					for _, a := range agents {
-						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ %s\n", a.Name, a.SysStatus)
+						// 把新的 CPU/Mem 格式稍微美化一下发到 TG
+						prettyStatus := strings.ReplaceAll(a.SysStatus, "|", " | ")
+						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ 探针: %s\n", a.Name, prettyStatus)
 					}
 					if len(agents) == 0 {
 						reply += "暂无节点在线"
@@ -836,7 +895,6 @@ func startTgBotLoop() {
 						"reply_markup": buildRulesMenuMarkup(),
 					})
 				} else if data == "cmd:backup" {
-					// 异步发送文件
 					go sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
 				} else if strings.HasPrefix(data, "toggle:") {
 					id := strings.TrimPrefix(data, "toggle:")
@@ -926,9 +984,9 @@ func runMaster() {
 		}
 	}()
 	go broadcastLoop()
-	go startTgBotLoop()   // 启动 TG 机器人长轮询
-	go autoBackupLoop()   // 启动云备份监控
-	go trafficResetLoop() // 启动账单日自动清零监控
+	go startTgBotLoop()   
+	go autoBackupLoop()   
+	go trafficResetLoop() 
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -1829,7 +1887,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TargetIP = r.FormValue("target_ip")
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
-			// 流量改变时重置预警状态
 			newLimit := int64(limitGB * 1024 * 1024 * 1024)
 			if rules[i].TrafficLimit != newLimit {
 				rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
@@ -1867,14 +1924,13 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	for i := range rules {
 		if rules[i].ID == id {
 			rules[i].TotalTx, rules[i].TotalRx = 0, 0
-			// 重置预警状态
 			rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
 			break
 		}
 	}
 	saveConfigNoLock()
 	mu.Unlock()
-	go pushConfigToAll() // 可能会因为清零从而重新启动端口
+	go pushConfigToAll() 
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
@@ -1936,7 +1992,7 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 
-	go pushConfigToAll() // 批量操作后统一刷新配置
+	go pushConfigToAll() 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -1965,7 +2021,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.GithubClientSecret = r.FormValue("github_client_secret")
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
 	
-	// 处理重置日期
 	if rd := r.FormValue("traffic_reset_day"); rd != "" {
 		d, _ := strconv.Atoi(rd)
 		if d < 0 || d > 31 { d = 0 }
@@ -2151,7 +2206,6 @@ func runAgent(name, masterAddr, token string) {
 			if errHost != nil {
 				host = masterAddr
 			}
-			// 严格证书校验防御中间人攻击 (MITM)
 			conn, err = tls.Dial("tcp", masterAddr, &tls.Config{
 				ServerName: host,
 				MinVersion: tls.VersionTLS12,
@@ -3441,19 +3495,34 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 <div class="table-container" id="agents-container">
                     {{if .Agents}}
                     <table>
-                        <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>系统负载 (Load)</th><th>操作</th></tr></thead>
+                        <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>资源监控 (CPU/内存/硬盘)</th><th>操作</th></tr></thead>
                         <tbody>
                         {{range .Agents}}
                         <tr>
                             <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
                             <td><div style="font-weight:600">{{.Name}}</div></td>
                             <td><span class="badge" style="font-family:var(--font-mono);background:var(--input-bg);color:var(--text-sub);cursor:pointer" onclick="copyText('{{.RemoteIP}}')">{{.RemoteIP}}</span></td>
-                            <td style="width:240px">
-                                <div style="display:flex;align-items:center;gap:12px">
-                                    <div class="progress" style="margin:0;flex:1"><div class="progress-bar" id="load-bar-{{.Name}}" style="width:0%"></div></div>
-                                    <span id="load-text-{{.Name}}" style="font-size:12px;font-family:var(--font-mono);min-width:50px;text-align:right">0.0</span>
+                            
+                            <td style="width:280px" id="sys-status-{{.Name}}">
+                                <div style="display:flex; flex-direction:column; gap:6px;">
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:10px; width:25px; color:var(--text-sub)">CPU</span>
+                                        <div class="progress" style="margin:0; flex:1; height:4px"><div class="progress-bar" id="cpu-bar-{{.Name}}" style="width:0%; background:#10b981"></div></div>
+                                        <span id="cpu-val-{{.Name}}" style="font-size:11px; font-family:var(--font-mono); width:35px; text-align:right">0.0%</span>
+                                    </div>
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:10px; width:25px; color:var(--text-sub)">内存</span>
+                                        <div class="progress" style="margin:0; flex:1; height:4px"><div class="progress-bar" id="mem-bar-{{.Name}}" style="width:0%; background:#3b82f6"></div></div>
+                                        <span id="mem-val-{{.Name}}" style="font-size:11px; font-family:var(--font-mono); width:35px; text-align:right">0.0%</span>
+                                    </div>
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <span style="font-size:10px; width:25px; color:var(--text-sub)">硬盘</span>
+                                        <div class="progress" style="margin:0; flex:1; height:4px"><div class="progress-bar" id="dsk-bar-{{.Name}}" style="width:0%; background:#fbbf24"></div></div>
+                                        <span id="dsk-val-{{.Name}}" style="font-size:11px; font-family:var(--font-mono); width:35px; text-align:right">0.0%</span>
+                                    </div>
                                 </div>
                             </td>
+
                             <td>
                                 <div style="display:flex;gap:6px">
                                     <button class="btn icon warning" onclick="updateAgent('{{.Name}}')" title="更新"><i class="ri-refresh-line"></i></button>
@@ -4132,15 +4201,33 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                     }
 
                     if(d.agents) d.agents.forEach(a => {
-                        const loadText = document.getElementById('load-text-'+a.name);
-                        const loadBar = document.getElementById('load-bar-'+a.name);
-                        if(loadText && loadBar) {
-                            let loadStr = a.sys_status; 
-                            let loadVal = 0;
-                            if(loadStr.includes("Load:")) { loadVal = parseFloat(loadStr.split("|")[0].replace("Load:", "").trim()) || 0; }
-                            loadText.innerText = loadVal.toFixed(2);
-                            let pct = loadVal * 20; if (pct > 100) pct = 100;
-                            loadBar.style.width = pct + "%"; loadBar.style.background = pct > 80 ? "#ef4444" : "#10b981";
+                        const loadContainer = document.getElementById('sys-status-'+a.name);
+                        if(loadContainer) {
+                            let cpu=0, mem=0, dsk=0;
+                            let parts = a.sys_status.split('|');
+                            parts.forEach(p => {
+                                let kv = p.split(':');
+                                if(kv.length === 2) {
+                                    let val = parseFloat(kv[1]) || 0;
+                                    if(kv[0]==='CPU') cpu = val;
+                                    if(kv[0]==='MEM') mem = val;
+                                    if(kv[0]==='DSK') dsk = val;
+                                }
+                            });
+                            
+                            const setBar = (type, val, dangerColor, safeColor) => {
+                                const elVal = document.getElementById(type+'-val-'+a.name);
+                                const elBar = document.getElementById(type+'-bar-'+a.name);
+                                if(elVal && elBar) {
+                                    elVal.innerText = val.toFixed(1)+'%';
+                                    elBar.style.width = val+'%';
+                                    elBar.style.background = val>80 ? dangerColor : safeColor;
+                                }
+                            };
+                            
+                            setBar('cpu', cpu, '#ef4444', '#10b981');
+                            setBar('mem', mem, '#ef4444', '#3b82f6');
+                            setBar('dsk', dsk, '#ef4444', '#fbbf24');
                         }
                     });
 
