@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.77"
+	AppVersion      = "v3.0.78"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1702,7 +1702,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
 	mu.Unlock()
 	
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: true, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	// 智能判断是否开启安全 Cookie
+	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -1802,7 +1804,8 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: true, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
