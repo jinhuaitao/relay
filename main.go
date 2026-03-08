@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.76"
+	AppVersion      = "v3.0.77"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -449,10 +449,11 @@ func getSysStatus() string {
 					for i := 1; i < len(fields) && i <= 8; i++ {
 						ticks[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
 					}
-					user, nice, system, idle, iowait, irq, softirq, steal := ticks[0], ticks[1], ticks[2], ticks[3], ticks[4], ticks[5], ticks[6], ticks[7]
-					
-					idleTicks := idle + iowait
-					totalTicks := user + nice + system + idle + iowait + irq + softirq + steal
+					idleTicks := ticks[3] + ticks[4] // idle + iowait
+					var totalTicks uint64
+					for _, t := range ticks {
+						totalTicks += t
+					}
 
 					cpuMu.Lock()
 					diffIdle := idleTicks - lastCPUIdle
@@ -475,8 +476,12 @@ func getSysStatus() string {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					val, _ := strconv.ParseUint(fields[1], 10, 64)
-					if strings.HasPrefix(fields[0], "MemTotal") { total = val }
-					if strings.HasPrefix(fields[0], "MemAvailable") { available = val }
+					if strings.HasPrefix(fields[0], "MemTotal") {
+						total = val
+					}
+					if strings.HasPrefix(fields[0], "MemAvailable") {
+						available = val
+					}
 				}
 			}
 			if total > 0 && available > 0 {
@@ -484,13 +489,18 @@ func getSysStatus() string {
 			}
 		}
 
-		// 3. 获取系统根目录硬盘使用率
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs("/", &stat); err == nil {
-			total := uint64(stat.Blocks) * uint64(stat.Bsize)
-			free := uint64(stat.Bavail) * uint64(stat.Bsize)
-			if total > 0 {
-				diskPct = (float64(total-free) / float64(total)) * 100
+		// 3. 获取系统根目录硬盘使用率 (跨平台安全方式)
+		out, err := exec.Command("df", "-k", "/").Output()
+		if err == nil {
+			lines := strings.Split(string(out), "\n")
+			if len(lines) >= 2 {
+				fields := strings.Fields(lines[1])
+				if len(fields) >= 5 {
+					pctStr := strings.TrimRight(fields[4], "%")
+					if val, err := strconv.ParseFloat(pctStr, 64); err == nil {
+						diskPct = val
+					}
+				}
 			}
 		}
 	} else {
@@ -867,7 +877,6 @@ func startTgBotLoop() {
 					}
 					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
 					for _, a := range agents {
-						// 把新的 CPU/Mem 格式稍微美化一下发到 TG
 						prettyStatus := strings.ReplaceAll(a.SysStatus, "|", " | ")
 						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ 探针: %s\n", a.Name, prettyStatus)
 					}
@@ -3940,7 +3949,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('confirmModal').style.display = 'block';
     }
     function closeConfirm() { document.getElementById('confirmModal').style.display = 'none'; }
-    // 异步弹出自定义输入框
+    
     function showInput(title, msg, placeholder) {
         return new Promise((resolve) => {
             document.getElementById('i_title').innerText = title;
@@ -3969,16 +3978,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 resolve(null);
             };
             
-            // 支持回车键快速确认
             inputEl.onkeydown = (e) => {
                 if (e.key === 'Enter') btnConfirm.click();
             };
             
             modal.style.display = 'block';
-            setTimeout(() => inputEl.focus(), 100); // 自动获取焦点
+            setTimeout(() => inputEl.focus(), 100); 
         });
     }
-    // 替换为最新的 genCmd() 逻辑：
+    
     async function genCmd() {
         const n = document.getElementById('agentName').value;
         if (!n) { showToast("请输入节点名称", "warn"); return; }
@@ -3989,13 +3997,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         
         let host = m_domain;
         if(!host) { 
-            // 【华丽变身】：使用异步自定 UI 弹窗代替原生 prompt
             host = await showInput(
                 "未配置域名 (降级 TCP)", 
                 "请输入 Master 服务器的真实 IP 地址<br><span style='color:var(--warning-text);font-weight:600'>注：IPv6 请用中括号包裹，例如 [240e:8a::1]</span>", 
                 "例如: 1.2.3.4 或 [240e::1]"
             );
-            if(!host) return; // 用户点击了取消或关闭了弹窗
+            if(!host) return; 
         }
         
         try {
@@ -4038,13 +4045,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
-    // 将原来的 window.onclick 替换为：
+    
     window.onclick = function(e) { 
         if(e.target.className === 'modal') { 
             closeEdit(); 
             closeConfirm(); 
             document.getElementById('twoFAModal').style.display='none'; 
-            // 如果点击了背景，且输入框正在显示，则触发取消逻辑
             const btnCancel = document.getElementById('i_btn_cancel');
             if(btnCancel && document.getElementById('inputModal').style.display === 'block') {
                 btnCancel.click();
@@ -4092,7 +4098,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
     function formatSpeed(b) { if(b<=0) return "0 B/s"; return formatBytes(b)+"/s"; }
 
-    // 局部刷新指定区块
     function refreshSection(type, btn) {
         const icon = btn.querySelector('i');
         icon.classList.add('ri-spin');
