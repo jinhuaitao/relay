@@ -2336,9 +2336,9 @@ func runAgent(name, masterAddr, token string) {
 					})
 					if len(reps) > 0 {
 						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
-					} else {
-						json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
 					}
+					// 去掉 else，无论有没有流量，每秒都强制发送一次最新的探针状态
+					json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
 				case <-h.C:
 					checkTargetHealth(conn)
 				}
