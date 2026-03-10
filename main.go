@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.78"
+	AppVersion      = "v3.0.79"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2021,7 +2021,16 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+
 	mu.Lock()
+	// 记录修改前的关键配置
+	oldPanelDomain := config.PanelDomain
+	oldMasterDomain := config.MasterDomain
+	oldPorts := config.AgentPorts
+
 	if p := r.FormValue("password"); p != "" {
 		salt := generateSalt()
 		config.WebPass = salt + "$" + hashPassword(p, salt)
@@ -2044,8 +2053,29 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	saveConfigNoLock()
+	
+	newPanelDomain := config.PanelDomain
+	newMasterDomain := config.MasterDomain
+	newPorts := config.AgentPorts
 	mu.Unlock()
-	http.Redirect(w, r, "/#settings", http.StatusSeeOther)
+
+	// 智能判断是否需要重启（修改了域名或端口）
+	needRestart := (oldPanelDomain != newPanelDomain) || (oldMasterDomain != newMasterDomain) || (oldPorts != newPorts)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"need_restart":  needRestart,
+		"redirect_host": newPanelDomain,
+	})
+
+	// 如果需要重启，延时 1 秒后执行，确保前端能收到成功响应
+	if needRestart {
+		go func() {
+			time.Sleep(1 * time.Second)
+			doRestart()
+		}()
+	}
 }
 
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
@@ -3629,7 +3659,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         <div id="settings" class="page">
             <div class="card" style="max-width:800px">
                 <h3><i class="ri-settings-line"></i> 系统全局配置</h3>
-                <form action="/update_settings" method="POST">
+                <form id="settingsForm" onsubmit="saveSettings(event)">
                     <div class="grid-form" style="grid-template-columns: 1fr; gap:24px">
                         
                         <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));gap:20px">
@@ -3641,7 +3671,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                             <div class="form-group" style="margin:0">
                                 <label style="font-weight:400;font-size:12px">Master 监听的端口 (逗号分隔，例如: 9999,10086)</label>
                                 <input name="agent_ports" value="{{if .Config.AgentPorts}}{{.Config.AgentPorts}}{{else}}9999{{end}}" placeholder="9999">
-                                <div style="font-size:12px;color:var(--warning-text);margin-top:6px;"><i class="ri-alert-line"></i> 修改后需手动重启服务</div>
+                                <div style="font-size:12px;color:var(--warning-text);margin-top:6px;"><i class="ri-alert-line"></i> 修改后系统会自动重启生效</div>
                             </div>
                         </div>
 
@@ -3929,7 +3959,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function restoreConfig(input) {
         if (!input.files || input.files.length === 0) return;
         const file = input.files[0]; input.value = ''; 
-        // 注意看下面这行的 "restore"
         showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "restore", () => {
             const formData = new FormData(); formData.append('db_file', file);
             fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
@@ -3943,7 +3972,6 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const file = input.files[0]; 
         input.value = ''; 
         
-        // 注意看下面这行的 "restore"
         showConfirm("警告：恢复规则", "确定要用该备份文件【完全覆盖】当前所有的转发规则吗？此操作不可逆！", "restore", () => {
             const formData = new FormData(); 
             formData.append('rules_file', file);
@@ -3958,6 +3986,53 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                     showToast("恢复失败: " + (d.error || "未知错误"), "warn"); 
                 }
             }).catch(() => showToast("上传请求失败", "warn"));
+        });
+    }
+
+    function saveSettings(e) {
+        e.preventDefault(); 
+        const form = e.target;
+        const btn = form.querySelector('button');
+        const oldText = btn.innerHTML;
+        
+        btn.disabled = true;
+        btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> 保存中...';
+
+        const formData = new URLSearchParams(new FormData(form));
+        
+        fetch('/update_settings', { 
+            method: 'POST', 
+            body: formData, 
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'} 
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                if (d.need_restart) {
+                    if (d.redirect_host && d.redirect_host !== location.hostname) {
+                        showToast("配置已保存，正在重启并自动申请证书...", "success");
+                        setTimeout(() => {
+                            window.location.href = "https://" + d.redirect_host + "/#settings";
+                        }, 5000); 
+                    } else {
+                        showToast("关键配置已修改，系统正在自动重启...", "success");
+                        setTimeout(() => location.reload(), 4000);
+                    }
+                } else {
+                    showToast("配置已保存", "success");
+                    setTimeout(() => {
+                        btn.disabled = false;
+                        btn.innerHTML = oldText;
+                    }, 1000);
+                }
+            } else {
+                showToast("保存失败", "warn");
+                btn.disabled = false;
+                btn.innerHTML = oldText;
+            }
+        }).catch(() => {
+            showToast("请求失败，面板可能正在重启", "warn");
+            setTimeout(() => location.reload(), 4000);
         });
     }
 
@@ -4017,7 +4092,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('c_title').innerText = title; document.getElementById('c_msg').innerHTML = msg;
         const btn = document.getElementById('c_btn'); const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
-        else if(type === 'restore') { btn.className = 'btn danger'; btn.innerText = '确认恢复'; icon.innerText = '⚠️'; } // <-- 新增这行
+        else if(type === 'restore') { btn.className = 'btn danger'; btn.innerText = '确认恢复'; icon.innerText = '⚠️'; }
         else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认操作'; icon.innerText = '⚡'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '✨'; }
         btn.onclick = function() { closeConfirm(); cb(); };
