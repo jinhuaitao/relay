@@ -98,6 +98,8 @@ chmod +x relay
 
 ### （先设置）面板访问域名 (Panel)：填写 panel.yourdomain.com（此处可去 Cloudflare 开启橙色小云朵 ☁️ 隐藏面板 IP）。
 正确的面板套 CF 最佳实践：
+
+
 第一步（准备）：在 Cloudflare 中解析面板域名，状态设为 灰色云朵（仅限 DNS）。
 
 
