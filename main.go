@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.77"
+	AppVersion      = "v3.0.78"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -3942,7 +3942,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         const file = input.files[0]; 
         input.value = ''; 
         
-        showConfirm("警告：恢复规则", "确定要用该备份文件【完全覆盖】当前所有的转发规则吗？此操作不可逆！", "danger", () => {
+        // 注意看下面这行的 "restore"
+        showConfirm("警告：恢复规则", "确定要用该备份文件【完全覆盖】当前所有的转发规则吗？此操作不可逆！", "restore", () => {
             const formData = new FormData(); 
             formData.append('rules_file', file);
             
@@ -4015,6 +4016,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         document.getElementById('c_title').innerText = title; document.getElementById('c_msg').innerHTML = msg;
         const btn = document.getElementById('c_btn'); const icon = document.getElementById('c_icon');
         if(type === 'danger') { btn.className = 'btn danger'; btn.innerText = '确认删除'; icon.innerText = '🗑️'; } 
+        else if(type === 'restore') { btn.className = 'btn danger'; btn.innerText = '确认恢复'; icon.innerText = '⚠️'; } // <-- 新增这行
         else if(type === 'warning') { btn.className = 'btn warning'; btn.innerText = '确认操作'; icon.innerText = '⚡'; }
         else { btn.className = 'btn'; btn.innerText = '确认执行'; icon.innerText = '✨'; }
         btn.onclick = function() { closeConfirm(); cb(); };
