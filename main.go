@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.76"
+	AppVersion      = "v3.0.77"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1095,6 +1095,8 @@ func runMaster() {
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
 	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig))
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
+	http.HandleFunc("/export_rules", authMiddleware(handleExportRules))
+	http.HandleFunc("/import_rules", authMiddleware(handleImportRules))
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
@@ -2099,6 +2101,46 @@ func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	b, _ := json.MarshalIndent(logs, "", "  ")
 	w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
 	w.Write(b)
+}
+
+func handleExportRules(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+	b, err := json.MarshalIndent(rules, "", "  ")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename=rules_backup.json")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+}
+
+func handleImportRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		return
+	}
+	file, _, err := r.FormFile("rules_file")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "读取上传文件失败"})
+		return
+	}
+	defer file.Close()
+
+	var importedRules []LogicalRule
+	if err := json.NewDecoder(file).Decode(&importedRules); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "解析 JSON 格式失败，请确保文件正确"})
+		return
+	}
+
+	mu.Lock()
+	rules = importedRules
+	saveConfigNoLock()
+	mu.Unlock()
+
+	go pushConfigToAll()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request) {
@@ -3392,7 +3434,12 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             <div class="card">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
                     <h3 style="margin:0"><i class="ri-list-settings-line"></i> 规则列表</h3>
-                    <button class="btn icon secondary" onclick="refreshSection('rules', this)" title="局部刷新"><i class="ri-refresh-line"></i></button>
+                    <div style="display:flex; gap: 8px;">
+                        <button class="btn secondary" style="font-size:13px; padding: 6px 12px;" onclick="location.href='/export_rules'" title="备份当前所有规则"><i class="ri-download-line"></i> 备份规则</button>
+                        <button class="btn secondary" style="font-size:13px; padding: 6px 12px;" onclick="document.getElementById('import-rules-file').click()" title="恢复规则（覆盖现有）"><i class="ri-upload-line"></i> 恢复规则</button>
+                        <input type="file" id="import-rules-file" style="display:none" accept=".json" onchange="importRules(this)">
+                        <button class="btn icon secondary" onclick="refreshSection('rules', this)" title="局部刷新"><i class="ri-refresh-line"></i></button>
+                    </div>
                 </div>
                 <div class="table-container" id="rules-container">
                     <table>
@@ -3886,6 +3933,28 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             const formData = new FormData(); formData.append('db_file', file);
             fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
                 if (d.success) { showToast("恢复成功，面板重启中...", "success"); fetch('/restart', {method: 'POST'}).then(() => { setTimeout(() => location.reload(), 3000); }); } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
+            }).catch(() => showToast("上传请求失败", "warn"));
+        });
+    }
+
+    function importRules(input) {
+        if (!input.files || input.files.length === 0) return;
+        const file = input.files[0]; 
+        input.value = ''; 
+        
+        showConfirm("警告：恢复规则", "确定要用该备份文件【完全覆盖】当前所有的转发规则吗？此操作不可逆！", "danger", () => {
+            const formData = new FormData(); 
+            formData.append('rules_file', file);
+            
+            fetch('/import_rules', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(d => {
+                if (d.success) { 
+                    showToast("规则恢复成功，已推送到节点", "success"); 
+                    setTimeout(() => location.reload(), 1500); 
+                } else { 
+                    showToast("恢复失败: " + (d.error || "未知错误"), "warn"); 
+                }
             }).catch(() => showToast("上传请求失败", "warn"));
         });
     }
