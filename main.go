@@ -3929,7 +3929,8 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function restoreConfig(input) {
         if (!input.files || input.files.length === 0) return;
         const file = input.files[0]; input.value = ''; 
-        showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "danger", () => {
+        // 注意看下面这行的 "restore"
+        showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "restore", () => {
             const formData = new FormData(); formData.append('db_file', file);
             fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
                 if (d.success) { showToast("恢复成功，面板重启中...", "success"); fetch('/restart', {method: 'POST'}).then(() => { setTimeout(() => location.reload(), 3000); }); } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
