@@ -96,11 +96,11 @@ chmod +x relay
 
 登录面板后，进入 “系统设置”，配置您的网络域名：
 
-### 面板访问域名 (Panel)：填写 panel.yourdomain.com（此处可去 Cloudflare 开启橙色小云朵 ☁️ 隐藏面板 IP）,加密模式:在 Cloudflare 的左侧菜单找到 SSL/TLS -> 概述，将加密模式设置为 “完全 (严格)” (Full Strict)。
+### 1.面板访问域名 (Panel)：填写 panel.yourdomain.com（此处可去 Cloudflare 开启橙色小云朵 ☁️ 隐藏面板 IP）,加密模式:在 Cloudflare 的左侧菜单找到 SSL/TLS -> 概述，将加密模式设置为 “完全 (严格)” (Full Strict)。
 
 
 
-### 节点通信域名 (Node)：填写 node.yourdomain.com（必须解析到真实 IP，绝对不能开启 Cloudflare 云朵 ☁️）。
+### 2.节点通信域名 (Node)：填写 node.yourdomain.com（必须解析到真实 IP，绝对不能开启 Cloudflare 云朵 ☁️）。
 
 保存后点击 “重启服务”。面板将自动绑定 80 和 443 端口，并申请合法的 HTTPS 证书！后续请使用 https://panel... 访问。
 
