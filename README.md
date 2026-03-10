@@ -102,7 +102,7 @@ chmod +x relay
 
 ### 2.节点通信域名 (Node)：填写 node.yourdomain.com（必须解析到真实 IP，绝对不能开启 Cloudflare 云朵 ☁️）。
 
-保存后点击 “重启服务”。面板将自动绑定 80 和 443 端口，并申请合法的 HTTPS 证书！后续请使用 https://panel... 访问。
+保存后自动重启服务。面板将自动绑定 80 和 443 端口，并申请合法的 HTTPS 证书！后续请使用 https://panel... 访问。
 
 Telegram 通知配置：
 
