@@ -97,8 +97,18 @@ chmod +x relay
 登录面板后，进入 “系统设置”，配置您的网络域名：
 
 ### （先设置）面板访问域名 (Panel)：填写 panel.yourdomain.com（此处可去 Cloudflare 开启橙色小云朵 ☁️ 隐藏面板 IP）。
+正确的面板套 CF 最佳实践：
+第一步（准备）：在 Cloudflare 中解析面板域名，状态设为 灰色云朵（仅限 DNS）。
 
-节点通信域名 (Node)：填写 node.yourdomain.com（必须解析到真实 IP，绝对不能开启 Cloudflare 云朵 ☁️）。
+第二步（发证）：在 GoRelay 面板设置中填入该域名，保存并重启系统。等待 10~30 秒，系统会自动向 Let's Encrypt 申请好真实的 SSL 证书，你可以尝试在浏览器直接用 https://你的面板域名 访问看看是否成功。
+
+第三步（开启）：确保证书申请成功后，回到 Cloudflare，将该域名的状态点亮为 橙色小云朵（已代理）。
+
+第四步（加密模式）：在 Cloudflare 的左侧菜单找到 SSL/TLS -> 概述，将加密模式设置为 “完全 (严格)” (Full Strict)。
+
+
+
+### 节点通信域名 (Node)：填写 node.yourdomain.com（必须解析到真实 IP，绝对不能开启 Cloudflare 云朵 ☁️）。
 
 保存后点击 “重启服务”。面板将自动绑定 80 和 443 端口，并申请合法的 HTTPS 证书！后续请使用 https://panel... 访问。
 
