@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.81"
+	AppVersion      = "v3.0.82"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -879,22 +879,62 @@ func startTgBotLoop() {
 						"parse_mode":   "HTML",
 						"reply_markup": markup,
 					})
-				} else if data == "cmd:status" {
+				} } else if data == "cmd:status" {
 					mu.Lock()
 					var tx, rx int64
 					for _, r := range rules {
 						tx += r.TotalTx
 						rx += r.TotalRx
 					}
-					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总计中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
 					for _, a := range agents {
 						prettyStatus := strings.ReplaceAll(a.SysStatus, "|", " | ")
 						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ 探针: %s\n", a.Name, prettyStatus)
 					}
 					if len(agents) == 0 {
-						reply += "暂无节点在线"
+						reply += "暂无节点在线\n"
 					}
 					mu.Unlock()
+
+					// --- 新增：查询近 30 天流量消耗趋势 ---
+					reply += "\n--- 历史流量趋势 ---\n"
+					
+					// 获取近 30 天的数据（用于计算总和，展示时为了排版只展示最近 10 天）
+					dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+					if err == nil {
+						defer dsRows.Close()
+						
+						var total30Tx, total30Rx int64
+						var historyLines []string
+						
+						for dsRows.Next() {
+							var d string
+							var dTx, dRx int64
+							dsRows.Scan(&d, &dTx, &dRx)
+							
+							total30Tx += dTx
+							total30Rx += dRx
+							
+							// 只保留最近 10 天的详情记录，防止 TG 消息过长
+							if len(historyLines) < 10 {
+								// 去掉年份前缀 (2026-03-11 -> 03-11)
+								shortDate := d
+								if len(d) == 10 {
+									shortDate = d[5:]
+								}
+								historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
+							}
+						}
+						
+						if len(historyLines) > 0 {
+							reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
+							for _, line := range historyLines {
+								reply += line + "\n"
+							}
+						} else {
+							reply += "暂无历史流量数据\n"
+						}
+					}
 
 					markup := map[string]interface{}{
 						"inline_keyboard": [][]InlineButton{{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}, {Text: "🔄 刷新状态", CallbackData: "cmd:status"}}},
@@ -992,6 +1032,36 @@ func trafficResetLoop() {
 
 // ================= MASTER =================
 
+// ================= TG DAILY REPORT =================
+
+func dailyTrafficReportLoop() {
+	var lastReportDate string
+	for {
+		time.Sleep(1 * time.Minute)
+		now := time.Now()
+
+		if now.Hour() == 23 && now.Minute() >= 59 {
+			today := now.Format("2006-01-02")
+			if lastReportDate == today {
+				continue
+			}
+
+			flushDailyStats()
+
+			var tx, rx int64
+			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
+			if err == nil && (tx > 0 || rx > 0) {
+				msg := fmt.Sprintf("📈 <b>每日流量日报</b>\n\n🗓️ 日期: %s\n⬆️ 今日上传: %s\n⬇️ 今日下载: %s\n🌐 今日总消耗: <b>%s</b>",
+					today, formatBytes(tx), formatBytes(rx), formatBytes(tx+rx))
+				sendTelegram(msg)
+			}
+			lastReportDate = today
+		}
+	}
+}
+
+// ================= MASTER =================
+
 func runMaster() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -1007,7 +1077,8 @@ func runMaster() {
 	go broadcastLoop()
 	go startTgBotLoop()   
 	go autoBackupLoop()   
-	go trafficResetLoop() 
+	go trafficResetLoop()
+	go dailyTrafficReportLoop()
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
