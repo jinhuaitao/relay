@@ -879,14 +879,14 @@ func startTgBotLoop() {
 						"parse_mode":   "HTML",
 						"reply_markup": markup,
 					})
-				} } else if data == "cmd:status" {
+				} else if data == "cmd:status" {
 					mu.Lock()
 					var tx, rx int64
 					for _, r := range rules {
 						tx += r.TotalTx
 						rx += r.TotalRx
 					}
-					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总计中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
 					for _, a := range agents {
 						prettyStatus := strings.ReplaceAll(a.SysStatus, "|", " | ")
 						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ 探针: %s\n", a.Name, prettyStatus)
@@ -898,12 +898,9 @@ func startTgBotLoop() {
 
 					// --- 新增：查询近 30 天流量消耗趋势 ---
 					reply += "\n--- 历史流量趋势 ---\n"
-					
-					// 获取近 30 天的数据（用于计算总和，展示时为了排版只展示最近 10 天）
 					dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 					if err == nil {
 						defer dsRows.Close()
-						
 						var total30Tx, total30Rx int64
 						var historyLines []string
 						
@@ -911,26 +908,19 @@ func startTgBotLoop() {
 							var d string
 							var dTx, dRx int64
 							dsRows.Scan(&d, &dTx, &dRx)
-							
 							total30Tx += dTx
 							total30Rx += dRx
 							
-							// 只保留最近 10 天的详情记录，防止 TG 消息过长
 							if len(historyLines) < 10 {
-								// 去掉年份前缀 (2026-03-11 -> 03-11)
 								shortDate := d
-								if len(d) == 10 {
-									shortDate = d[5:]
-								}
+								if len(d) == 10 { shortDate = d[5:] }
 								historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
 							}
 						}
 						
 						if len(historyLines) > 0 {
 							reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
-							for _, line := range historyLines {
-								reply += line + "\n"
-							}
+							for _, line := range historyLines { reply += line + "\n" }
 						} else {
 							reply += "暂无历史流量数据\n"
 						}
