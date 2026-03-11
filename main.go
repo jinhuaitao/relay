@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.83"
+	AppVersion      = "v3.0.84"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1026,9 +1026,9 @@ func startTgBotLoop() {
 							}
 						}
 						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
-						reply += fmt.Sprintf("   ├ 💡 <b>CPU:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
+						reply += fmt.Sprintf("   ├ 💡 <b>CPU :</b> <code>%s %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
 						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(mem), mem)
-						reply += fmt.Sprintf("   └ 💽 <b>DSK:</b> <code>%s %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
+						reply += fmt.Sprintf("   └ 💽 <b>DSK :</b> <code>%s %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
 					}
 					if len(agents) == 0 {
 						reply += "⚠️ <i>暂无节点在线</i>\n\n"
