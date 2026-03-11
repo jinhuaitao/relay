@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.82"
+	AppVersion      = "v3.0.83"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -682,6 +682,50 @@ func sendTelegram(text string) {
 	})
 }
 
+// --- TG 交互增强工具 ---
+
+// 生成可视化终端进度条: [██████░░░░]
+func makeProgressBar(percent float64) string {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := int(percent / 10)
+	if filled > 10 {
+		filled = 10
+	}
+	empty := 10 - filled
+	return strings.Repeat("█", filled) + strings.Repeat("░", empty)
+}
+
+// 向 Telegram 自动注册原生快捷菜单 (Menu Button)
+func setupTgBotCommands() {
+	mu.Lock()
+	token := config.TgBotToken
+	mu.Unlock()
+	if token == "" {
+		return
+	}
+
+	commands := []map[string]string{
+		{"command": "menu", "description": "🎛️ 打开智能中控台主菜单"},
+		{"command": "status", "description": "📊 查看节点与实时流量状态"},
+		{"command": "rules", "description": "📜 管理转发规则 (启停)"},
+	}
+
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/setMyCommands", token)
+	b, _ := json.Marshal(map[string]interface{}{"commands": commands})
+
+	go func() {
+		req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		client.Do(req)
+	}()
+}
+
 // --- TG 云备份功能核心 ---
 func sendTelegramDocument(filePath string, caption string) {
 	mu.Lock()
@@ -769,10 +813,33 @@ func sendTgMenu(chatID string) {
 	})
 }
 
-func buildRulesMenuMarkup() map[string]interface{} {
+func buildRulesMenuMarkup(page int) map[string]interface{} {
 	var rows [][]InlineButton
 	mu.Lock()
-	for _, r := range rules {
+	defer mu.Unlock()
+
+	pageSize := 10 // 每页显示的规则数量
+	totalRules := len(rules)
+	totalPages := (totalRules + pageSize - 1) / pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if end > totalRules {
+		end = totalRules
+	}
+
+	// 渲染当前页的规则按钮
+	for i := start; i < end; i++ {
+		r := rules[i]
 		status := "🟢"
 		if r.Disabled {
 			status = "🔴"
@@ -781,9 +848,22 @@ func buildRulesMenuMarkup() map[string]interface{} {
 		if r.Group != "" {
 			text += fmt.Sprintf(" (%s)", r.Group)
 		}
-		rows = append(rows, []InlineButton{{Text: text, CallbackData: "toggle:" + r.ID}})
+		// 回调数据中带上当前页码，以便操作后能停留在本页
+		rows = append(rows, []InlineButton{{Text: text, CallbackData: fmt.Sprintf("toggle:%s:%d", r.ID, page)}})
 	}
-	mu.Unlock()
+
+	// 渲染分页导航行
+	var navRow []InlineButton
+	if page > 1 {
+		navRow = append(navRow, InlineButton{Text: "⬅️ 上一页", CallbackData: fmt.Sprintf("page:%d", page-1)})
+	}
+	navRow = append(navRow, InlineButton{Text: fmt.Sprintf("📄 %d / %d", page, totalPages), CallbackData: "noop"})
+	if page < totalPages {
+		navRow = append(navRow, InlineButton{Text: "下一页 ➡️", CallbackData: fmt.Sprintf("page:%d", page+1)})
+	}
+	rows = append(rows, navRow)
+
+	// 底部返回按钮
 	rows = append(rows, []InlineButton{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}})
 	return map[string]interface{}{"inline_keyboard": rows}
 }
@@ -841,6 +921,7 @@ func startTgBotLoop() {
 		for _, update := range res.Result {
 			offset = update.UpdateID + 1
 
+			// 处理直接输入的指令
 			if update.Message != nil {
 				chatIdStr := fmt.Sprintf("%d", update.Message.Chat.ID)
 				if chatIdStr != allowedChat {
@@ -849,21 +930,64 @@ func startTgBotLoop() {
 				text := strings.TrimSpace(update.Message.Text)
 				if text == "/start" || text == "/menu" || text == "/help" {
 					sendTgMenu(chatIdStr)
+				} else if text == "/status" {
+					// 模拟触发状态按钮
+					update.CallbackQuery = &struct {
+						ID      string `json:"id"`
+						Data    string `json:"data"`
+						Message *struct {
+							MessageID int64 `json:"message_id"`
+							Chat      struct {
+								ID int64 `json:"id"`
+							} `json:"chat"`
+						} `json:"message"`
+					}{ID: "", Data: "cmd:status", Message: &struct {
+						MessageID int64 `json:"message_id"`
+						Chat      struct {
+							ID int64 `json:"id"`
+						} `json:"chat"`
+					}{MessageID: 0, Chat: struct {
+						ID int64 `json:"id"`
+					}{ID: update.Message.Chat.ID}}}
+				} else if text == "/rules" {
+					// 模拟触发规则按钮
+					update.CallbackQuery = &struct {
+						ID      string `json:"id"`
+						Data    string `json:"data"`
+						Message *struct {
+							MessageID int64 `json:"message_id"`
+							Chat      struct {
+								ID int64 `json:"id"`
+							} `json:"chat"`
+						} `json:"message"`
+					}{ID: "", Data: "cmd:rules", Message: &struct {
+						MessageID int64 `json:"message_id"`
+						Chat      struct {
+							ID int64 `json:"id"`
+						} `json:"chat"`
+					}{MessageID: 0, Chat: struct {
+						ID int64 `json:"id"`
+					}{ID: update.Message.Chat.ID}}}
 				}
 			}
 
-			if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
+			// 处理内联键盘回调
+			if update.CallbackQuery != nil {
 				chatIdStr := fmt.Sprintf("%d", update.CallbackQuery.Message.Chat.ID)
 				if chatIdStr != allowedChat {
 					continue
 				}
 
-				tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
+				if update.CallbackQuery.ID != "" {
+					tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
+				}
 
 				data := update.CallbackQuery.Data
 				msgID := update.CallbackQuery.Message.MessageID
 
-				if data == "cmd:menu" {
+				if data == "noop" {
+					continue
+				} else if data == "cmd:menu" {
 					markup := map[string]interface{}{
 						"inline_keyboard": [][]InlineButton{
 							{{Text: "📊 节点与流量状态", CallbackData: "cmd:status"}},
@@ -872,7 +996,9 @@ func startTgBotLoop() {
 							{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
 						},
 					}
-					tgRequest("editMessageText", map[string]interface{}{
+					tgAction := "editMessageText"
+					if msgID == 0 { tgAction = "sendMessage" }
+					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
 						"text":         "🤖 <b>GoRelay Pro 智能中控台</b>\n\n请点击下方按钮执行快捷操作：",
@@ -886,18 +1012,31 @@ func startTgBotLoop() {
 						tx += r.TotalTx
 						rx += r.TotalRx
 					}
-					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: %s\n🔌 在线节点数: %d\n📜 转发规则数: %d\n\n--- 节点负载 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: <b>%s</b>\n🔌 在线节点数: <b>%d</b>\n📜 转发规则数: <b>%d</b>\n\n--- 探针状态 ---\n", formatBytes(tx+rx), len(agents), len(rules))
 					for _, a := range agents {
-						prettyStatus := strings.ReplaceAll(a.SysStatus, "|", " | ")
-						reply += fmt.Sprintf("🟢 <b>%s</b>\n   └ 探针: %s\n", a.Name, prettyStatus)
+						var cpu, mem, dsk float64
+						parts := strings.Split(a.SysStatus, "|")
+						for _, p := range parts {
+							kv := strings.Split(p, ":")
+							if len(kv) == 2 {
+								v, _ := strconv.ParseFloat(kv[1], 64)
+								if kv[0] == "CPU" { cpu = v }
+								if kv[0] == "MEM" { mem = v }
+								if kv[0] == "DSK" { dsk = v }
+							}
+						}
+						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
+						reply += fmt.Sprintf("   ├ 💡 <b>CPU:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
+						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(mem), mem)
+						reply += fmt.Sprintf("   └ 💽 <b>DSK:</b> <code>%s %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
 					}
 					if len(agents) == 0 {
-						reply += "暂无节点在线\n"
+						reply += "⚠️ <i>暂无节点在线</i>\n\n"
 					}
 					mu.Unlock()
 
-					// --- 新增：查询近 30 天流量消耗趋势 ---
-					reply += "\n--- 历史流量趋势 ---\n"
+					// 查询近 30 天流量消耗趋势
+					reply += "--- 历史流量趋势 ---\n"
 					dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 					if err == nil {
 						defer dsRows.Close()
@@ -922,55 +1061,94 @@ func startTgBotLoop() {
 							reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
 							for _, line := range historyLines { reply += line + "\n" }
 						} else {
-							reply += "暂无历史流量数据\n"
+							reply += "<i>暂无历史流量数据</i>\n"
 						}
 					}
+					
+					nowTime := time.Now().Format("2006-01-02 15:04:05")
+					reply += fmt.Sprintf("\n<blockquote expandable>🕒 探针最后同步时间: \n<code>%s</code></blockquote>", nowTime)
 
 					markup := map[string]interface{}{
 						"inline_keyboard": [][]InlineButton{{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}, {Text: "🔄 刷新状态", CallbackData: "cmd:status"}}},
 					}
-					tgRequest("editMessageText", map[string]interface{}{
+					tgAction := "editMessageText"
+					if msgID == 0 { tgAction = "sendMessage" }
+					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
 						"text":         reply,
 						"parse_mode":   "HTML",
 						"reply_markup": markup,
 					})
-				} else if data == "cmd:rules" {
-					tgRequest("editMessageText", map[string]interface{}{
+				} else if data == "cmd:rules" || strings.HasPrefix(data, "page:") {
+					page := 1
+					if strings.HasPrefix(data, "page:") {
+						pStr := strings.TrimPrefix(data, "page:")
+						if p, err := strconv.Atoi(pStr); err == nil {
+							page = p
+						}
+					}
+					tgAction := "editMessageText"
+					if msgID == 0 { tgAction = "sendMessage" }
+					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
 						"text":         "📜 <b>转发规则管理</b>\n\n点击下方按钮可一键切换 启动/暂停 状态：",
 						"parse_mode":   "HTML",
-						"reply_markup": buildRulesMenuMarkup(),
+						"reply_markup": buildRulesMenuMarkup(page),
 					})
 				} else if data == "cmd:backup" {
 					go sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
 				} else if strings.HasPrefix(data, "toggle:") {
-					id := strings.TrimPrefix(data, "toggle:")
-					mu.Lock()
-					for i := range rules {
-						if rules[i].ID == id {
-							rules[i].Disabled = !rules[i].Disabled
-							break
+					// 格式: toggle:id:page
+					parts := strings.Split(data, ":")
+					if len(parts) >= 2 {
+						id := parts[1]
+						page := 1
+						if len(parts) >= 3 {
+							p, _ := strconv.Atoi(parts[2])
+							page = p
 						}
-					}
-					saveConfigNoLock()
-					mu.Unlock()
-					go pushConfigToAll()
+						
+						mu.Lock()
+						for i := range rules {
+							if rules[i].ID == id {
+								rules[i].Disabled = !rules[i].Disabled
+								break
+							}
+						}
+						saveConfigNoLock()
+						mu.Unlock()
+						go pushConfigToAll()
 
+						tgRequest("editMessageText", map[string]interface{}{
+							"chat_id":      chatIdStr,
+							"message_id":   msgID,
+							"text":         "📜 <b>转发规则管理</b>\n\n状态已更新！点击下方按钮可继续切换：",
+							"parse_mode":   "HTML",
+							"reply_markup": buildRulesMenuMarkup(page),
+						})
+					}
+				} else if data == "cmd:restart" {
+					// 增加二级确认防护
+					markup := map[string]interface{}{
+						"inline_keyboard": [][]InlineButton{
+							{{Text: "⚠️ 确认重启", CallbackData: "action:confirm_restart"}},
+							{{Text: "❌ 取消操作", CallbackData: "cmd:menu"}},
+						},
+					}
 					tgRequest("editMessageText", map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
-						"text":         "📜 <b>转发规则管理</b>\n\n状态已更新！点击下方按钮可继续切换：",
+						"text":         "⚠️ <b>危险操作确认</b>\n\n您正在尝试远程重启整个中控系统，这会导致所有网络连接短暂中断。确定要继续吗？",
 						"parse_mode":   "HTML",
-						"reply_markup": buildRulesMenuMarkup(),
+						"reply_markup": markup,
 					})
-				} else if data == "cmd:restart" {
+				} else if data == "action:confirm_restart" {
 					tgRequest("editMessageText", map[string]interface{}{
 						"chat_id":    chatIdStr,
 						"message_id": msgID,
-						"text":       "🔄 接收到安全指令，系统正在重启...",
+						"text":       "🔄 接收到安全指令，系统正在执行重启...",
 					})
 					go func() {
 						time.Sleep(2 * time.Second)
