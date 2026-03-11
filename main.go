@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.80"
+	AppVersion      = "v3.0.81"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -98,6 +98,12 @@ type OpLog struct {
 	IP     string `json:"ip"`
 	Action string `json:"action"`
 	Msg    string `json:"msg"`
+}
+
+type DailyStat struct {
+	Date string `json:"Date"`
+	Tx   int64  `json:"Tx"`
+	Rx   int64  `json:"Rx"`
 }
 
 type AppConfig struct {
@@ -227,6 +233,10 @@ var (
 	cpuMu        sync.Mutex
 	lastCPUIdle  uint64
 	lastCPUTotal uint64
+
+	// 每日流量统计缓冲（提升数据库性能）
+	dailyTxBuf int64
+	dailyRxBuf int64
 )
 
 // --- 数据库初始化与优化 ---
@@ -263,7 +273,13 @@ CREATE TABLE IF NOT EXISTS logs (
     ip TEXT,
     action TEXT,
     msg TEXT
-);`
+);
+CREATE TABLE IF NOT EXISTS daily_stats (
+    date TEXT PRIMARY KEY,
+    tx INTEGER DEFAULT 0,
+    rx INTEGER DEFAULT 0
+);
+`
 
 func initDB() {
 	var err error
@@ -434,13 +450,10 @@ func setRLimit() {
 	}
 }
 
-// 探针系统：底层硬核抓取物理机的真实 CPU、内存、硬盘
-// 探针系统：底层硬核抓取物理机的真实 CPU、内存、硬盘
 func getSysStatus() string {
 	var cpuPct, memPct, diskPct float64
 
 	if runtime.GOOS == "linux" {
-		// 1. 获取真实 CPU 使用率 (严格限幅处理)
 		if data, err := os.ReadFile("/proc/stat"); err == nil {
 			lines := strings.Split(string(data), "\n")
 			if len(lines) > 0 {
@@ -450,7 +463,6 @@ func getSysStatus() string {
 					for i := 1; i < len(fields) && i <= 8; i++ {
 						ticks[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
 					}
-					// 空闲时间 = idle + iowait
 					idleTicks := ticks[3] + ticks[4] 
 					var totalTicks uint64
 					for _, t := range ticks {
@@ -470,7 +482,6 @@ func getSysStatus() string {
 			}
 		}
 
-		// 2. 获取真实可用内存 (增加对老内核的兼容与 Buffers/Cache 的处理，对标 htop)
 		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
 			var total, available, free, buffers, cached uint64
 			lines := strings.Split(string(data), "\n")
@@ -486,7 +497,6 @@ func getSysStatus() string {
 				}
 			}
 			if total > 0 {
-				// 如果系统没有 MemAvailable 字段，则手动计算: Free + Buffers + Cached
 				if available == 0 {
 					available = free + buffers + cached
 				}
@@ -496,25 +506,21 @@ func getSysStatus() string {
 			}
 		}
 
-		// 3. 获取硬盘使用率 (改用 syscall 原生 API，替代效率低下的 exec df)
 		var stat syscall.Statfs_t
 		if err := syscall.Statfs("/", &stat); err == nil {
-			// Blocks: 总数据块数量, Bfree: 空闲块, Bavail: 非 root 用户可用的空闲块
 			used := stat.Blocks - stat.Bfree
-			nonRootTotal := used + stat.Bavail // 计算除 root 保留空间外的真实总容量
+			nonRootTotal := used + stat.Bavail 
 			if nonRootTotal > 0 {
 				diskPct = (float64(used) / float64(nonRootTotal)) * 100.0
 			}
 		}
 	} else {
-		// Mac / Windows 的优雅兜底伪装
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 		memPct = 1.0 
 		cpuPct = float64(runtime.NumGoroutine()) 
 	}
 
-	// 最终安全限制：防止出现负数或超 100% 的荒谬数据
 	if cpuPct < 0 { cpuPct = 0 } else if cpuPct > 100 { cpuPct = 100 }
 	if memPct < 0 { memPct = 0 } else if memPct > 100 { memPct = 100 }
 	if diskPct < 0 { diskPct = 0 } else if diskPct > 100 { diskPct = 100 }
@@ -686,7 +692,6 @@ func sendTelegramDocument(filePath string, caption string) {
 		return
 	}
 
-	// 强制 SQLite 刷入磁盘以保证快照完整性
 	if db != nil {
 		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
@@ -836,7 +841,6 @@ func startTgBotLoop() {
 		for _, update := range res.Result {
 			offset = update.UpdateID + 1
 
-			// 1. 处理文字消息
 			if update.Message != nil {
 				chatIdStr := fmt.Sprintf("%d", update.Message.Chat.ID)
 				if chatIdStr != allowedChat {
@@ -848,7 +852,6 @@ func startTgBotLoop() {
 				}
 			}
 
-			// 2. 处理按钮回调
 			if update.CallbackQuery != nil && update.CallbackQuery.Message != nil {
 				chatIdStr := fmt.Sprintf("%d", update.CallbackQuery.Message.Chat.ID)
 				if chatIdStr != allowedChat {
@@ -980,7 +983,7 @@ func trafficResetLoop() {
 			saveConfigNoLock()
 			mu.Unlock()
 			
-			sendTelegram(fmt.Sprintf("📅 <b>账单日触发</b>\n系统已自动清零本月所有规则的流量统计！", ))
+			sendTelegram(fmt.Sprintf("📅 <b>账单日触发</b>\n系统已自动清零本月所有规则的流量统计！"))
 			go pushConfigToAll()
 		}
 	}
@@ -997,6 +1000,7 @@ func runMaster() {
 				saveConfig()
 			}
 			cleanOldLogs()
+			flushDailyStats()
 			db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 		}
 	}()
@@ -1159,6 +1163,23 @@ func runMaster() {
 			Handler: webHandler,
 		}
 		log.Fatal(server.ListenAndServe())
+	}
+}
+
+// 每日流量统计定期刷盘
+func flushDailyStats() {
+	tx := atomic.SwapInt64(&dailyTxBuf, 0)
+	rx := atomic.SwapInt64(&dailyRxBuf, 0)
+	if tx > 0 || rx > 0 {
+		today := time.Now().Format("2006-01-02")
+		_, err := db.Exec(`INSERT INTO daily_stats (date, tx, rx) VALUES (?, ?, ?)
+			ON CONFLICT(date) DO UPDATE SET tx = tx + ?, rx = rx + ?`,
+			today, tx, rx, tx, rx)
+		if err != nil {
+			log.Printf("⚠️ 保存每日流量快照失败: %v", err)
+			atomic.AddInt64(&dailyTxBuf, tx)
+			atomic.AddInt64(&dailyRxBuf, rx)
+		}
 	}
 }
 
@@ -1379,6 +1400,10 @@ func handleStatsReport(payload interface{}) {
 					rules[i].UserCount = rep.UserCount
 					atomic.StoreInt32(&configDirty, 1)
 
+					// 将增量数据记录到每日流量统计缓冲池中
+					atomic.AddInt64(&dailyTxBuf, rep.TxDelta)
+					atomic.AddInt64(&dailyRxBuf, rep.RxDelta)
+
 					// --- 智能预警机制开始 ---
 					limit := rules[i].TrafficLimit
 					total := rules[i].TotalTx + rules[i].TotalRx
@@ -1536,6 +1561,27 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 提取近 30 天流量记录
+	var dailyStats []DailyStat
+	dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+	if err == nil {
+		defer dsRows.Close()
+		for dsRows.Next() {
+			var ds DailyStat
+			dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
+			dailyStats = append(dailyStats, ds)
+		}
+	}
+	// 将数据按时间顺序颠倒，方便图表显示
+	for i, j := 0, len(dailyStats)-1; i < j; i, j = i+1, j-1 {
+		dailyStats[i], dailyStats[j] = dailyStats[j], dailyStats[i]
+	}
+	// 如果没有任何记录，给一条今天的空数据防止前台报错
+	if len(dailyStats) == 0 {
+		dailyStats = append(dailyStats, DailyStat{Date: time.Now().Format("2006-01-02"), Tx: 0, Rx: 0})
+	}
+	dsBytes, _ := json.Marshal(dailyStats)
+
 	mu.Lock()
 	conf := config
 	mu.Unlock()
@@ -1553,20 +1599,21 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Agents       []AgentInfo
-		Rules        []LogicalRule
-		Logs         []OpLog
-		User         string
-		DownloadURL  string
-		TotalTraffic int64
-		MasterDomain string
-		PanelDomain  string
-		Config       AppConfig
-		TwoFA        bool
-		IsTLS        bool
-		Ports        []string
-		Version      string
-	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion}
+		Agents         []AgentInfo
+		Rules          []LogicalRule
+		Logs           []OpLog
+		User           string
+		DownloadURL    string
+		TotalTraffic   int64
+		MasterDomain   string
+		PanelDomain    string
+		Config         AppConfig
+		TwoFA          bool
+		IsTLS          bool
+		Ports          []string
+		Version        string
+		DailyStatsJSON template.JS
+	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion, template.JS(string(dsBytes))}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -2034,7 +2081,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	// 记录修改前的关键配置
 	oldPanelDomain := config.PanelDomain
 	oldMasterDomain := config.MasterDomain
 	oldPorts := config.AgentPorts
@@ -2067,7 +2113,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	newPorts := config.AgentPorts
 	mu.Unlock()
 
-	// 智能判断是否需要重启（修改了域名或端口）
 	needRestart := (oldPanelDomain != newPanelDomain) || (oldMasterDomain != newMasterDomain) || (oldPorts != newPorts)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2077,7 +2122,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"redirect_host": newPanelDomain,
 	})
 
-	// 如果需要重启，延时 1 秒后执行，确保前端能收到成功响应
 	if needRestart {
 		go func() {
 			time.Sleep(1 * time.Second)
@@ -2337,7 +2381,6 @@ func runAgent(name, masterAddr, token string) {
 					if len(reps) > 0 {
 						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
 					}
-					// 去掉 else，无论有没有流量，每秒都强制发送一次最新的探针状态
 					json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
 				case <-h.C:
 					checkTargetHealth(conn)
@@ -3401,6 +3444,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                 </div>
             </div>
 
+            <div class="card" style="margin-bottom: 24px;">
+                <h3><i class="ri-bar-chart-grouped-line" style="color:var(--success)"></i> 近 30 天流量消耗趋势</h3>
+                <div class="chart-box" style="height: 250px; width: 100%; position: relative;"><canvas id="dailyChart"></canvas></div>
+            </div>
+
             <div class="dashboard-grid">
                 <div class="card">
                     <h3><i class="ri-pulse-line" style="color:var(--primary)"></i> 实时流量趋势</h3>
@@ -4244,9 +4292,37 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, usePointStyle: true, padding: 20, font: {size: 11} } } }, cutout: '75%' }
     });
 
+    // 初始化近 30 天流量柱状图
+    var dailyStatsData = {{.DailyStatsJSON}};
+    var ctxDaily = document.getElementById('dailyChart').getContext('2d');
+    var dailyChart = new Chart(ctxDaily, {
+        type: 'bar',
+        data: {
+            labels: dailyStatsData.map(d => d.Date.substring(5)),
+            datasets: [
+                { label: '上传 (Tx)', data: dailyStatsData.map(d => d.Tx), backgroundColor: '#8b5cf6', borderRadius: 4, barPercentage: 0.6 },
+                { label: '下载 (Rx)', data: dailyStatsData.map(d => d.Rx), backgroundColor: '#06b6d4', borderRadius: 4, barPercentage: 0.6 }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { 
+                legend: { display: true, position: 'top', labels: {color: '#94a3b8', font: {size: 11}, usePointStyle: true, boxWidth: 8} }, 
+                tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#f8fafc', bodyColor: '#cbd5e1', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 10,
+                    callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBytes(c.raw); } } 
+                } 
+            },
+            scales: { 
+                x: { stacked: true, grid: {display: false}, ticks: {color: '#94a3b8'} }, 
+                y: { stacked: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { color: '#94a3b8', callback: v => formatBytes(v), maxTicksLimit: 6 } } 
+            }
+        }
+    });
+
     function updateChartTheme(theme) {
         const gridColor = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
         chart.options.scales.y.grid.color = gridColor; chart.update();
+        if(dailyChart) { dailyChart.options.scales.y.grid.color = gridColor; dailyChart.update(); }
     }
 
     function formatBytes(b) {
