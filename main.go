@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.90"
+	AppVersion      = "v3.0.91"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -684,8 +684,8 @@ func sendTelegram(text string) {
 
 // --- TG 交互增强工具 ---
 
-// 强迫症专属：绝对对齐的进度条 (完全使用等宽的 █ 和 ░，长度 20)
-func makeFineProgressBar(percent float64) string {
+// 终极美学进度条：支持传入自定义的 UI 设计字符
+func makeAestheticBar(percent float64, fillChar, emptyChar string) string {
 	if percent < 0 {
 		percent = 0
 	}
@@ -693,26 +693,21 @@ func makeFineProgressBar(percent float64) string {
 		percent = 100
 	}
 	
-	totalWidth := 20 // 20格长度，每格代表 5%
+	totalWidth := 12 // 12格是极简符号的视觉黄金比例
 	
-	// 按比例计算应该填充几个完整方块
-	filledFloat := (percent / 100.0) * float64(totalWidth)
-	filledBlocks := int(filledFloat)
+	filledBlocks := int((percent / 100.0) * float64(totalWidth))
 	
-	// 核心细节：只要占用率 > 0%，哪怕不足一格，也强制显示一格，让你能一眼看出“有占用”
+	// 保证只要有占用，就至少亮起一格，避免 1% 显示为空
 	if percent > 0 && filledBlocks == 0 {
 		filledBlocks = 1 
 	}
-	
-	// 修正四舍五入可能导致的超出
 	if filledBlocks > totalWidth {
 		filledBlocks = totalWidth
 	}
 	
 	emptyBlocks := totalWidth - filledBlocks
 	
-	// 只使用 █ 和 ░，保证在任何手机、电脑的 Telegram 上都像素级对齐
-	return strings.Repeat("█", filledBlocks) + strings.Repeat("░", emptyBlocks)
+	return strings.Repeat(fillChar, filledBlocks) + strings.Repeat(emptyChar, emptyBlocks)
 }
 
 
@@ -1042,9 +1037,9 @@ func startTgBotLoop() {
 							}
 						}
 						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
-						reply += fmt.Sprintf("   ├ 🟢 <code>CPU: [%s] %5.1f%%</code>\n", makeFineProgressBar(cpu), cpu)
-						reply += fmt.Sprintf("   ├ 🔵 <code>MEM: [%s] %5.1f%%</code>\n", makeFineProgressBar(mem), mem)
-						reply += fmt.Sprintf("   └ 🟡 <code>DSK: [%s] %5.1f%%</code>\n\n", makeFineProgressBar(dsk), dsk)
+						reply += fmt.Sprintf(" ├ 🟢 <code>CPU: %5.1f%% [%s]</code>\n", cpu, makeAestheticBar(cpu, "━", "─"))
+						reply += fmt.Sprintf(" ├ 🔵 <code>MEM: %5.1f%% [%s]</code>\n", mem, makeAestheticBar(mem, "━", "─"))
+						reply += fmt.Sprintf(" └ 🟡 <code>DSK: %5.1f%% [%s]</code>\n\n", dsk, makeAestheticBar(dsk, "━", "─"))
 
 					}
 					if len(agents) == 0 {
