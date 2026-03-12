@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.89"
+	AppVersion      = "v3.0.90"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1041,7 +1041,7 @@ func startTgBotLoop() {
 								if kv[0] == "DSK" { dsk = v }
 							}
 						}
-						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
+						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
 						reply += fmt.Sprintf("   ├ 🟢 <code>CPU: [%s] %5.1f%%</code>\n", makeFineProgressBar(cpu), cpu)
 						reply += fmt.Sprintf("   ├ 🔵 <code>MEM: [%s] %5.1f%%</code>\n", makeFineProgressBar(mem), mem)
 						reply += fmt.Sprintf("   └ 🟡 <code>DSK: [%s] %5.1f%%</code>\n\n", makeFineProgressBar(dsk), dsk)
