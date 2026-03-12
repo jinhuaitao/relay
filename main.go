@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.85"
+	AppVersion      = "v3.0.86"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -685,7 +685,8 @@ func sendTelegram(text string) {
 // --- TG 交互增强工具 ---
 
 // 生成可视化终端进度条: [██████░░░░]
-func makeProgressBar(percent float64) string {
+// 生成可视化终端进度条，支持自定义颜色方块
+func makeColorProgressBar(percent float64, filledChar string, emptyChar string) string {
 	if percent < 0 {
 		percent = 0
 	}
@@ -697,7 +698,7 @@ func makeProgressBar(percent float64) string {
 		filled = 10
 	}
 	empty := 10 - filled
-	return strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	return strings.Repeat(filledChar, filled) + strings.Repeat(emptyChar, empty)
 }
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
@@ -1026,9 +1027,9 @@ func startTgBotLoop() {
 							}
 						}
 						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
-						reply += fmt.Sprintf("   ├ 💡 <b> CPU :</b> <code>%s %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
-						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(mem), mem)
-						reply += fmt.Sprintf("   └ 💽 <b> DSK :</b> <code>%s %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
+						reply += fmt.Sprintf("   ├ 💡 <b> CPU:</b> %s <code>%5.1f%%</code>\n", makeColorProgressBar(cpu, "🟩", "⬜"), cpu)
+						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> %s <code>%5.1f%%</code>\n", makeColorProgressBar(mem, "🟦", "⬜"), mem)
+						reply += fmt.Sprintf("   └ 💽 <b> DSK:</b> %s <code>%5.1f%%</code>\n\n", makeColorProgressBar(dsk, "🟨", "⬜"), dsk)
 					}
 					if len(agents) == 0 {
 						reply += "⚠️ <i>暂无节点在线</i>\n\n"
