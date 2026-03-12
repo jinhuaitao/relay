@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.85"
+	AppVersion      = "v3.0.86"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -685,6 +685,7 @@ func sendTelegram(text string) {
 // --- TG 交互增强工具 ---
 
 // 生成可视化终端进度条: [██████░░░░]
+// 生成高精度可视化终端进度条 (利用 Unicode 1/8 方块)
 func makeProgressBar(percent float64) string {
 	if percent < 0 {
 		percent = 0
@@ -692,12 +693,34 @@ func makeProgressBar(percent float64) string {
 	if percent > 100 {
 		percent = 100
 	}
-	filled := int(percent / 10)
-	if filled > 10 {
-		filled = 10
+	
+	// 1/8 到 7/8 的字符
+	fractions := []string{"", "▏", "▎", "▍", "▌", "▋", "▊", "▉"}
+	totalWidth := 10 // 进度条总长度（字符数）
+	
+	filledFloat := (percent / 100.0) * float64(totalWidth)
+	fullBlocks := int(filledFloat)
+	
+	remainder := filledFloat - float64(fullBlocks)
+	fracIdx := int(remainder * 8)
+	
+	emptyBlocks := totalWidth - fullBlocks
+	if fracIdx > 0 {
+		emptyBlocks--
 	}
-	empty := 10 - filled
-	return strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	if emptyBlocks < 0 {
+		emptyBlocks = 0
+	}
+	
+	bar := strings.Repeat("█", fullBlocks)
+	if fracIdx > 0 {
+		bar += fractions[fracIdx]
+	}
+	if emptyBlocks > 0 {
+		bar += strings.Repeat("░", emptyBlocks)
+	}
+	
+	return bar
 }
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
@@ -1026,9 +1049,9 @@ func startTgBotLoop() {
 							}
 						}
 						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
-						reply += fmt.Sprintf("   ├ 💡 <b> CPU:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
-						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> <code>%s %5.1f%%</code>\n", makeProgressBar(mem), mem)
-						reply += fmt.Sprintf("   └ 💽 <b> DSK:</b> <code>%s %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
+						reply += fmt.Sprintf("   ├ 🟢 <b>CPU:</b> <code>[%s] %5.1f%%</code>\n", makeProgressBar(cpu), cpu)
+						reply += fmt.Sprintf("   ├ 🔵 <b>MEM:</b> <code>[%s] %5.1f%%</code>\n", makeProgressBar(mem), mem)
+						reply += fmt.Sprintf("   └ 🟡 <b>DSK:</b> <code>[%s] %5.1f%%</code>\n\n", makeProgressBar(dsk), dsk)
 					}
 					if len(agents) == 0 {
 						reply += "⚠️ <i>暂无节点在线</i>\n\n"
