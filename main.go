@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.86"
+	AppVersion      = "v3.0.87"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -684,9 +684,8 @@ func sendTelegram(text string) {
 
 // --- TG 交互增强工具 ---
 
-// 生成可视化终端进度条: [██████░░░░]
-// 生成动态变色进度条 (随占用率自动从 绿->黄->红 变化)
-func makeDynamicColorBar(percent float64) string {
+// 极高精度细分进度条（20 字符宽，支持 1/8 精度，哪怕 0.1% 都会显示一丝刻度）
+func makeFineProgressBar(percent float64) string {
 	if percent < 0 {
 		percent = 0
 	}
@@ -694,25 +693,38 @@ func makeDynamicColorBar(percent float64) string {
 		percent = 100
 	}
 	
-	// 计算填充的方块数 (总长度 10)
-	filledBlocks := int(percent / 10)
-	if filledBlocks > 10 {
-		filledBlocks = 10
-	}
-	emptyBlocks := 10 - filledBlocks
-
-	// 核心逻辑：根据占用率动态决定方块颜色
-	var filledChar string
-	if percent < 60 {
-		filledChar = "🟩" // 健康状态 (低于 60%)
-	} else if percent < 85 {
-		filledChar = "🟨" // 警告状态 (60% - 85%)
-	} else {
-		filledChar = "🟥" // 危险状态 (高于 85%)
+	totalWidth := 20 // 增加总长度到 20 个字符，让进度条更长、精度更高
+	fractions := []string{"", "▏", "▎", "▍", "▌", "▋", "▊", "▉"}
+	
+	filledFloat := (percent / 100.0) * float64(totalWidth)
+	fullBlocks := int(filledFloat)
+	
+	remainder := filledFloat - float64(fullBlocks)
+	fracIdx := int(remainder * 8)
+	
+	// 核心细节：只要占用率 > 0，哪怕算出来是 0，也强制给它显示最细的一丝 (1/8 方块)
+	if percent > 0 && fullBlocks == 0 && fracIdx == 0 {
+		fracIdx = 1 
 	}
 	
-	// 空白部分使用白色方块(⬜)或黑色方块(⬛)，按需修改
-	return strings.Repeat(filledChar, filledBlocks) + strings.Repeat("⬜", emptyBlocks)
+	emptyBlocks := totalWidth - fullBlocks
+	if fracIdx > 0 {
+		emptyBlocks--
+	}
+	if emptyBlocks < 0 {
+		emptyBlocks = 0
+	}
+	
+	bar := strings.Repeat("█", fullBlocks)
+	if fracIdx > 0 {
+		bar += fractions[fracIdx]
+	}
+	if emptyBlocks > 0 {
+		// 未填充部分使用阴影点阵，视觉上和实体方块对比更强烈
+		bar += strings.Repeat("░", emptyBlocks)
+	}
+	
+	return bar
 }
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
@@ -1041,9 +1053,9 @@ func startTgBotLoop() {
 							}
 						}
 						reply += fmt.Sprintf("🟢 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
-						reply += fmt.Sprintf("   ├ 💡 <b> CPU:</b> %s <code>%5.1f%%</code>\n", makeDynamicColorBar(cpu), cpu)
-						reply += fmt.Sprintf("   ├ 🧠 <b>MEM:</b> %s <code>%5.1f%%</code>\n", makeDynamicColorBar(mem), mem)
-						reply += fmt.Sprintf("   └ 💽 <b> DSK:</b> %s <code>%5.1f%%</code>\n\n", makeDynamicColorBar(dsk), dsk)
+						reply += fmt.Sprintf("   ├ 🟢 <b> CPU:</b> <code>[%s] %5.1f%%</code>\n", makeFineProgressBar(cpu), cpu)
+						reply += fmt.Sprintf("   ├ 🔵 <b>MEM:</b> <code>[%s] %5.1f%%</code>\n", makeFineProgressBar(mem), mem)
+						reply += fmt.Sprintf("   └ 🟡 <b> DSK:</b> <code>[%s] %5.1f%%</code>\n\n", makeFineProgressBar(dsk), dsk)
 					}
 					if len(agents) == 0 {
 						reply += "⚠️ <i>暂无节点在线</i>\n\n"
