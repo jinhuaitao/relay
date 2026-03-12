@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.88"
+	AppVersion      = "v3.0.89"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -684,7 +684,7 @@ func sendTelegram(text string) {
 
 // --- TG 交互增强工具 ---
 
-// 极高精度细分进度条（20 字符宽，支持 1/8 精度，哪怕 0.1% 都会显示一丝刻度）
+// 强迫症专属：绝对对齐的进度条 (完全使用等宽的 █ 和 ░，长度 20)
 func makeFineProgressBar(percent float64) string {
 	if percent < 0 {
 		percent = 0
@@ -693,39 +693,28 @@ func makeFineProgressBar(percent float64) string {
 		percent = 100
 	}
 	
-	totalWidth := 20 // 增加总长度到 20 个字符，让进度条更长、精度更高
-	fractions := []string{"", "▏", "▎", "▍", "▌", "▋", "▊", "▉"}
+	totalWidth := 20 // 20格长度，每格代表 5%
 	
+	// 按比例计算应该填充几个完整方块
 	filledFloat := (percent / 100.0) * float64(totalWidth)
-	fullBlocks := int(filledFloat)
+	filledBlocks := int(filledFloat)
 	
-	remainder := filledFloat - float64(fullBlocks)
-	fracIdx := int(remainder * 8)
-	
-	// 核心细节：只要占用率 > 0，哪怕算出来是 0，也强制给它显示最细的一丝 (1/8 方块)
-	if percent > 0 && fullBlocks == 0 && fracIdx == 0 {
-		fracIdx = 1 
+	// 核心细节：只要占用率 > 0%，哪怕不足一格，也强制显示一格，让你能一眼看出“有占用”
+	if percent > 0 && filledBlocks == 0 {
+		filledBlocks = 1 
 	}
 	
-	emptyBlocks := totalWidth - fullBlocks
-	if fracIdx > 0 {
-		emptyBlocks--
-	}
-	if emptyBlocks < 0 {
-		emptyBlocks = 0
+	// 修正四舍五入可能导致的超出
+	if filledBlocks > totalWidth {
+		filledBlocks = totalWidth
 	}
 	
-	bar := strings.Repeat("█", fullBlocks)
-	if fracIdx > 0 {
-		bar += fractions[fracIdx]
-	}
-	if emptyBlocks > 0 {
-		// 未填充部分使用阴影点阵，视觉上和实体方块对比更强烈
-		bar += strings.Repeat("░", emptyBlocks)
-	}
+	emptyBlocks := totalWidth - filledBlocks
 	
-	return bar
+	// 只使用 █ 和 ░，保证在任何手机、电脑的 Telegram 上都像素级对齐
+	return strings.Repeat("█", filledBlocks) + strings.Repeat("░", emptyBlocks)
 }
+
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
 func setupTgBotCommands() {
