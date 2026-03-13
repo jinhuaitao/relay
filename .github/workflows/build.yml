@@ -128,8 +128,8 @@ jobs:
         if: success()
         uses: appleboy/telegram-action@master
         with:
-          to: "5091290643"
-          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
           message: |
             🎉 Relay 转发面板更新成功！
             
