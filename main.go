@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.92"
+	AppVersion      = "v3.0.93"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2451,8 +2451,16 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
 
-	// 6. 响应前端成功
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	// 获取恢复后的新面板域名
+	mu.Lock()
+	newPanelDomain := config.PanelDomain
+	mu.Unlock()
+
+	// 6. 响应前端成功，并下发新的重定向域名
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"redirect_host": newPanelDomain,
+	})
 }
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
@@ -4306,11 +4314,40 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     function restoreConfig(input) {
         if (!input.files || input.files.length === 0) return;
         const file = input.files[0]; input.value = ''; 
-        showConfirm("警告：恢复数据", "确定要用该备份覆盖当前所有配置和数据吗？此操作不可逆，面板恢复后将自动重启！", "restore", () => {
+        
+        // 优化点 1 & 2 & 3：详细的风险阻断提示
+        showConfirm("⚠️ 恢复数据警告", 
+            "确定要用该备份覆盖当前配置吗？此操作不可逆！<br><br>" +
+            "<div style='text-align:left; font-size:12px; color:var(--text-sub); background:var(--input-bg); padding:12px; border-radius:8px; border:1px solid var(--border);'>" +
+            "<b>恢复后将发生以下变化：</b><br>" +
+            "1. 面板将自动重启，<span style='color:var(--warning-text)'>当前登录状态会失效</span>。<br>" +
+            "2. 若备份包含域名，请确保该域名<span style='color:var(--danger-text)'>已解析到本机最新 IP</span>，否则恢复后将无法打开网页。<br>" +
+            "3. 节点的通信 Token 将回滚到备份时的状态。</div>", 
+            "restore", () => {
+                
             const formData = new FormData(); formData.append('db_file', file);
             fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
-                if (d.success) { showToast("恢复成功，面板重启中...", "success"); fetch('/restart', {method: 'POST'}).then(() => { setTimeout(() => location.reload(), 3000); }); } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
-            }).catch(() => showToast("上传请求失败", "warn"));
+                if (d.success) { 
+                    // 明确告知需要重新登录
+                    showToast("恢复成功，重启并跳转中 (需重新登录)...", "success"); 
+                    
+                    fetch('/restart', {method: 'POST'}).finally(() => {
+                        setTimeout(() => {
+                            if (d.redirect_host && d.redirect_host !== location.hostname) {
+                                // 自动跳转到新域名
+                                window.location.href = "https://" + d.redirect_host;
+                            } else {
+                                // 如果没有域名，原地刷新，系统拦截未登录状态退回 login
+                                location.reload();
+                            }
+                        }, 4000); 
+                    });
+                } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
+            }).catch(() => {
+                // 如果后端重启太快导致请求被切断（Catch 触发），依然执行跳转
+                showToast("系统正在重启中，准备刷新...", "success");
+                setTimeout(() => location.reload(), 3000);
+            });
         });
     }
 
