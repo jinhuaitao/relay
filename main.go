@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.93"
+	AppVersion      = "v3.0.94"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2451,7 +2451,6 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
 
-	// 获取恢复后的新面板域名
 	mu.Lock()
 	newPanelDomain := config.PanelDomain
 	mu.Unlock()
@@ -2461,6 +2460,13 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 		"success":       true,
 		"redirect_host": newPanelDomain,
 	})
+
+	// 7. [完美优化] 后端自我接管重启，确保原子性
+	go func() {
+		// 延迟 1 秒，确保上面的 JSON 响应能够完整送达前端
+		time.Sleep(1 * time.Second)
+		doRestart()
+	}()
 }
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
@@ -4315,42 +4321,70 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         if (!input.files || input.files.length === 0) return;
         const file = input.files[0]; input.value = ''; 
         
-        // 优化点 1 & 2 & 3：详细的风险阻断提示
         showConfirm("⚠️ 恢复数据警告", 
             "确定要用该备份覆盖当前配置吗？此操作不可逆！<br><br>" +
             "<div style='text-align:left; font-size:12px; color:var(--text-sub); background:var(--input-bg); padding:12px; border-radius:8px; border:1px solid var(--border);'>" +
             "<b>恢复后将发生以下变化：</b><br>" +
-            "1. 面板将自动重启，<span style='color:var(--warning-text)'>当前登录状态会失效</span>。<br>" +
-            "2. 若备份包含域名，请确保该域名<span style='color:var(--danger-text)'>已解析到本机最新 IP</span>，否则恢复后将无法打开网页。<br>" +
+            "1. 面板将自动重启，<span style='color:var(--warning-text)'>需重新登录</span>。<br>" +
+            "2. 若备份包含域名，请确保该域名<span style='color:var(--danger-text)'>已解析到最新 IP</span>，否则将无法打开。<br>" +
             "3. 节点的通信 Token 将回滚到备份时的状态。</div>", 
             "restore", () => {
                 
             const formData = new FormData(); formData.append('db_file', file);
-            fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
+            
+            fetch('/upload_config', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(d => {
                 if (d.success) { 
-                    // 明确告知需要重新登录
-                    showToast("恢复成功，重启并跳转中 (需重新登录)...", "success"); 
-                    
-                    fetch('/restart', {method: 'POST'}).finally(() => {
-                        setTimeout(() => {
-                            if (d.redirect_host && d.redirect_host !== location.hostname) {
-                                // 自动跳转到新域名
-                                window.location.href = "https://" + d.redirect_host;
-                            } else {
-                                // 如果没有域名，原地刷新，系统拦截未登录状态退回 login
-                                location.reload();
-                            }
-                        }, 4000); 
-                    });
-                } else { showToast("恢复失败: " + (d.error || "未知错误"), "warn"); }
+                    // [完美优化] 触发全屏沉浸式重启引导
+                    showRebootScreen(d.redirect_host);
+                } else { 
+                    showToast("恢复失败: " + (d.error || "未知错误"), "warn"); 
+                }
             }).catch(() => {
-                // 如果后端重启太快导致请求被切断（Catch 触发），依然执行跳转
-                showToast("系统正在重启中，准备刷新...", "success");
-                setTimeout(() => location.reload(), 3000);
+                // 网络断开（通常是因为后台已经秒重启了），也强制进入引导页
+                showRebootScreen(null);
             });
         });
     }
 
+    // --- 新增：全屏沉浸式重启动画函数 ---
+    function showRebootScreen(redirectHost) {
+        closeConfirm();
+        const overlay = document.createElement('div');
+        overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg-body);z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--text-main);opacity:0;transition:opacity 0.3s ease;";
+        
+        let targetText = "准备刷新页面";
+        if (redirectHost && redirectHost !== location.hostname) {
+            targetText = "即将跳转至: https://" + redirectHost;
+        }
+
+        overlay.innerHTML = `
+            <div style="font-size:56px;margin-bottom:20px"><i class="ri-loader-4-line ri-spin" style="color:var(--primary)"></i></div>
+            <h2 style="margin:0 0 12px 0; font-size: 24px;">系统正在热重启</h2>
+            <p style="color:var(--text-sub);margin-bottom:30px;font-size:14px">正在重载底层配置，请勿关闭本页面</p>
+            <div style="width:240px;height:6px;background:var(--input-bg);border-radius:10px;overflow:hidden;position:relative;">
+                <div id="reboot-progress" style="position:absolute;left:0;top:0;height:100%;background:var(--primary);width:0%;transition:width 4s cubic-bezier(0.4, 0, 0.2, 1)"></div>
+            </div>
+            <div style="margin-top:16px;font-size:12px;color:var(--text-sub);font-family:var(--font-mono)">${targetText}</div>
+        `;
+        document.body.appendChild(overlay);
+        
+        // 触发淡入和进度条动画
+        setTimeout(() => { 
+            overlay.style.opacity = "1"; 
+            document.getElementById('reboot-progress').style.width = '100%';
+        }, 50);
+        
+        // 4秒后精准跳转
+        setTimeout(() => {
+            if (redirectHost && redirectHost !== location.hostname) {
+                window.location.href = "https://" + redirectHost;
+            } else {
+                location.reload();
+            }
+        }, 4000);
+    }
     function importRules(input) {
         if (!input.files || input.files.length === 0) return;
         const file = input.files[0]; 
