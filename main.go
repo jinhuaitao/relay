@@ -1228,10 +1228,6 @@ func dailyTrafficReportLoop() {
 
 			flushDailyStats()
 
-			if db == nil { // 👈 添加判空保护
-				continue
-			}
-
 			var tx, rx int64
 			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
 			if err == nil && (tx > 0 || rx > 0) {
@@ -1422,11 +1418,13 @@ func runMaster() {
 }
 
 // 每日流量统计定期刷盘
-func cleanOldLogs() {
-	if db == nil { // 👈 添加判空保护
-		return
-	}
-	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
+func flushDailyStats() {
+	if db == nil { return }
+	tx := atomic.SwapInt64(&dailyTxBuf, 0)
+	rx := atomic.SwapInt64(&dailyRxBuf, 0)
+	if tx > 0 || rx > 0 {
+		today := time.Now().Format("2006-01-02")
+		_, err := db.Exec(`INSERT INTO daily_stats (date, tx, rx) VALUES (?, ?, ?)
 			ON CONFLICT(date) DO UPDATE SET tx = tx + ?, rx = rx + ?`,
 			today, tx, rx, tx, rx)
 		if err != nil {
@@ -1510,16 +1508,16 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
-		if db != nil { // 👈 添加判空保护
-			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
-			if err == nil {
-				for lRows.Next() {
-					var l OpLog
-					lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-					logData = append(logData, l)
-				}
-				lRows.Close()
+		var logData []OpLog
+        if db != nil {
+            lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+		if err == nil {
+			for lRows.Next() {
+				var l OpLog
+				lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				logData = append(logData, l)
 			}
+			lRows.Close()
 		}
 
 		var speedTx int64 = 0
@@ -2403,7 +2401,7 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 1. 加锁清理旧数据库环境
+	// 1. 获取锁，安全地关闭数据库
 	mu.Lock()
 	if db != nil {
 		db.Close()
@@ -2415,25 +2413,25 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
-		mu.Unlock() // 发生错误时切记解锁
+		mu.Unlock() // 发生错误必须解锁
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
 	
-	// 2. 覆盖写入新数据
+	// 2. 覆盖文件
 	io.Copy(out, file)
-	out.Close() // 必须主动关闭文件，释放文件句柄
+	out.Close() // 必须显式关闭文件句柄，否则 Windows 或部分 Linux 机制下会导致新 DB 无法打开
 
-	// 3. 重新初始化数据库连接
-	initDB()
-	
-	// 4. 解锁！必须先解锁，因为接下来的 loadConfig 内部自带 mu.Lock()，否则会触发永久死锁
+	// 3. 立即释放锁！(极其重要，防止后续 loadConfig 死锁)
 	mu.Unlock()
 
-	// 5. 将新数据库中的配置重新加载到内存中
+	// 4. 重新初始化数据库连接
+	initDB()
+	
+	// 5. 将新数据库的配置加载到内存
 	loadConfig()
 
-	// 6. 响应前端，允许它继续发起 /restart 流程
+	// 6. 响应前端，允许它继续发起 /restart
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
@@ -3250,6 +3248,7 @@ func saveConfigNoLock() {
 }
 
 func cleanOldLogs() {
+	if db == nil { return }
 	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
 	if err != nil {
 		log.Printf("⚠️ 清理日志失败: %v", err)
