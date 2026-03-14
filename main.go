@@ -546,12 +546,16 @@ func getClientIP(r *http.Request) string {
 func addLog(r *http.Request, action, msg string) {
 	ip := getClientIP(r)
 	now := time.Now().Format("01-02 15:04:05")
-	_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	if db != nil {
+		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	}
 }
 
 func addSystemLog(ip, action, msg string) {
 	now := time.Now().Format("01-02 15:04:05")
-	_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	if db != nil {
+		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	}
 }
 
 func handleService(op, mode, name, connect, token string, useTLS bool) {
@@ -1049,32 +1053,35 @@ func startTgBotLoop() {
 
 					// 查询近 30 天流量消耗趋势
 					reply += "--- 历史流量趋势 ---\n"
-					dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
-					if err == nil {
-						defer dsRows.Close()
-						var total30Tx, total30Rx int64
-						var historyLines []string
-						
-						for dsRows.Next() {
-							var d string
-							var dTx, dRx int64
-							dsRows.Scan(&d, &dTx, &dRx)
-							total30Tx += dTx
-							total30Rx += dRx
+					
+					var total30Tx, total30Rx int64
+					var historyLines []string
+					if db != nil {
+						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+						if err == nil {
+							defer dsRows.Close()
 							
-							if len(historyLines) < 10 {
-								shortDate := d
-								if len(d) == 10 { shortDate = d[5:] }
-								historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
+							for dsRows.Next() {
+								var d string
+								var dTx, dRx int64
+								dsRows.Scan(&d, &dTx, &dRx)
+								total30Tx += dTx
+								total30Rx += dRx
+								
+								if len(historyLines) < 10 {
+									shortDate := d
+									if len(d) == 10 { shortDate = d[5:] }
+									historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
+								}
 							}
 						}
-						
-						if len(historyLines) > 0 {
-							reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
-							for _, line := range historyLines { reply += line + "\n" }
-						} else {
-							reply += "<i>暂无历史流量数据</i>\n"
-						}
+					}
+					
+					if len(historyLines) > 0 {
+						reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
+						for _, line := range historyLines { reply += line + "\n" }
+					} else {
+						reply += "<i>暂无历史流量数据</i>\n"
 					}
 					
 					nowTime := time.Now().Format("2006-01-02 15:04:05")
@@ -1228,6 +1235,10 @@ func dailyTrafficReportLoop() {
 
 			flushDailyStats()
 
+			if db == nil {
+				continue
+			}
+
 			var tx, rx int64
 			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
 			if err == nil && (tx > 0 || rx > 0) {
@@ -1251,7 +1262,9 @@ func runMaster() {
 			}
 			cleanOldLogs()
 			flushDailyStats()
-			db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+			if db != nil {
+				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+			}
 		}
 	}()
 	go broadcastLoop()
@@ -1419,7 +1432,9 @@ func runMaster() {
 
 // 每日流量统计定期刷盘
 func flushDailyStats() {
-	if db == nil { return }
+	if db == nil {
+		return
+	}
 	tx := atomic.SwapInt64(&dailyTxBuf, 0)
 	rx := atomic.SwapInt64(&dailyRxBuf, 0)
 	if tx > 0 || rx > 0 {
@@ -1508,16 +1523,16 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
-		var logData []OpLog
-        if db != nil {
-            lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
-		if err == nil {
-			for lRows.Next() {
-				var l OpLog
-				lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-				logData = append(logData, l)
+		if db != nil {
+			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+			if err == nil {
+				for lRows.Next() {
+					var l OpLog
+					lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+					logData = append(logData, l)
+				}
+				lRows.Close()
 			}
-			lRows.Close()
 		}
 
 		var speedTx int64 = 0
@@ -1805,25 +1820,29 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 
 	var displayLogs []OpLog
-	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var l OpLog
-			rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-			displayLogs = append(displayLogs, l)
+	if db != nil {
+		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var l OpLog
+				rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				displayLogs = append(displayLogs, l)
+			}
 		}
 	}
 
 	// 提取近 30 天流量记录
 	var dailyStats []DailyStat
-	dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
-	if err == nil {
-		defer dsRows.Close()
-		for dsRows.Next() {
-			var ds DailyStat
-			dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
-			dailyStats = append(dailyStats, ds)
+	if db != nil {
+		dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+		if err == nil {
+			defer dsRows.Close()
+			for dsRows.Next() {
+				var ds DailyStat
+				dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
+				dailyStats = append(dailyStats, ds)
+			}
 		}
 	}
 	// 将数据按时间顺序颠倒，方便图表显示
@@ -2401,8 +2420,9 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 1. 获取锁，安全地关闭数据库
+	// 1. 获取锁，安全地清理旧数据库连接
 	mu.Lock()
+
 	if db != nil {
 		db.Close()
 		db = nil
@@ -2417,33 +2437,35 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
-	
-	// 2. 覆盖文件
+
+	// 2. 覆盖写入新数据
 	io.Copy(out, file)
-	out.Close() // 必须显式关闭文件句柄，否则 Windows 或部分 Linux 机制下会导致新 DB 无法打开
+	out.Close() // 必须显式关闭文件句柄
 
-	// 3. 立即释放锁！(极其重要，防止后续 loadConfig 死锁)
-	mu.Unlock()
-
-	// 4. 重新初始化数据库连接
+	// 3. 重新初始化数据库连接
 	initDB()
 	
-	// 5. 将新数据库的配置加载到内存
+	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
+	mu.Unlock()
+
+	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
 
-	// 6. 响应前端，允许它继续发起 /restart
+	// 6. 响应前端成功
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
-	rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var l OpLog
-			rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-			logs = append(logs, l)
+	if db != nil {
+		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var l OpLog
+				rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				logs = append(logs, l)
+			}
 		}
 	}
 	b, _ := json.MarshalIndent(logs, "", "  ")
@@ -3248,7 +3270,9 @@ func saveConfigNoLock() {
 }
 
 func cleanOldLogs() {
-	if db == nil { return }
+	if db == nil {
+		return
+	}
 	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
 	if err != nil {
 		log.Printf("⚠️ 清理日志失败: %v", err)
