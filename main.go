@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.91"
+	AppVersion      = "v3.0.92"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1228,6 +1228,10 @@ func dailyTrafficReportLoop() {
 
 			flushDailyStats()
 
+			if db == nil { // 👈 添加判空保护
+				continue
+			}
+
 			var tx, rx int64
 			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
 			if err == nil && (tx > 0 || rx > 0) {
@@ -1418,12 +1422,11 @@ func runMaster() {
 }
 
 // 每日流量统计定期刷盘
-func flushDailyStats() {
-	tx := atomic.SwapInt64(&dailyTxBuf, 0)
-	rx := atomic.SwapInt64(&dailyRxBuf, 0)
-	if tx > 0 || rx > 0 {
-		today := time.Now().Format("2006-01-02")
-		_, err := db.Exec(`INSERT INTO daily_stats (date, tx, rx) VALUES (?, ?, ?)
+func cleanOldLogs() {
+	if db == nil { // 👈 添加判空保护
+		return
+	}
+	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
 			ON CONFLICT(date) DO UPDATE SET tx = tx + ?, rx = rx + ?`,
 			today, tx, rx, tx, rx)
 		if err != nil {
@@ -1507,14 +1510,16 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
-		lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
-		if err == nil {
-			for lRows.Next() {
-				var l OpLog
-				lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
-				logData = append(logData, l)
+		if db != nil { // 👈 添加判空保护
+			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+			if err == nil {
+				for lRows.Next() {
+					var l OpLog
+					lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+					logData = append(logData, l)
+				}
+				lRows.Close()
 			}
-			lRows.Close()
 		}
 
 		var speedTx int64 = 0
@@ -2398,9 +2403,8 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// 1. 加锁清理旧数据库环境
 	mu.Lock()
-	defer mu.Unlock()
-
 	if db != nil {
 		db.Close()
 		db = nil
@@ -2411,12 +2415,25 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
+		mu.Unlock() // 发生错误时切记解锁
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
-	defer out.Close()
+	
+	// 2. 覆盖写入新数据
 	io.Copy(out, file)
+	out.Close() // 必须主动关闭文件，释放文件句柄
 
+	// 3. 重新初始化数据库连接
+	initDB()
+	
+	// 4. 解锁！必须先解锁，因为接下来的 loadConfig 内部自带 mu.Lock()，否则会触发永久死锁
+	mu.Unlock()
+
+	// 5. 将新数据库中的配置重新加载到内存中
+	loadConfig()
+
+	// 6. 响应前端，允许它继续发起 /restart 流程
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
