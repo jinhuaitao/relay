@@ -119,15 +119,33 @@ Telegram 通知配置：
 
 复制脚本至目标服务器 (VPS) 的终端中执行即可，节点将使用安全的 TLS 隧道自动接入 Master。
 
-# 🛠️ 常用维护命令
-Master (面板) 维护：
+# 🛠️ 常用维护命令 (Cheat Sheet)
 
-停止/卸载服务：relay -service uninstall (会移除开机自启并停止进程)
+GoRelay Pro 内置了服务注册逻辑，在 Debian/Ubuntu 系统上会注册为 systemd 服务，在 Alpine 系统上会注册为 OpenRC 服务。
 
-手动重启：systemctl restart relay 或在面板设置页点击重启。
+⚠️ 注意：主控端服务名为 relay，节点端服务名为 gorelay。以下命令以主控端 relay 为例。
 
+##### 🐧 Debian / Ubuntu 维护命令操作命令
+
+```
+查看运行状态systemctl status relay
+重启主控面板systemctl restart relay
+停止/启动服务systemctl stop relay / systemctl start relay
+实时查看运行日志journalctl -u relay -f
+查看最后50行日志journalctl -u relay -n 50
+彻底卸载主控/root/relay -service uninstall -mode master
+```
+
+##### ⛰️ Alpine Linux 维护命令
+
+```
+查看运行状态rc-service relay status
+重启主控面板rc-service relay restart
+停止/启动服务rc-service relay stop / rc-service relay start
+卸载并取消自启/root/relay -service uninstall -mode master
 查看日志：journalctl -u relay -f
 
+```
 ⚠️ 常见排错与注意事项
 端口放行规则：确保 Master 服务器防火墙放行了 80, 443（用于 HTTPS 和证书申请）、8888（未配域名时的默认 Web）和 9999（Agent 通信）端口。Agent 机器需要放行您分配的具体转发业务端口。
 
