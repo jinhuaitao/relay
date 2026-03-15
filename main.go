@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.94"
+	AppVersion      = "v3.0.95"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -154,6 +154,7 @@ type AgentInfo struct {
 	RemoteIP  string   `json:"remote_ip"`
 	Conn      net.Conn `json:"-"`
 	SysStatus string   `json:"sys_status"`
+	ConnectedAt time.Time `json:"-"`
 }
 
 type Message struct {
@@ -1503,9 +1504,17 @@ func broadcastLoop() {
 		var agentData []AgentStatusData
 		var ruleData []RuleStatusData
 
+		var agentList []*AgentInfo
 		for _, a := range agents {
+			agentList = append(agentList, a)
+		}
+		sort.Slice(agentList, func(i, j int) bool {
+			return agentList[i].ConnectedAt.Before(agentList[j].ConnectedAt)
+		})
+		for _, a := range agentList {
 			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus})
 		}
+		
 		for _, r := range rules {
 			currentTx += r.TotalTx
 			currentRx += r.TotalRx
@@ -1614,7 +1623,7 @@ func handleAgentConn(conn net.Conn) {
 	if old, exists := agents[name]; exists {
 		old.Conn.Close()
 	}
-	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn}
+	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now()}
 	mu.Unlock()
 	log.Printf("Agent上线: %s", name)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
@@ -1805,6 +1814,9 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, a := range agents {
 		al = append(al, *a)
 	}
+	sort.Slice(al, func(i, j int) bool {
+		return al[i].ConnectedAt.Before(al[j].ConnectedAt)
+	})
 	var totalTraffic int64
 	for _, r := range rules {
 		totalTraffic += (r.TotalTx + r.TotalRx)
