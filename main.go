@@ -1029,7 +1029,20 @@ func startTgBotLoop() {
 						rx += r.TotalRx
 					}
 					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: <b>%s</b>\n🔌 在线节点数: <b>%d</b>\n📜 转发规则数: <b>%d</b>\n\n--- 探针状态 ---\n", formatBytes(tx+rx), len(agents), len(rules))
+					
+					// === 新增 TG 节点排序逻辑 ===
+					var sortedAgents []*AgentInfo
 					for _, a := range agents {
+						sortedAgents = append(sortedAgents, a)
+					}
+					sort.Slice(sortedAgents, func(i, j int) bool {
+						return sortedAgents[i].ConnectedAt.Before(sortedAgents[j].ConnectedAt)
+					})
+
+					// 将原来的 for _, a := range agents 改为遍历 sortedAgents
+					for _, a := range sortedAgents {
+					// ===========================
+					
 						var cpu, mem, dsk float64
 						parts := strings.Split(a.SysStatus, "|")
 						for _, p := range parts {
