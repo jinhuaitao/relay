@@ -62,14 +62,11 @@ curl -o relay.sh https://raw.githubusercontent.com/jinhuaitao/relay/master/relay
 ```
 
 ## 方法2.Docker
-```
-mkdir gorelay && cd gorelay
 
-```
 
 #### Docker命令
 ```
-docker run -d --name relay-master --restart=always --net=host -v $(pwd):/data jhtone/relay -mode master
+mkdir gorelay && cd gorelay && docker run -d --name relay-master --restart=always --net=host -v $(pwd):/app jhtone/relay -mode master
 ```
 ## 方法3.编译与安装 (Master端方式)
 
