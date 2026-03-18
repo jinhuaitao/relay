@@ -91,17 +91,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. 配置 Docker 环境
+      # 3. 设置 QEMU 模拟器 (新增：跨平台构建必须)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 4. 配置 Docker Buildx 环境
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 5. 登录 Docker Hub
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 4. 提取 Docker 标签 (加入了刚刚生成的 Release 版本号)
+      # 6. 提取 Docker 标签
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -114,16 +119,17 @@ jobs:
             type=raw,value=${{ steps.tag_version.outputs.new_tag }}
             type=raw,value={{date 'YYYYMMDD'}}
 
-      # 5. 构建并推送 Docker 镜像
+      # 7. 构建并推送 Docker 镜像 (修改：加入双架构参数)
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # 6. 发送合并后的成功通知
+      # 8. 发送合并后的成功通知
       - name: Send Telegram Notification on Success
         if: success()
         uses: appleboy/telegram-action@master
@@ -141,13 +147,13 @@ jobs:
             
             🔍 查看日志: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      # 7. 发送失败通知
+      # 9. 发送失败通知 (修改：隐藏明文 Token 提升安全性)
       - name: Send Telegram Notification on Failure
         if: failure()
         uses: appleboy/telegram-action@master
         with:
-          to: "5091290643"
-          token: "8366224917:AAE9UCIzzcCG7Z0CZ8zw8KE5qEHayKI3KUE"
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
           message: |
             ❌ Relay 转发面板发布或镜像构建失败！
             请检查 GitHub Actions 日志以定位错误：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
