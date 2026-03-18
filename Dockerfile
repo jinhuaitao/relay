@@ -3,6 +3,9 @@
 # ============================
 FROM golang:1.25-alpine AS builder
 
+# 引入自动识别的目标架构变量
+ARG TARGETARCH
+
 # 设置工作目录
 WORKDIR /src
 
@@ -21,8 +24,8 @@ RUN go mod init gorelay && \
     go get golang.org/x/crypto/acme/autocert && \
     go mod tidy
 
-# 编译二进制文件
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app main.go
+# 3. 编译二进制文件 (加入跨平台参数 GOARCH=$TARGETARCH)
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -o app main.go
 
 # ============================
 # 第二阶段：运行 (Runner)
