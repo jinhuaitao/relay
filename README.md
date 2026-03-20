@@ -1,48 +1,46 @@
-🌐 GoRelay Pro
-GoRelay Pro 是一款安全、轻量、全能的分布式内网穿透与端口转发控制台。基于 Go 语言原生编写，采用 Master-Agent 分布式架构。无需繁琐的配置文件，只需一个单文件二进制包，即可在 Web 面板上实现全网节点的统一部署、流量调度与实时监控。
+# 🌐 GoRelay Pro
 
-✨ 核心特性 (Features)
-## 🚀 强大的转发与调度
-全协议支持：支持 TCP、UDP 以及双栈 (TCP+UDP) 端口转发，完美兼容 IPv4 & IPv6。
+![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)
+![Architecture](https://img.shields.io/badge/Architecture-Master%2FAgent-blue)
+![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=flat&logo=sqlite)
 
-高可用负载均衡 (LB)：内置 4 种智能分发策略应对多目标 IP：
+**GoRelay Pro** 是一款安全、轻量、全能的分布式内网穿透与端口转发控制台。基于 Go 语言原生编写，采用 Master-Agent 分布式架构。无需繁琐的配置文件，只需一个单文件二进制包，即可通过现代化的 Web 面板实现全网节点的统一部署、流量调度与实时监控。
 
-Random (随机分配)
-
-Round Robin (轮询分发)
-
-Least Conn (最少连接优先)
-
-Fastest (最低延迟/Ping 优先，主备容灾利器)
-
-精准限流与限速：支持对单条规则进行精确的流量限制（自动熔断）和最高带宽限速（MB/s）。
-
-## 🛡️ 极致的安全防护
-Auto TLS 自动加密：全自动申请 Let's Encrypt 证书，面板访问与 Agent 通信均支持高强度 TLS 加密。
-
-多重登录保护：内置 GitHub OAuth 一键授权登录，支持开启 Google Authenticator (2FA) 双因素动态动态码认证。
-
-Anti-Brute Force：自带防爆破机制，连续密码错误自动封禁来源 IP。
-
-## 📱 现代化 Web UI & PWA 支持
-实时监控大屏：基于 WebSocket 的毫秒级状态同步，动态图表展示全局 Tx/Rx 实时速率、节点负载与流量排行。
-
-PWA 原生应用体验：支持将 Web 面板一键“添加到主屏幕”，秒变独立 App。自带沉浸式全屏体验、动态矢量图标（无浏览器角标）与杀后台持久化登录。
-
-## 🤖 交互式 Telegram 机器人
-Inline Keyboard 快捷控制：发送 /menu 呼出全按键菜单，手机端无需打字，一键查看状态、无缝启停转发规则、远程重启面板。
-
-账单日流量清零：设定每月重置日，系统自动在零点执行全网流量清零。
-
-阶梯式告警防破产：流量使用达 80%、95% 时触发预警弹窗；达到 100% 自动精确熔断目标端口并发送最高警报。
-
-☁️ 定时云备份：每周一凌晨自动将核心数据库打包，以加密文件的形式私发到您的 Telegram，也可随时在菜单一键手动云备份，数据永不丢失。
 ---
 
-## 💻 技术栈与实现细节
-* **编程语言**：Go (Golang) - 利用其原生的高并发特性（Goroutines）。
-* **数据存储**：纯 Go 驱动的 **SQLite 数据库 (`data.db`)**，支持 WAL 模式，无外部数据库与 CGO 依赖，备份和迁移只需拷贝一个文件。
-* **通信协议**：Master 与 Agent 之间使用纯 TCP 或合法 TLS 加密隧道，采用 JSON 协议并包含心跳保活机制。
+## ✨ 核心特性 (Features)
+
+### 🚀 强大的转发与流量调度
+* **全协议支持**：支持 TCP、UDP 以及双栈 (TCP+UDP) 端口转发，完美兼容 IPv4 & IPv6 环境。
+* **高可用负载均衡 (LB)**：内置 4 种智能分发策略，从容应对多目标 IP 场景：
+  * `Random` (随机分配)
+  * `Round Robin` (轮询分发)
+  * `Least Conn` (最少连接优先)
+  * `Fastest` (最低延迟/Ping 优先，主备容灾利器)
+* **精准限流与限速**：支持对单条规则进行精确的流量限制（达标自动熔断）和最高带宽峰值限速（MB/s）。
+
+### 🛡️ 极致的安全防护
+* **Auto TLS 自动加密**：全自动申请并续期 Let's Encrypt 证书，面板访问与 Agent 通信均默认采用高强度 TLS 加密隧道。
+* **多重身份认证**：内置 GitHub OAuth 一键授权登录，并支持开启 Google Authenticator (2FA) 双因素动态验证码。
+* **Anti-Brute Force**：自带防爆破机制，连续密码错误将自动封禁来源 IP。
+
+### 📱 现代化 Web UI & PWA 支持
+* **实时监控大屏**：基于 WebSocket 的毫秒级状态同步，动态图表直观展示全局 Tx/Rx 实时速率、节点负载与流量排行。
+* **PWA 原生应用体验**：支持将 Web 面板一键“添加到主屏幕”，秒变独立 App。提供沉浸式全屏体验、动态矢量图标及杀后台持久化登录。
+
+### 🤖 交互式 Telegram 智能助理
+* **Inline Keyboard 快捷控制**：发送 `/menu` 呼出全按键菜单，移动端无需输入指令，一键查看状态、无缝启停转发规则、远程重启面板。
+* **自动化流量管理**：设定每月账单重置日，系统将在零点自动执行全网流量清零。
+* **阶梯式告警与熔断**：流量使用达 80%、95% 时触发预警弹窗；达到 100% 时自动精准熔断目标端口，并发送最高级别警报。
+* **定时云端备份**：每周一凌晨自动打包核心数据库，以加密文件形式私发至您的 Telegram，同时支持菜单一键手动备份。
+
+---
+
+## 💻 技术栈与架构
+* **核心语言**：Go (Golang) —— 充分利用原生 Goroutines 实现千万级高并发。
+* **数据存储**：纯 Go 驱动的 **SQLite 数据库 (`data.db`)**，开启 WAL 模式。无外部数据库依赖与 CGO 限制，备份和迁移仅需拷贝单一文件。
+* **通信协议**：Master 与 Agent 之间基于纯 TCP 或标准 TLS 加密隧道，采用高效 JSON 协议并内置心跳保活机制。
 
 ---
 
