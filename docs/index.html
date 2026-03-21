@@ -3,14 +3,149 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Relay - 一款基于 Go 语言开发的高性能网络转发与中继工具，支持 TCP/UDP 流量转发与高效管理。">
     
     <meta name="google-site-verification" content="-xdYowBsYGj6SA8auPofZA7CTG8vrx6Z0y3Sar7wFtI" />
     
-    <title>Relay - 网络转发与中继工具</title>
+    <title>Relay | 高性能网络转发工具</title>
+
+    <style>
+        /* 基础变量：定义浅色模式颜色 */
+        :root {
+            --bg-color: #f4f7f6;
+            --text-color: #333333;
+            --card-bg: #ffffff;
+            --primary-color: #007acc;
+            --primary-hover: #005f9e;
+            --secondary-text: #666666;
+            --border-color: #e0e0e0;
+        }
+
+        /* 自动适应深色模式 */
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #121212;
+                --text-color: #e0e0e0;
+                --card-bg: #1e1e1e;
+                --primary-color: #4daafc;
+                --primary-hover: #7fc4fd;
+                --secondary-text: #aaaaaa;
+                --border-color: #333333;
+            }
+        }
+
+        /* 全局重置与基础样式 */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        /* 核心卡片容器 */
+        .container {
+            background-color: var(--card-bg);
+            max-width: 600px;
+            width: 100%;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            border: 1px solid var(--border-color);
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+
+        /* 标题与描述 */
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, var(--primary-color), #8a2be2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            font-size: 1.1rem;
+            color: var(--secondary-text);
+            margin-bottom: 30px;
+        }
+
+        /* 特性列表 */
+        .features {
+            text-align: left;
+            margin: 0 auto 30px auto;
+            display: inline-block;
+        }
+        .features li {
+            margin-bottom: 10px;
+            color: var(--text-color);
+            list-style: none;
+        }
+        .features li::before {
+            content: "✓";
+            color: var(--primary-color);
+            font-weight: bold;
+            margin-right: 10px;
+        }
+
+        /* 按钮样式 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background-color: var(--primary-color);
+            color: #ffffff !important;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .btn:hover { background-color: var(--primary-hover); }
+        .btn:active { transform: scale(0.98); }
+        
+        /* GitHub 图标 */
+        .btn svg {
+            margin-right: 8px;
+            fill: currentColor;
+        }
+
+        /* 页脚 */
+        footer { margin-top: 30px; font-size: 0.9rem; color: var(--secondary-text); }
+    </style>
 </head>
 <body>
-    <h1>Relay 项目主页</h1>
-    <p>这是一个基于 Go 语言开发的高性能网络转发与中继工具。</p>
-    <p><a href="https://github.com/jinhuaitao/relay">👉 点击此处访问 GitHub 仓库获取源代码和使用说明</a></p>
+
+    <div class="container">
+        <h1>Relay</h1>
+        <p class="subtitle">高性能网络转发与中继工具</p>
+
+        <ul class="features">
+            <li>基于 <strong>Go 语言</strong> 编写，极低资源占用</li>
+            <li>支持 <strong>TCP / UDP</strong> 多协议流量转发</li>
+            <li>配置简单，开箱即用的网络管理体验</li>
+            <li>开源免费，易于二次开发与部署</li>
+        </ul>
+
+        <a href="https://github.com/jinhuaitao/relay" class="btn">
+            <svg height="24" viewBox="0 0 16 16" version="1.1" width="24" aria-hidden="true">
+                <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+            </svg>
+            前往 GitHub 获取源码
+        </a>
+    </div>
+
+    <footer>
+        &copy; 2026 Relay Project. All rights reserved.
+    </footer>
+
 </body>
 </html>
