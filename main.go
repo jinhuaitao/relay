@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.96"
+	AppVersion      = "v3.0.97"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -194,6 +194,7 @@ type AgentStatusData struct {
 type RuleStatusData struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
+    Group     string `json:"group"`
 	Total     int64  `json:"total"`
 	Tx        int64  `json:"tx"`
 	Rx        int64  `json:"rx"`
@@ -1534,6 +1535,7 @@ func broadcastLoop() {
 			ruleData = append(ruleData, RuleStatusData{
 				ID:        r.ID,
 				Name:      r.Note,
+                Group:     r.Group,
 				Total:     r.TotalTx + r.TotalRx,
 				Tx:        r.TotalTx,
 				Rx:        r.TotalRx,
@@ -3814,7 +3816,30 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                 <th style="width:15%">总流量</th>
                             </tr>
                         </thead>
-                        <tbody id="rule-monitor-body"></tbody>
+                        <tbody id="rule-monitor-body">
+    {{$currentGroup := "INIT_h7&^"}}
+    {{range .Rules}}
+    {{if ne .Group $currentGroup}}
+    <tr class="group-header" onclick="toggleGroup(this)" data-group="{{.Group}}">
+        <td colspan="4">
+            <i class="ri-arrow-down-s-line group-icon"></i>
+            <i class="ri-folder-3-fill" style="margin-right:4px"></i> 
+            {{if .Group}}{{.Group}}{{else}}默认分组{{end}}
+        </td>
+    </tr>
+    {{$currentGroup = .Group}}
+    {{end}}
+    <tr class="rule-row" data-group="{{.Group}}" id="rule-row-mon-{{.ID}}" style="{{if .Disabled}}opacity:0.6;filter:grayscale(1);{{end}}">
+        <td>
+            <div style="font-weight:600;font-size:13px;margin-bottom:2px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
+            <div style="font-size:11px;color:var(--text-sub);font-family:var(--font-mono)">{{printf "%.8s" .ID}}...</div>
+        </td>
+        <td><div class="mini-chart-container"><canvas id="chart-tx-{{.ID}}"></canvas></div><div class="speed-text" style="color:#8b5cf6" id="text-tx-{{.ID}}">0 B/s</div></td>
+        <td><div class="mini-chart-container"><canvas id="chart-rx-{{.ID}}"></canvas></div><div class="speed-text" style="color:#06b6d4" id="text-rx-{{.ID}}">0 B/s</div></td>
+        <td style="font-family:var(--font-mono);font-weight:600" id="text-total-{{.ID}}">{{formatBytes (add .TotalTx .TotalRx)}}</td>
+    </tr>
+    {{end}}
+</tbody>
                     </table>
                 </div>
             </div>
@@ -4280,18 +4305,24 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     document.addEventListener('DOMContentLoaded', () => {
         const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
         collapsed.forEach(g => {
-            const header = document.querySelector('.group-header[data-group="'+g+'"]');
-            if(header) setGroupState(header, false); 
+            // 【修改点】选择所有同名分组的头部（包括监控列表和规则列表）
+            const headers = document.querySelectorAll('.group-header[data-group="'+g+'"]');
+            headers.forEach(h => setGroupState(h, false));
         });
         checkUpdate();
     });
 
     function toggleGroup(header) {
         const isCurrentlyCollapsed = header.classList.contains('group-collapsed');
-        setGroupState(header, isCurrentlyCollapsed); 
         const group = header.getAttribute('data-group');
+        
+        // 【修改点】同步切换整个页面中（即两个表格内）相同分组的状态
+        const headers = document.querySelectorAll('.group-header[data-group="'+group+'"]');
+        headers.forEach(h => setGroupState(h, isCurrentlyCollapsed)); 
+        
         let collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
-        if (isCurrentlyCollapsed) { collapsed = collapsed.filter(i => i !== group); } else { if(!collapsed.includes(group)) collapsed.push(group); }
+        if (isCurrentlyCollapsed) { collapsed = collapsed.filter(i => i !== group); } 
+        else { if(!collapsed.includes(group)) collapsed.push(group); }
         localStorage.setItem('collapsed_groups', JSON.stringify(collapsed));
     }
 
@@ -4789,7 +4820,11 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 
                                 let row = document.getElementById('rule-row-mon-' + r.id);
                                 if (!row) {
-                                    row = tbody.insertRow(); row.id = 'rule-row-mon-' + r.id;
+                                    // 兼容免刷新添加新规则：动态插入
+                                    row = tbody.insertRow(); 
+                                    row.id = 'rule-row-mon-' + r.id;
+                                    row.className = 'rule-row';
+                                    row.setAttribute('data-group', r.group || '');
                                     row.innerHTML = '<td><div style="font-weight:600;font-size:13px;margin-bottom:2px">'+(r.name||'未命名')+'</div><div style="font-size:11px;color:var(--text-sub);font-family:var(--font-mono)">'+r.id.substring(0,8)+'...</div></td>'+
                                         '<td><div class="mini-chart-container"><canvas id="chart-tx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#8b5cf6" id="text-tx-'+r.id+'">0 B/s</div></td>'+
                                         '<td><div class="mini-chart-container"><canvas id="chart-rx-'+r.id+'"></canvas></div><div class="speed-text" style="color:#06b6d4" id="text-rx-'+r.id+'">0 B/s</div></td>'+
@@ -4799,14 +4834,31 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                                     const ctxRx = document.getElementById('chart-rx-'+r.id).getContext('2d');
                                     ruleCharts[r.id] = { tx: new Chart(ctxTx, createMiniChartConfig('#8b5cf6')), rx: new Chart(ctxRx, createMiniChartConfig('#06b6d4')) };
                                 } else {
-                                    document.getElementById('text-tx-'+r.id).innerText = formatSpeed(stx); document.getElementById('text-rx-'+r.id).innerText = formatSpeed(srx); document.getElementById('text-total-'+r.id).innerText = formatBytes(r.total);
+                                    document.getElementById('text-tx-'+r.id).innerText = formatSpeed(stx); 
+                                    document.getElementById('text-rx-'+r.id).innerText = formatSpeed(srx); 
+                                    document.getElementById('text-total-'+r.id).innerText = formatBytes(r.total);
+
+                                    // 【核心修改】如果是后端模板预渲染出来的行，初次连接WS时需要初始化图表对象
+                                    if (!ruleCharts[r.id]) {
+                                        const ctxTx = document.getElementById('chart-tx-'+r.id).getContext('2d');
+                                        const ctxRx = document.getElementById('chart-rx-'+r.id).getContext('2d');
+                                        ruleCharts[r.id] = { tx: new Chart(ctxTx, createMiniChartConfig('#8b5cf6')), rx: new Chart(ctxRx, createMiniChartConfig('#06b6d4')) };
+                                    }
                                 }
                                 const charts = ruleCharts[r.id];
                                 if (charts) { charts.tx.data.datasets[0].data.push(stx); charts.tx.data.datasets[0].data.shift(); charts.tx.update('none'); charts.rx.data.datasets[0].data.push(srx); charts.rx.data.datasets[0].data.shift(); charts.rx.update('none'); }
                             });
+                            
+                            // 清理已被删除的规则所在的行
                             Array.from(tbody.children).forEach(tr => {
+                                // 【核心修改】忽略分组标题行，防止被误删
+                                if (tr.classList.contains('group-header')) return; 
+                                
                                 const id = tr.id.replace('rule-row-mon-', '');
-                                if (id && !activeIds.has(id)) { if(ruleCharts[id]) { ruleCharts[id].tx.destroy(); ruleCharts[id].rx.destroy(); delete ruleCharts[id]; } tr.remove(); }
+                                if (id && !activeIds.has(id)) { 
+                                    if(ruleCharts[id]) { ruleCharts[id].tx.destroy(); ruleCharts[id].rx.destroy(); delete ruleCharts[id]; } 
+                                    tr.remove(); 
+                                }
                             });
                         }
                         
