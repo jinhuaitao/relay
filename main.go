@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.0"
+	AppVersion      = "v3.1.1"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5409,14 +5409,14 @@ input:focus, select:focus {
                             </div>
                         </div>
 
-                        </div> <div style="display:flex;gap:12px;border-top:1px solid var(--border);padding-top:24px;">
-                            <button class="btn" style="flex:2;height:44px">保存配置</button>
-                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px;display:flex;" title="备份数据"><i class="ri-download-cloud-2-line"></i>备份</a>
+                        </div> <div style="display:flex;gap:8px;border-top:1px solid var(--border);padding-top:24px;">
+                            <button class="btn" style="flex:2;height:44px;white-space:nowrap;padding:0 4px;">保存配置</button>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px;display:flex;white-space:nowrap;padding:0 4px;justify-content:center;" title="备份数据"><i class="ri-download-cloud-2-line"></i>备份</a>
                             
-                            <button type="button" class="btn secondary" style="flex:1;height:44px" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i>恢复</button>
+                            <button type="button" class="btn secondary" style="flex:1;height:44px;white-space:nowrap;padding:0 4px;" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i>恢复</button>
                             <input type="file" id="restore-file" style="display:none" accept=".db" onchange="restoreConfig(this)">
                             
-                            <button type="button" class="btn warning" style="flex:1;height:44px" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i>重启服务</button>
+                            <button type="button" class="btn warning" style="flex:2;height:44px;white-space:nowrap;padding:0 4px;" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i>重启服务</button>
                         </div>
 
                     </div>
