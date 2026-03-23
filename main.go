@@ -3855,21 +3855,28 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         </div>
 
         <div id="rules" class="page">
-            <div class="card" style="padding: 16px 24px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; border-top: 2px solid transparent; background-image: linear-gradient(var(--bg-card), var(--bg-card)), linear-gradient(90deg, #6366f1, #10b981, #f59e0b); background-origin: border-box; background-clip: padding-box, border-box;">
-                <div style="display: flex; gap: 16px; align-items: center; flex: 1;">
-                    <div style="position: relative; width: 280px;">
-                        <i class="ri-search-line" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-sub);"></i>
-                        <input type="text" id="ruleSearch" placeholder="搜索规则..." style="width: 100%; padding-left: 40px; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px;" onkeyup="filterRules()">
+            <div class="card" style="padding: 16px; margin-bottom: 24px; border-top: 2px solid transparent; background-image: linear-gradient(var(--bg-card), var(--bg-card)), linear-gradient(90deg, #6366f1, #10b981, #f59e0b); background-origin: border-box; background-clip: padding-box, border-box;">
+                <div style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; align-items: center;">
+                    
+                    <div style="display: flex; gap: 12px; align-items: center; flex: 1 1 260px; min-width: 240px;">
+                        <div style="position: relative; flex: 1;">
+                            <i class="ri-search-line" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-sub);"></i>
+                            <input type="text" id="ruleSearch" placeholder="搜索规则..." style="width: 100%; padding-left: 36px; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px;" onkeyup="filterRules()">
+                        </div>
+                        <select id="groupFilter" style="width: 130px; flex-shrink: 0; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px; color: var(--text-main);" onchange="handleGroupSelect(this)">
+                            <option value="">全部分组</option>
+                            <option disabled>──────</option>
+                            <option value="__NEW__">➕ 新建分组...</option>
+                        </select>
                     </div>
-                    <select id="groupFilter" style="width: 140px; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px; color: var(--text-main);" onchange="handleGroupSelect(this)">
-                        <option value="">全部分组</option>
-                        <option disabled>──────</option>
-                        <option value="__NEW__">➕ 新建分组...</option>
-                    </select>
+
+                    <div style="display: flex; flex: 1 1 100px; justify-content: flex-end; min-width: 120px;">
+                        <button class="btn" style="background: #6366f1; color: white; border-radius: 8px; font-weight: 500; width: 100%; max-width: 140px; justify-content: center; white-space: nowrap;" onclick="openAddModal()">
+                            <i class="ri-add-line"></i> 添加规则
+                        </button>
+                    </div>
+                    
                 </div>
-                <button class="btn" style="background: #6366f1; color: white; border-radius: 8px; font-weight: 500;" onclick="openAddModal()">
-                    <i class="ri-add-line"></i> 添加规则
-                </button>
             </div>
 
             <div id="batch-bar" class="batch-bar">
