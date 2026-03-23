@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.97"
+	AppVersion      = "v3.0.98"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -3706,6 +3706,15 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(20px); background: #0f172a; color: #fff; padding: 10px 20px; border-radius: 50px; font-size: 13px; opacity: 0; visibility: hidden; transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 2000; display: flex; align-items: center; gap: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); }
 .toast.show { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); bottom: 80px; }
 
+/* 系统设置 Tab 样式 */
+.settings-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 0 24px 16px 24px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tab { padding: 8px 16px; font-size: 14px; font-weight: 500; color: var(--text-sub); cursor: pointer; border-radius: 8px; transition: 0.2s; display: flex; align-items: center; gap: 6px; white-space: nowrap; user-select: none; }
+.settings-tab:hover { background: var(--input-bg); color: var(--text-main); }
+.settings-tab.active { background: var(--primary-light); color: var(--primary); font-weight: 600; }
+.settings-content { display: none; gap: 24px; grid-template-columns: 1fr; animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+.settings-content.active { display: grid; }
+
 /* 批量操作浮动条 */
 .batch-bar { display: none; background: var(--card-bg); backdrop-filter: blur(10px); padding: 12px 20px; border-radius: 12px; margin-bottom: 20px; align-items: center; gap: 12px; border: 1px solid var(--primary); box-shadow: 0 10px 25px -5px rgba(99,102,241,0.2); animation: fadeIn 0.3s; }
 .batch-bar.active { display: flex; }
@@ -3846,33 +3855,21 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         </div>
 
         <div id="rules" class="page">
-            <div class="card">
-                <h3><i class="ri-add-circle-line" style="color:var(--primary)"></i> 新建转发规则</h3>
-                <form action="/add" method="POST">
-                    <div class="grid-form">
-                        <div class="form-group"><label>分组名称</label><input name="group" placeholder="例如: 业务A (留空为默认)"></div>
-                        <div class="form-group"><label>备注名称</label><input name="note" placeholder="例如: 远程桌面" required></div>
-                        <div class="form-group"><label>入口节点</label><select name="entry_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" placeholder="1024-65535" required></div>
-                        <div class="form-group"><label>出口节点</label><select name="exit_agent">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
-                        <div class="form-group"><label>目标 IP (逗号分隔多IP)</label><input name="target_ip" placeholder="192.168.1.1, 10.0.0.1, [ IPV6 ]" required></div>
-                        <div class="form-group"><label>目标端口</label><input type="number" name="target_port" required></div>
-
-                        <div class="form-group">
-                            <label>负载均衡策略 <i class="ri-question-line" title="多目标IP时生效" style="color:var(--text-sub)"></i></label>
-                            <select name="lb_strategy">
-                                <option value="random">随机分配 (Random)</option>
-                                <option value="rr">轮询分配 (Round Robin)</option>
-                                <option value="least_conn">最少连接 (Least Conn)</option>
-                                <option value="fastest">最低延迟 (Fastest Ping/TCP)</option>
-                            </select>
-                        </div>
-                        <div class="form-group"><label>流量限制 (GB)</label><input type="number" step="0.1" name="traffic_limit" placeholder="0 为不限"></div>
-                        <div class="form-group"><label>带宽限速 (MB/s)</label><input type="number" step="0.1" name="speed_limit" placeholder="0 为不限"></div>
-                        <div class="form-group"><label>协议类型</label><select name="protocol"><option value="tcp">TCP (推荐)</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div>
-                        <div class="form-group"><button class="btn" style="width:100%"><i class="ri-save-line"></i> 保存并生效</button></div>
+            <div class="card" style="padding: 16px 24px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; border-top: 2px solid transparent; background-image: linear-gradient(var(--bg-card), var(--bg-card)), linear-gradient(90deg, #6366f1, #10b981, #f59e0b); background-origin: border-box; background-clip: padding-box, border-box;">
+                <div style="display: flex; gap: 16px; align-items: center; flex: 1;">
+                    <div style="position: relative; width: 280px;">
+                        <i class="ri-search-line" style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-sub);"></i>
+                        <input type="text" id="ruleSearch" placeholder="搜索规则..." style="width: 100%; padding-left: 40px; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px;" onkeyup="filterRules()">
                     </div>
-                </form>
+                    <select id="groupFilter" style="width: 140px; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px; color: var(--text-main);" onchange="handleGroupSelect(this)">
+                        <option value="">全部分组</option>
+                        <option disabled>──────</option>
+                        <option value="__NEW__">➕ 新建分组...</option>
+                    </select>
+                </div>
+                <button class="btn" style="background: #6366f1; color: white; border-radius: 8px; font-weight: 500;" onclick="openAddModal()">
+                    <i class="ri-add-line"></i> 添加规则
+                </button>
             </div>
 
             <div id="batch-bar" class="batch-bar">
@@ -4083,100 +4080,124 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         </div>
 
         <div id="settings" class="page">
-            <div class="card" style="max-width:800px">
-                <h3><i class="ri-settings-line"></i> 系统全局配置</h3>
-                <form id="settingsForm" onsubmit="saveSettings(event)">
-                    <div class="grid-form" style="grid-template-columns: 1fr; gap:24px">
+            <div class="card" style="max-width:800px; padding: 24px 0;">
+                <h3 style="padding: 0 24px; margin-bottom: 20px;"><i class="ri-settings-line"></i> 系统全局配置</h3>
+                
+                <div class="settings-tabs">
+                    <div class="settings-tab active" onclick="switchSettingsTab('tab-basic', this)"><i class="ri-global-line"></i> 基础网络</div>
+                    <div class="settings-tab" onclick="switchSettingsTab('tab-auth', this)"><i class="ri-shield-keyhole-line"></i> 安全认证</div>
+                    <div class="settings-tab" onclick="switchSettingsTab('tab-notify', this)"><i class="ri-notification-3-line"></i> 通知与任务</div>
+                    <div class="settings-tab" onclick="switchSettingsTab('tab-system', this)"><i class="ri-dashboard-3-line"></i> 系统维护</div>
+                </div>
+
+                <form id="settingsForm" onsubmit="saveSettings(event)" style="padding: 0 24px;">
+                    <div class="grid-form" style="grid-template-columns: 1fr; gap:0;">
                         
-                        <div style="display:grid;grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));gap:20px">
-                            <div class="form-group"><label>修改密码</label><input type="password" name="password" placeholder="留空则不修改"></div>
-                        </div>
+                        <div style="min-height: 420px;">
 
-                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px dashed var(--border);grid-column:1/-1">
-                            <h4 style="margin:0 0 10px 0;font-size:14px;"><i class="ri-plug-line"></i> Agent 监听端口</h4>
-                            <div class="form-group" style="margin:0">
-                                <label style="font-weight:400;font-size:12px">Master 监听的端口 (逗号分隔，例如: 9999,10086)</label>
-                                <input name="agent_ports" value="{{if .Config.AgentPorts}}{{.Config.AgentPorts}}{{else}}9999{{end}}" placeholder="9999">
-                                <div style="font-size:12px;color:var(--warning-text);margin-top:6px;"><i class="ri-alert-line"></i> 修改后系统会自动重启生效</div>
-                            </div>
-                        </div>
+                        <div id="tab-basic" class="settings-content active">
 
-						<div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1;margin-top:10px;">
-                            <h4 style="margin:0 0 16px 0;font-size:14px;"><i class="ri-global-line"></i> 网络与域名配置</h4>
-                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
-                                <div class="form-group">
-                                    <label>面板访问域名 (Panel) <i class="ri-cloud-line" title="可套CDN开启小云朵，供浏览器访问" style="color:#3b82f6;cursor:help"></i></label>
-                                    <input name="panel_domain" value="{{.PanelDomain}}" placeholder="例如: panel.yourdomain.com">
-                                </div>
-                                <div class="form-group">
-                                    <label>节点通信域名 (Node) <i class="ri-server-line" title="必须解析真实IP(关闭云朵)，供Agent连接" style="color:#10b981;cursor:help"></i></label>
-                                    <input name="master_domain" value="{{.MasterDomain}}" placeholder="例如: node.yourdomain.com">
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px dashed var(--border);">
+                                <h4 style="margin:0 0 10px 0;font-size:14px;"><i class="ri-plug-line"></i> Agent 监听端口</h4>
+                                <div class="form-group" style="margin:0">
+                                    <label style="font-weight:400;font-size:12px">Master 监听的端口 (逗号分隔，例如: 9999,10086)</label>
+                                    <input name="agent_ports" value="{{if .Config.AgentPorts}}{{.Config.AgentPorts}}{{else}}9999{{end}}" placeholder="9999">
+                                    <div style="font-size:12px;color:var(--warning-text);margin-top:6px;"><i class="ri-alert-line"></i> 修改后系统会自动重启生效</div>
                                 </div>
                             </div>
-                        </div>
-                        
-                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1">
-                            <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 机器人与自动任务</h4>
-                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
-                                <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}"></div>
-                                <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}"></div>
-                                <div class="form-group" style="grid-column: 1 / -1">
-                                    <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
-                                    <input type="number" name="traffic_reset_day" value="{{.Config.TrafficResetDay}}" placeholder="填 0 或留空表示不开启自动重置">
-                                    <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。系统每周一凌晨会自动备份数据库到您的 TG 窗口。</div>
+
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+                                <h4 style="margin:0 0 16px 0;font-size:14px;"><i class="ri-route-line"></i> 网络与域名配置</h4>
+                                <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                    <div class="form-group">
+                                        <label>面板访问域名 (Panel) <i class="ri-cloud-line" title="可套CDN开启小云朵，供浏览器访问" style="color:#3b82f6;cursor:help"></i></label>
+                                        <input name="panel_domain" value="{{.PanelDomain}}" placeholder="例如: panel.yourdomain.com">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>节点通信域名 (Node) <i class="ri-server-line" title="必须解析真实IP(关闭云朵)，供Agent连接" style="color:#10b981;cursor:help"></i></label>
+                                        <input name="master_domain" value="{{.MasterDomain}}" placeholder="例如: node.yourdomain.com">
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                        
-                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);grid-column:1/-1">
-                            <h4 style="margin:0 0 16px 0;font-size:14px;color:#cbd5e1"><i class="ri-github-fill"></i> GitHub 一键登录配置</h4>
-                            <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
-                                <div class="form-group"><label>Client ID</label><input name="github_client_id" value="{{.Config.GithubClientID}}" placeholder="留空则禁用"></div>
-                                <div class="form-group"><label>Client Secret</label><input type="password" name="github_client_secret" value="{{.Config.GithubClientSecret}}" placeholder="输入 Secret"></div>
+
+                        <div id="tab-auth" class="settings-content">
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:#cbd5e1"><i class="ri-github-fill"></i> GitHub 一键登录配置</h4>
+                                <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                    <div class="form-group"><label>Client ID</label><input name="github_client_id" value="{{.Config.GithubClientID}}" placeholder="留空则禁用"></div>
+                                    <div class="form-group"><label>Client Secret</label><input type="password" name="github_client_secret" value="{{.Config.GithubClientSecret}}" placeholder="输入 Secret"></div>
+                                </div>
+                                <div class="form-group" style="margin-top: 16px;">
+                                    <label>允许登录的 GitHub 用户名 (必须填写，多账号用逗号分隔)</label>
+                                    <input name="github_allowed_users" value="{{.Config.GithubAllowedUsers}}" placeholder="例如: yourname, admin123">
+                                </div>
+                                <div style="font-size:12px;color:var(--text-sub);margin-top:10px;">
+                                    * 配置前需在 GitHub -> Developer Settings -> OAuth Apps 中创建一个应用。回调地址请填写: <br/>
+                                    <code style="color:var(--primary)">http(s)://你的面板域名/oauth/github/callback</code>
+                                </div>
                             </div>
-                            <div class="form-group" style="margin-top: 16px;">
-                                <label>允许登录的 GitHub 用户名 (必须填写，多账号用逗号分隔)</label>
-                                <input name="github_allowed_users" value="{{.Config.GithubAllowedUsers}}" placeholder="例如: yourname, admin123">
-                            </div>
-                            <div style="font-size:12px;color:var(--text-sub);margin-top:10px;">
-                                * 配置前需在 GitHub -> Developer Settings -> OAuth Apps 中创建一个应用。回调地址请填写: <br/>
-                                <code style="color:var(--primary)">http(s)://你的面板域名/oauth/github/callback</code>
+
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+                                <div>
+                                    <h4 style="margin:0 0 4px 0;font-size:14px">双因素认证 (2FA)</h4>
+                                    <div style="font-size:12px;color:var(--text-sub)">Google Authenticator 登录保护</div>
+                                </div>
+                                <div>
+                                    {{if .Config.TwoFAEnabled}}
+                                    <button type="button" class="btn danger" onclick="disable2FA()">关闭</button>
+                                    {{else}}
+                                    <button type="button" class="btn" onclick="enable2FA()">开启</button>
+                                    {{end}}
+                                </div>
                             </div>
                         </div>
 
-                        <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;grid-column:1/-1">
-                            <div>
-                                <h4 style="margin:0 0 4px 0;font-size:14px">双因素认证 (2FA)</h4>
-                                <div style="font-size:12px;color:var(--text-sub)">Google Authenticator 登录保护</div>
-                            </div>
-                            <div>
-                                {{if .Config.TwoFAEnabled}}
-                                <button type="button" class="btn danger" onclick="disable2FA()">关闭</button>
-                                {{else}}
-                                <button type="button" class="btn" onclick="enable2FA()">开启</button>
-                                {{end}}
-                            </div>
-                        </div>
-
-                        <div style="background:rgba(16,185,129,0.05);padding:20px;border-radius:12px;border:1px solid rgba(16,185,129,0.2);grid-column:1/-1;display:flex;justify-content:space-between;align-items:center">
-                            <div>
-                                <h4 style="margin:0 0 4px 0;font-size:14px;color:#10b981">系统更新</h4>
-                                <div style="font-size:12px;color:var(--text-sub)">当前: {{.Version}} <span id="new-version-text" style="color:#f59e0b;display:none;margin-left:8px;font-weight:600">发现新版本</span></div>
-                            </div>
-                            <div>
-                                <button type="button" class="btn success" onclick="updateSystem()" id="btn-update">检查更新</button>
+                        <div id="tab-notify" class="settings-content">
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 机器人与自动任务</h4>
+                                <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                    <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}"></div>
+                                    <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}"></div>
+                                    <div class="form-group" style="grid-column: 1 / -1">
+                                        <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
+                                        <input type="number" name="traffic_reset_day" value="{{.Config.TrafficResetDay}}" placeholder="填 0 或留空表示不开启自动重置">
+                                        <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。系统每周一凌晨会自动备份数据库到您的 TG 窗口。</div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <div style="display:flex;gap:12px;margin-top:16px;border-top:1px solid var(--border);padding-top:24px;grid-column:1/-1">
+                        <div id="tab-system" class="settings-content">
+                                
+                                <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+                                    <h4 style="margin:0 0 10px 0;font-size:14px;"><i class="ri-lock-password-line"></i> 面板密码</h4>
+                                    <div class="form-group" style="margin:0; display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+                                        <input type="password" name="password" placeholder="留空则不修改当前密码">
+                                    </div>
+                                </div>
+
+                                <div style="background:rgba(16,185,129,0.05);padding:20px;border-radius:12px;border:1px solid rgba(16,185,129,0.2);display:flex;justify-content:space-between;align-items:center;margin-top:16px;">
+                                <div>
+                                    <h4 style="margin:0 0 4px 0;font-size:14px;color:#10b981">系统更新</h4>
+                                    <div style="font-size:12px;color:var(--text-sub)">当前: {{.Version}} <span id="new-version-text" style="color:#f59e0b;display:none;margin-left:8px;font-weight:600">发现新版本</span></div>
+                                </div>
+                                <div>
+                                    <button type="button" class="btn success" onclick="updateSystem()" id="btn-update">检查更新</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        </div> <div style="display:flex;gap:12px;border-top:1px solid var(--border);padding-top:24px;">
                             <button class="btn" style="flex:2;height:44px">保存配置</button>
-                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px" title="备份数据"><i class="ri-download-cloud-2-line"></i>备份</a>
+                            <a href="/download_config" class="btn secondary" style="flex:1;height:44px;display:flex;" title="备份数据"><i class="ri-download-cloud-2-line"></i>备份</a>
                             
                             <button type="button" class="btn secondary" style="flex:1;height:44px" onclick="document.getElementById('restore-file').click()" title="恢复数据"><i class="ri-upload-cloud-2-line"></i>恢复</button>
                             <input type="file" id="restore-file" style="display:none" accept=".db" onchange="restoreConfig(this)">
                             
                             <button type="button" class="btn warning" style="flex:1;height:44px" onclick="restartService()" title="重启服务"><i class="ri-restart-line"></i>重启服务</button>
                         </div>
+
                     </div>
                 </form>
             </div>
@@ -4192,6 +4213,72 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     <div class="nav-btn" onclick="nav('settings',this)"><i class="ri-settings-4-line"></i><span>设置</span></div>
 </div>
 
+<div id="addRuleModal" class="modal">
+    <div class="modal-content" style="max-width: 540px; padding: 32px; border-radius: 16px;">
+        <span class="close-modal" onclick="closeAddModal()"><i class="ri-close-line"></i></span>
+        <h3 style="margin-top: 0; font-size: 18px; margin-bottom: 4px;">添加转发规则</h3>
+        <p style="color: var(--text-sub); font-size: 13px; margin-bottom: 24px;">配置新的端口转发规则</p>
+        
+        <form action="/add" method="POST">
+            <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div class="form-group">
+                    <label>规则名称</label>
+                    <input name="note" placeholder="例如: Steam 加速" required style="background: var(--bg-body);">
+                </div>
+                <div class="form-group">
+                    <label>分组 <span style="font-size:12px;color:var(--text-sub)">(请在顶部工具栏新建)</span></label>
+                    <select name="group" id="add_group_select" style="background: var(--bg-body);">
+                        <option value="">默认分组</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>入口节点</label>
+                    <select name="entry_agent" style="background: var(--bg-body);">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+                </div>
+                <div class="form-group">
+                    <label>入口端口</label>
+                    <input type="number" name="entry_port" placeholder="10000" required style="background: var(--bg-body);">
+                </div>
+                
+                <div class="form-group">
+                    <label>出口节点</label>
+                    <select name="exit_agent" style="background: var(--bg-body);">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select>
+                </div>
+                <div class="form-group">
+                    <label>协议</label>
+                    <select name="protocol" style="background: var(--bg-body);"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP+UDP</option></select>
+                </div>
+                
+                <div class="form-group">
+                    <label>目标地址</label>
+                    <input name="target_ip" placeholder="目标IP或域名" required style="background: var(--bg-body);">
+                </div>
+                <div class="form-group">
+                    <label>目标端口</label>
+                    <input type="number" name="target_port" placeholder="443" required style="background: var(--bg-body);">
+                </div>
+                
+                <div class="form-group">
+                    <label>流量限制 (GB)</label>
+                    <input type="number" step="0.1" name="traffic_limit" placeholder="0 表示无限制" style="background: var(--bg-body);">
+                </div>
+                <div class="form-group">
+                    <label>速度限制 (MB/S)</label>
+                    <input type="number" step="0.1" name="speed_limit" placeholder="0 表示无限制" style="background: var(--bg-body);">
+                </div>
+
+                <div style="display: none;"><select name="lb_strategy"><option value="random">random</option></select></div>
+
+                <div class="form-group" style="grid-column: 1/-1; display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px;">
+                    <button type="button" class="btn secondary" onclick="closeAddModal()" style="width: 100px; background: transparent; border: 1px solid var(--border);">取消</button>
+                    <button class="btn" style="width: 120px; background: #6366f1;"><i class="ri-save-line"></i> 保存规则</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div id="editModal" class="modal">
     <div class="modal-content">
         <span class="close-modal" onclick="closeEdit()"><i class="ri-close-line"></i></span>
@@ -4199,7 +4286,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
         <form action="/edit" method="POST">
             <input type="hidden" name="id" id="e_id">
             <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap:20px">
-                <div class="form-group"><label>分组</label><input name="group" id="e_group" placeholder="例如: 业务A"></div>
+                <div class="form-group"><label>分组</label><select name="group" id="e_group"><option value="">默认分组</option></select></div>
                 <div class="form-group"><label>备注</label><input name="note" id="e_note"></div>
                 <div class="form-group"><label>入口节点</label><select name="entry_agent" id="e_entry">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group"><label>入口端口</label><input type="number" name="entry_port" id="e_eport"></div>
@@ -4301,6 +4388,24 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
+
+    function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
+    initTab();
+
+    // ================== 将代码插入在这里 ==================
+    // 系统设置 Tab 切换逻辑
+    function switchSettingsTab(tabId, el) {
+        // 移除所有 tab 的 active 状态
+        document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+        // 隐藏所有内容区域
+        document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
+        
+        // 激活当前点击的 tab 和对应的内容区域
+        el.classList.add('active');
+        document.getElementById(tabId).classList.add('active');
+    }
+    // ======================================================
+
 
     document.addEventListener('DOMContentLoaded', () => {
         const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
@@ -4656,6 +4761,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
 
     function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
+        if (group && group !== '') { addGroupToUI(group); }
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
         document.getElementById('e_note').value = note;
@@ -4672,9 +4778,126 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
     
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
+        // ... 原本 openEdit 的代码 ...
+        document.getElementById('editModal').style.display = 'block';
+    }
+    function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
+    
+    function openAddModal() { document.getElementById('addRuleModal').style.display = 'block'; }
+    function closeAddModal() { document.getElementById('addRuleModal').style.display = 'none'; }
+
+    let dynamicGroups = new Set();
+
+    function handleGroupSelect(sel) {
+        if (sel.value === '__NEW__') {
+            showInput("新建分组", "请输入新分组的名称", "例如: 香港节点").then(val => {
+                if (val && val.trim() !== '') {
+                    addGroupToUI(val.trim());
+                    sel.value = val.trim(); // 选中刚创建的分组
+                    filterRules();
+                } else {
+                    sel.value = ""; // 如果取消或没填，退回全部分组
+                    filterRules();
+                }
+            });
+        } else {
+            filterRules();
+        }
+    }
+
+    // 搜索和分组过滤逻辑
+    function filterRules() {
+        const term = document.getElementById('ruleSearch') ? document.getElementById('ruleSearch').value.toLowerCase() : '';
+        const grp = document.getElementById('groupFilter') ? document.getElementById('groupFilter').value : '';
+        document.querySelectorAll('.rule-row').forEach(row => {
+            const text = row.innerText.toLowerCase();
+            const rowGrp = row.getAttribute('data-group') || '';
+            const matchSearch = text.includes(term);
+            const matchGrp = (grp === '' || grp === '__NEW__' || rowGrp === grp);
+            row.style.display = (matchSearch && matchGrp) ? '' : 'none';
+        });
+    }
+
+    // 将分组名称注入到各个下拉框中
+    function addGroupToUI(g) {
+        if (!g || dynamicGroups.has(g) || g === "INIT_h7&^") return;
+        dynamicGroups.add(g);
+        
+        // 1. 注入到顶部过滤器 (插入到分割线之前)
+        const filterEl = document.getElementById('groupFilter');
+        if (filterEl) {
+            const divider = filterEl.querySelector('option[disabled]');
+            const opt1 = document.createElement('option');
+            opt1.value = g; opt1.text = g;
+            if (divider) { filterEl.insertBefore(opt1, divider); } 
+            else { filterEl.appendChild(opt1); }
+        }
+
+        // 2. 注入到添加弹窗
+        const addSel = document.getElementById('add_group_select');
+        if (addSel) {
+            const opt2 = document.createElement('option');
+            opt2.value = g; opt2.text = g;
+            addSel.appendChild(opt2);
+        }
+
+        // 3. 注入到编辑弹窗
+        const editSel = document.getElementById('e_group');
+        if (editSel) {
+            const opt3 = document.createElement('option');
+            opt3.value = g; opt3.text = g;
+            editSel.appendChild(opt3);
+        }
+    }
+
+    // 页面加载完毕后，处理折叠状态并自动抓取真实分组
+    document.addEventListener('DOMContentLoaded', () => {
+        const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
+        collapsed.forEach(g => {
+            const headers = document.querySelectorAll('.group-header[data-group="'+g+'"]');
+            headers.forEach(h => setGroupState(h, false));
+        });
+        if (typeof checkUpdate === 'function') checkUpdate();
+        
+        // 提取并填充现有分组
+        document.querySelectorAll('.rule-row').forEach(r => {
+            const g = r.getAttribute('data-group');
+            addGroupToUI(g);
+        });
+    });
+
+    // 页面加载完毕后，自动抓取已存在的分组并填充下拉框
+    document.addEventListener('DOMContentLoaded', () => {
+        const groups = new Set();
+        document.querySelectorAll('.rule-row').forEach(r => {
+            const g = r.getAttribute('data-group');
+            if (g && g !== "INIT_h7&^") groups.add(g);
+        });
+        
+        const filterEl = document.getElementById('groupFilter');
+        const dlistEl = document.getElementById('group-list');
+        if (filterEl && dlistEl) {
+            groups.forEach(g => {
+                // 【修改这里】使用原生的 DOM API 添加，彻底避开引号和拼接问题
+                let opt1 = document.createElement('option');
+                opt1.value = g;
+                opt1.text = g;
+                filterEl.appendChild(opt1);
+
+                let opt2 = document.createElement('option');
+                opt2.value = g;
+                dlistEl.appendChild(opt2);
+            });
+        }
+    });
+    
+    // ======================================================
+
     window.onclick = function(e) { 
         if(e.target.className === 'modal') { 
             closeEdit(); 
+            closeAddModal(); // <--- 记得在这个点击空白关闭事件里加上这句
             closeConfirm(); 
             document.getElementById('twoFAModal').style.display='none'; 
             const btnCancel = document.getElementById('i_btn_cancel');
@@ -4683,6 +4906,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
             }
         } 
     }
+    
 
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
