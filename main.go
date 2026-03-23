@@ -3865,7 +3865,7 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
                         </div>
                         <select id="groupFilter" style="width: 130px; flex-shrink: 0; background: var(--bg-body); border: 1px solid transparent; border-radius: 8px; color: var(--text-main);" onchange="handleGroupSelect(this)">
                             <option value="">全部分组</option>
-                            <option value="__NEW__">➕ 新建分组...</option>
+                            <option value="__NEW__">新建分组...</option>
                         </select>
                     </div>
 
