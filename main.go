@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.0.99"
+	AppVersion      = "v3.1.00"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5323,10 +5323,27 @@ input:focus, select:focus {
                                     <div class="form-group"><label>Bot Token</label><input name="tg_bot_token" value="{{.Config.TgBotToken}}"></div>
                                     <div class="form-group"><label>Chat ID</label><input name="tg_chat_id" value="{{.Config.TgChatID}}"></div>
                                     <div class="form-group" style="grid-column: 1 / -1">
-                                        <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
-                                        <input type="number" name="traffic_reset_day" value="{{.Config.TrafficResetDay}}" placeholder="填 0 或留空表示不开启自动重置">
-                                        <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。系统每周一凌晨会自动备份数据库到您的 TG 窗口。</div>
-                                    </div>
+    <label>每月自动清零账单日 (1-31) <i class="ri-information-line" title="到达该日0点将自动重置所有流量统计" style="color:var(--text-sub)"></i></label>
+    
+    <select name="traffic_reset_day" id="traffic_reset_day_select">
+        <option value="0">关闭 - 不开启自动重置</option>
+    </select>
+    <script>
+        (function(){
+            var sel = document.getElementById('traffic_reset_day_select');
+            var current = {{.Config.TrafficResetDay}} || 0;
+            for(var i = 1; i <= 31; i++) {
+                var opt = document.createElement('option');
+                opt.value = i;
+                opt.text = "每月 " + i + " 日";
+                if(i === current) opt.selected = true;
+                sel.appendChild(opt);
+            }
+        })();
+    </script>
+
+    <div style="font-size:12px;color:var(--text-sub);margin-top:6px;">* 开启后将同时激活 TG 的 80% / 95% / 100% 流量阶梯预警功能。系统每周一凌晨会自动备份数据库到您的 TG 窗口。</div>
+</div>
                                 </div>
                             </div>
                         </div>
