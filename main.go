@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.2"
+	AppVersion      = "v3.1.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -6054,12 +6054,25 @@ input:focus, select:focus {
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
     
     function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
-        // ... 原本 openEdit 的代码 ...
+        if (group && group !== '') { addGroupToUI(group); }
+        document.getElementById('e_id').value = id;
+        document.getElementById('e_group').value = group;
+        document.getElementById('e_note').value = note;
+        document.getElementById('e_entry').value = entry;
+        document.getElementById('e_eport').value = eport;
+        document.getElementById('e_exit').value = exit;
+        document.getElementById('e_tip').value = tip;
+        document.getElementById('e_tport').value = tport;
+        document.getElementById('e_proto').value = proto;
+        document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
+        document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
+        if(document.getElementById('e_lb')) document.getElementById('e_lb').value = lb || 'random';
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
     
     function openAddModal() { document.getElementById('addRuleModal').style.display = 'block'; }
+
     function closeAddModal() { document.getElementById('addRuleModal').style.display = 'none'; }
 
     let dynamicGroups = new Set();
