@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.1"
+	AppVersion      = "v3.1.2"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -4946,7 +4946,10 @@ input:focus, select:focus {
                 </div>
                 <div class="card stat-item">
                     <div class="stat-label">节点状态</div>
-                    <div class="stat-val">{{len .Agents}} <span style="font-size:18px;opacity:0.6;font-weight:600">/ {{len .Rules}}</span></div>
+                    <div style="display: flex; align-items: baseline; gap: 6px; margin: 8px 0;">
+                        <div class="stat-val" style="margin: 0;">{{len .Agents}}</div>
+                        <div style="font-size: 20px; color: var(--text-sub); font-weight: 600;">/ {{len .Rules}}</div>
+                    </div>
                     <div class="stat-trend"><i class="ri-server-line"></i> 在线 / 规则总数</div>
                     <i class="ri-cpu-line bg-icon"></i>
                 </div>
