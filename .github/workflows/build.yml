@@ -73,12 +73,13 @@ jobs:
           path: ./artifacts
 
       # 1. 自动生成版本号
-      - name: Bump version and push tag
+      - name: Extract version from main.go
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: minor
+        run: |
+          # 使用 grep 提取 AppVersion 后的字符串
+          VERSION=$(grep -oP 'AppVersion\s+=\s+"\K[^"]+' main.go)
+          echo "提取到的版本号是: $VERSION"
+          echo "new_tag=$VERSION" >> $GITHUB_OUTPUT
 
       # 2. 创建 GitHub Release
       - name: Create Release
