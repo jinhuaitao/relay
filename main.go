@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.1"
+	AppVersion      = "v3.1.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2213,10 +2213,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 		lbStrategy = "random"
 	}
 
-	finalBridgePort := r.FormValue("bridge_port")
-if finalBridgePort == "" {
-    finalBridgePort = fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
-}
+	finalBridgePort := fmt.Sprintf("%d", 20000+time.Now().UnixNano()%30000)
 
 	mu.Lock()
 	rules = append(rules, LogicalRule{
@@ -2260,7 +2257,6 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 			rules[i].TargetIP = r.FormValue("target_ip")
 			rules[i].TargetPort = r.FormValue("target_port")
 			rules[i].Protocol = r.FormValue("protocol")
-            rules[i].BridgePort = r.FormValue("bridge_port")
 			newLimit := int64(limitGB * 1024 * 1024 * 1024)
 			if rules[i].TrafficLimit != newLimit {
 				rules[i].Alert80, rules[i].Alert95, rules[i].Alert100 = false, false, false
@@ -5115,7 +5111,7 @@ input:focus, select:focus {
                             <td>
                                 <div style="display:flex;gap:6px">
                                     <button class="btn icon secondary" onclick="toggleRule('{{.ID}}')" title="切换状态">{{if .Disabled}}<i class="ri-play-fill" style="color:var(--success)"></i>{{else}}<i class="ri-pause-fill" style="color:var(--warning)"></i>{{end}}</button>
-                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.LBStrategy}}', '{{.BridgePort}}')" title="编辑"><i class="ri-edit-line"></i></button>
+                                    <button class="btn icon secondary" onclick="openEdit('{{.ID}}','{{.Group}}','{{.Note}}','{{.EntryAgent}}','{{.EntryPort}}','{{.ExitAgent}}','{{.TargetIP}}','{{.TargetPort}}','{{.Protocol}}','{{.TrafficLimit}}','{{.SpeedLimit}}', '{{.LBStrategy}}')" title="编辑"><i class="ri-edit-line"></i></button>
                                     <button class="btn icon secondary" onclick="resetTraffic('{{.ID}}')" title="重置"><i class="ri-refresh-line"></i></button>
                                     <button class="btn icon danger" onclick="delRule('{{.ID}}')" title="删除"><i class="ri-delete-bin-line"></i></button>
                                 </div>
@@ -5490,12 +5486,6 @@ input:focus, select:focus {
                     <input type="number" name="target_port" placeholder="443" required style="background: var(--bg-body);">
                 </div>
                 
-				<div class="form-group">
-    <label>中继桥接端口 (NAT出口必填)</label>
-    <input type="number" name="bridge_port" placeholder="填NAT机内网端口，如 28456" style="background: var(--bg-body);">
-    <small style="color: var(--text-sub); font-size: 11px;"></small>
-</div>
-
                 <div class="form-group">
                     <label>流量限制 (GB)</label>
                     <input type="number" step="0.1" name="traffic_limit" placeholder="0 表示无限制" style="background: var(--bg-body);">
@@ -5530,7 +5520,6 @@ input:focus, select:focus {
                 <div class="form-group"><label>出口节点</label><select name="exit_agent" id="e_exit">{{range .Agents}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></div>
                 <div class="form-group" style="grid-column: 1/-1"><label>目标地址 (逗号分隔多IP)</label><input name="target_ip" id="e_tip"></div>
                 <div class="form-group"><label>目标端口</label><input type="number" name="target_port" id="e_tport"></div>
-                <div class="form-group"><label>中继桥接端口</label><input type="number" name="bridge_port" id="e_bport"></div>
                 <div class="form-group">
                     <label>负载均衡策略</label>
                     <select name="lb_strategy" id="e_lb">
@@ -6046,7 +6035,7 @@ input:focus, select:focus {
         });
     }
 
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb, bport) {
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
         if (group && group !== '') { addGroupToUI(group); }
         document.getElementById('e_id').value = id;
         document.getElementById('e_group').value = group;
@@ -6060,7 +6049,24 @@ input:focus, select:focus {
         document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
         document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
         if(document.getElementById('e_lb')) document.getElementById('e_lb').value = lb || 'random';
-        if(document.getElementById('e_bport')) document.getElementById('e_bport').value = bport || '';
+        document.getElementById('editModal').style.display = 'block';
+    }
+    function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
+    
+    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
+        if (group && group !== '') { addGroupToUI(group); }
+        document.getElementById('e_id').value = id;
+        document.getElementById('e_group').value = group;
+        document.getElementById('e_note').value = note;
+        document.getElementById('e_entry').value = entry;
+        document.getElementById('e_eport').value = eport;
+        document.getElementById('e_exit').value = exit;
+        document.getElementById('e_tip').value = tip;
+        document.getElementById('e_tport').value = tport;
+        document.getElementById('e_proto').value = proto;
+        document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
+        document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
+        if(document.getElementById('e_lb')) document.getElementById('e_lb').value = lb || 'random';
         document.getElementById('editModal').style.display = 'block';
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
