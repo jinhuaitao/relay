@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.0"
+	AppVersion      = "v3.1.1"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5617,9 +5617,6 @@ input:focus, select:focus {
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
 
-    function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
-    initTab();
-
     // ================== 将代码插入在这里 ==================
     // 系统设置 Tab 切换逻辑
     function switchSettingsTab(tabId, el) {
@@ -5633,17 +5630,6 @@ input:focus, select:focus {
         document.getElementById(tabId).classList.add('active');
     }
     // ======================================================
-
-
-    document.addEventListener('DOMContentLoaded', () => {
-        const collapsed = JSON.parse(localStorage.getItem('collapsed_groups') || '[]');
-        collapsed.forEach(g => {
-            // 【修改点】选择所有同名分组的头部（包括监控列表和规则列表）
-            const headers = document.querySelectorAll('.group-header[data-group="'+g+'"]');
-            headers.forEach(h => setGroupState(h, false));
-        });
-        checkUpdate();
-    });
 
     function toggleGroup(header) {
         const isCurrentlyCollapsed = header.classList.contains('group-collapsed');
@@ -6053,24 +6039,6 @@ input:focus, select:focus {
     }
     function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
     
-    function openEdit(id, group, note, entry, eport, exit, tip, tport, proto, limit, speed, lb) {
-        if (group && group !== '') { addGroupToUI(group); }
-        document.getElementById('e_id').value = id;
-        document.getElementById('e_group').value = group;
-        document.getElementById('e_note').value = note;
-        document.getElementById('e_entry').value = entry;
-        document.getElementById('e_eport').value = eport;
-        document.getElementById('e_exit').value = exit;
-        document.getElementById('e_tip').value = tip;
-        document.getElementById('e_tport').value = tport;
-        document.getElementById('e_proto').value = proto;
-        document.getElementById('e_limit').value = (parseFloat(limit)/(1024*1024*1024)).toFixed(2);
-        document.getElementById('e_speed').value = (parseFloat(speed)/(1024*1024)).toFixed(1);
-        if(document.getElementById('e_lb')) document.getElementById('e_lb').value = lb || 'random';
-        document.getElementById('editModal').style.display = 'block';
-    }
-    function closeEdit() { document.getElementById('editModal').style.display = 'none'; }
-    
     function openAddModal() { document.getElementById('addRuleModal').style.display = 'block'; }
 
     function closeAddModal() { document.getElementById('addRuleModal').style.display = 'none'; }
@@ -6155,31 +6123,7 @@ input:focus, select:focus {
         });
     });
 
-    // 页面加载完毕后，自动抓取已存在的分组并填充下拉框
-    document.addEventListener('DOMContentLoaded', () => {
-        const groups = new Set();
-        document.querySelectorAll('.rule-row').forEach(r => {
-            const g = r.getAttribute('data-group');
-            if (g && g !== "INIT_h7&^") groups.add(g);
-        });
-        
-        const filterEl = document.getElementById('groupFilter');
-        const dlistEl = document.getElementById('group-list');
-        if (filterEl && dlistEl) {
-            groups.forEach(g => {
-                // 【修改这里��使用原生的 DOM API 添加，彻底避开引号和拼接问题
-                let opt1 = document.createElement('option');
-                opt1.value = g;
-                opt1.text = g;
-                filterEl.appendChild(opt1);
 
-                let opt2 = document.createElement('option');
-                opt2.value = g;
-                dlistEl.appendChild(opt2);
-            });
-        }
-    });
-    
     // ======================================================
 
     window.onclick = function(e) { 
