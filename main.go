@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.1"
+	AppVersion      = "v3.1.2"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -4956,7 +4956,10 @@ input:focus, select:focus {
             </div>
 
             <div class="card" style="margin-bottom: 24px;">
-                <h3><i class="ri-bar-chart-grouped-line" style="color:var(--primary)"></i> 近 30 天流量消耗趋势</h3>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:22px">
+                    <h3 style="margin:0"><i class="ri-bar-chart-grouped-line" style="color:var(--primary)" id="dailyChartTitleIcon"></i> 近 30 天流量消耗趋势</h3>
+                    <button class="btn icon secondary" style="width:32px;height:32px;font-size:14px" onclick="toggleDailyChart()" title="切换图表显示形态"><i class="ri-line-chart-line" id="dailyChartToggleIcon"></i></button>
+                </div>
                 <div class="chart-box" style="height: 250px; width: 100%; position: relative;"><canvas id="dailyChart"></canvas></div>
             </div>
 
@@ -6171,8 +6174,18 @@ input:focus, select:focus {
     // 初始化近 30 天流量柱状图
     var dailyStatsData = {{.DailyStatsJSON}};
     var ctxDaily = document.getElementById('dailyChart').getContext('2d');
+    
+    // 从 localStorage 读取用户的图表偏好，默认为柱状图
+    var dailyChartType = localStorage.getItem('dailyChartType') || 'bar';
+    
+    // 生成渐变色彩（用于曲线图的底部填充）
+    var txGradDaily = ctxDaily.createLinearGradient(0, 0, 0, 250);
+    txGradDaily.addColorStop(0, 'rgba(16, 185, 129, 0.3)'); txGradDaily.addColorStop(1, 'rgba(16, 185, 129, 0)');
+    var rxGradDaily = ctxDaily.createLinearGradient(0, 0, 0, 250);
+    rxGradDaily.addColorStop(0, 'rgba(6, 182, 212, 0.3)'); rxGradDaily.addColorStop(1, 'rgba(6, 182, 212, 0)');
+
     var dailyChart = new Chart(ctxDaily, {
-        type: 'bar',
+        type: dailyChartType,
         data: {
             labels: dailyStatsData.map(d => d.Date.substring(5)),
             datasets: [
@@ -6191,9 +6204,64 @@ input:focus, select:focus {
             scales: { 
                 x: { stacked: true, grid: {display: false}, ticks: {color: '#94a3b8', font: {size: 10}} }, 
                 y: { stacked: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { color: '#94a3b8', callback: v => formatBytes(v), maxTicksLimit: 6, font: {size: 10} } } 
-            }
+            },
+            interaction: { mode: 'index', axis: 'x', intersect: false }
         }
     });
+
+    // 动态应用图表样式和属性
+    function applyDailyChartState() {
+        if (dailyChartType === 'line') {
+            // 曲线图专属美化
+            dailyChart.data.datasets[0].borderColor = '#10b981';
+            dailyChart.data.datasets[0].backgroundColor = txGradDaily;
+            dailyChart.data.datasets[0].borderWidth = 2;
+            dailyChart.data.datasets[0].fill = true;
+            dailyChart.data.datasets[0].tension = 0.4;
+            
+            dailyChart.data.datasets[1].borderColor = '#06b6d4';
+            dailyChart.data.datasets[1].backgroundColor = rxGradDaily;
+            dailyChart.data.datasets[1].borderWidth = 2;
+            dailyChart.data.datasets[1].fill = true;
+            dailyChart.data.datasets[1].tension = 0.4;
+            
+            // 取消坐标轴堆叠，保证曲线图时重合部分的趋势能清晰辨认
+            dailyChart.options.scales.x.stacked = false;
+            dailyChart.options.scales.y.stacked = false;
+        } else {
+            // 柱状图专属美化
+            dailyChart.data.datasets[0].backgroundColor = '#10b981';
+            dailyChart.data.datasets[0].borderWidth = 0;
+            dailyChart.data.datasets[0].fill = false;
+            
+            dailyChart.data.datasets[1].backgroundColor = '#06b6d4';
+            dailyChart.data.datasets[1].borderWidth = 0;
+            dailyChart.data.datasets[1].fill = false;
+
+            // 恢复柱状图的堆叠模式
+            dailyChart.options.scales.x.stacked = true;
+            dailyChart.options.scales.y.stacked = true;
+        }
+        
+        // 更新 UI 图标：当前为圆柱则按钮提示切换到曲线，反之亦然
+        const toggleIcon = document.getElementById('dailyChartToggleIcon');
+        const titleIcon = document.getElementById('dailyChartTitleIcon');
+        if (toggleIcon) toggleIcon.className = dailyChartType === 'bar' ? 'ri-line-chart-line' : 'ri-bar-chart-grouped-line';
+        if (titleIcon) titleIcon.className = dailyChartType === 'bar' ? 'ri-bar-chart-grouped-line' : 'ri-line-chart-line';
+        
+        dailyChart.update();
+    }
+    
+    // 用户触发图表切换事件
+    function toggleDailyChart() {
+        dailyChartType = dailyChartType === 'bar' ? 'line' : 'bar';
+        localStorage.setItem('dailyChartType', dailyChartType);
+        dailyChart.config.type = dailyChartType;
+        applyDailyChartState();
+    }
+    
+    // 初始化图表最终状态
+    applyDailyChartState();
 
     function updateChartTheme(theme) {
         const gridColor = theme === 'dark' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
