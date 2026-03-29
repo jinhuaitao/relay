@@ -5,7 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"实时流量趋势
+	"crypto/tls"
 
 	"database/sql"
 	"encoding/base64"
