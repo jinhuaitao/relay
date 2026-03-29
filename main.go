@@ -44,7 +44,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.2"
+	AppVersion      = "v3.1.3"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -6168,7 +6168,15 @@ input:focus, select:focus {
     var pieChart = new Chart(ctxPie, {
         type: 'doughnut',
         data: { labels: [], datasets: [{ data: [], backgroundColor: ['#10b981', '#06b6d4', '#f59e0b', '#8b5cf6', '#3b82f6'], borderWidth: 0, hoverOffset: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true, padding: 20, font: {size: 11} } } }, cutout: '72%' }
+        options: { 
+            responsive: true, 
+            maintainAspectRatio: false, 
+            plugins: { 
+                legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true, padding: 20, font: {size: 11} } },
+                tooltip: { callbacks: { label: function(context) { return context.label + ': ' + context.raw + ' GB'; } } }
+            }, 
+            cutout: '72%' 
+        }
     });
 
     // 初始化近 30 天流量柱状图
@@ -6330,7 +6338,8 @@ input:focus, select:focus {
                     if (d.rules) {
                         const sortedRules = [...d.rules].sort((a,b) => b.total - a.total).slice(0, 5);
                         pieChart.data.labels = sortedRules.map(r => r.name || '未命名');
-                        pieChart.data.datasets[0].data = sortedRules.map(r => r.total);
+                        // 将 Bytes 转换为 GB 并保留两位小数
+                        pieChart.data.datasets[0].data = sortedRules.map(r => parseFloat((r.total / 1073741824).toFixed(2)));
                         pieChart.update('none');
                         
                         const tbody = document.getElementById('rule-monitor-body');
