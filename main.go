@@ -5,7 +5,8 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
+	"crypto/tls"实时流量趋势
+
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -44,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.3"
+	AppVersion      = "v3.1.4"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -6161,7 +6162,7 @@ input:focus, select:focus {
     var chart = new Chart(ctx, {
         type: 'line',
         data: { labels: Array(30).fill(''), datasets: [ { label: 'Tx', data: Array(30).fill(0), borderColor: '#10b981', backgroundColor: txGrad, borderWidth: 2.5, pointRadius: 0, fill: true, tension: 0.4 }, { label: 'Rx', data: Array(30).fill(0), borderColor: '#06b6d4', backgroundColor: rxGrad, borderWidth: 2.5, pointRadius: 0, fill: true, tension: 0.4 } ] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(3, 7, 18, 0.95)', titleColor: '#f9fafb', bodyColor: '#d1d5db', borderColor: 'rgba(16, 185, 129, 0.2)', borderWidth: 1, padding: 12, displayColors: true, cornerRadius: 10 } }, scales: { x: { display: false }, y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { callback: v => formatBytes(v)+'/s', font: {size: 10}, maxTicksLimit: 5 } } }, interaction: { mode: 'nearest', axis: 'x', intersect: false } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(3, 7, 18, 0.95)', titleColor: '#f9fafb', bodyColor: '#d1d5db', borderColor: 'rgba(16, 185, 129, 0.2)', borderWidth: 1, padding: 12, displayColors: true, cornerRadius: 10, callbacks: { label: function(context) { return context.dataset.label + ': ' + context.raw + ' MB/s'; } } } }, scales: { x: { display: false }, y: { beginAtZero: true, grid: { color: 'rgba(128, 128, 128, 0.06)', borderDash: [4, 4] }, ticks: { callback: v => v + ' MB/s', font: {size: 10}, maxTicksLimit: 5 } } }, interaction: { mode: 'nearest', axis: 'x', intersect: false } }
     });
 
     var ctxPie = document.getElementById('pieChart').getContext('2d');
@@ -6331,8 +6332,8 @@ input:focus, select:focus {
                     document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
                     document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
                     
-                    chart.data.datasets[0].data.push(d.speed_tx); chart.data.datasets[0].data.shift();
-                    chart.data.datasets[1].data.push(d.speed_rx); chart.data.datasets[1].data.shift();
+                    chart.data.datasets[0].data.push(parseFloat((d.speed_tx / 1048576).toFixed(2))); chart.data.datasets[0].data.shift();
+                    chart.data.datasets[1].data.push(parseFloat((d.speed_rx / 1048576).toFixed(2))); chart.data.datasets[1].data.shift();
                     chart.update('none');
 
                     if (d.rules) {
