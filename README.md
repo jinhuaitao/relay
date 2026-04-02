@@ -153,11 +153,25 @@ IP 连接限制：为了防止中间人攻击，如果您生成的 Agent 命令�
 
 # 界面效果
 
-<img width="1632" height="1091" alt="00fbb834-8587-449d-aa54-51262044ab4d" src="https://github.com/user-attachments/assets/d6de1cfa-838a-4a6e-b1f8-b9b2be38ee3a" />
+<img width="1527" height="1123" alt="3b48c24a-ae28-41f7-82fd-44091febc0ac" src="https://github.com/user-attachments/assets/d3db9e90-b3c5-4ddb-ad1a-c8c1b38537aa" />
 
-<img width="1633" height="1083" alt="d85805e6-d2ff-4c9b-b74f-cff44cb42e69" src="https://github.com/user-attachments/assets/e79789f0-9fe1-4df6-bf91-ccb5b11891e9" />
 
-<img width="1637" height="1090" alt="3c991d56-85b5-4be7-bfb2-9adbdfb5d72f" src="https://github.com/user-attachments/assets/444bc6ba-685c-4204-90ab-191c62f9c461" />
+<img width="1524" height="1116" alt="1bfc2073-6d0a-4b62-b1f3-0d742a89d3a6" src="https://github.com/user-attachments/assets/f23da23f-919e-40f5-ae53-025a1ddb9a9a" />
 
-<img width="1639" height="1091" alt="1edc02ea-6bdf-4689-8efa-169b32254f2c" src="https://github.com/user-attachments/assets/0256c07f-9de7-47de-8342-24defd50b52f" />
 
+<img width="1521" height="1115" alt="cadbe6e7-80c3-492e-ad06-ea30f2e17118" src="https://github.com/user-attachments/assets/25248c27-a4dc-4700-89e5-44ac50e2551e" />
+
+
+<img width="1527" height="1121" alt="811ab725-4264-4a31-88fe-94f03904277a" src="https://github.com/user-attachments/assets/b4bf7536-db57-4378-b1ba-ed677e78c048" />
+
+
+<img width="1525" height="1115" alt="aa24c8c5-8446-428f-aeab-1d9cf758f460" src="https://github.com/user-attachments/assets/48f4e8fb-2b2d-422c-ac07-b79a2b689f23" />
+
+
+<img width="1529" height="1119" alt="f772e119-2588-411e-9dd3-2d4307ea4fad" src="https://github.com/user-attachments/assets/1d559ac5-0b43-4a3f-9fe7-ab43c7847538" />
+
+
+<img width="1522" height="1118" alt="aaefdd1b-6dea-435c-98f4-ca59894f4e6f" src="https://github.com/user-attachments/assets/12123cf0-5c2c-4169-b480-8a98d4367ca0" />
+
+
+<img width="1517" height="1116" alt="9655527c-55d4-49d0-909d-cf7ecabaf665" src="https://github.com/user-attachments/assets/4da54d17-1b29-4505-af39-6daed1faf113" />
