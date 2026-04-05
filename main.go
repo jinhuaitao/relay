@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.7"
+	AppVersion      = "v3.1.8"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1617,7 +1617,12 @@ func handleAgentConn(conn net.Conn) {
 	}
 	reqToken, _ := data["token"].(string)
 	name, _ := data["name"].(string)
-	reportedIPv4, _ := data["ipv4"].(string) // 新增：提取节点汇报的 IPv4
+	// --- 新增：获取节点汇报的 IP 和 测试端口 ---
+	reportedIPv4, _ := data["ipv4"].(string)
+	reportedIPv6, _ := data["ipv6"].(string)
+	testPortFloat, _ := data["test_port"].(float64)
+	testPort := int(testPortFloat)
+	// --------------------------------------
 
 	mu.Lock()
 	globalTk := config.AgentToken
@@ -1638,11 +1643,28 @@ func handleAgentConn(conn net.Conn) {
 
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	
-	// --- 新增：如果有探测到的 IPv4，则优先覆盖通信 IP ---
-	if reportedIPv4 != "" {
-		remoteIP = reportedIPv4
+	// --- 新增：智能入站连通性测试 (优先全功能 IPv4，备用全功能 IPv6) ---
+	finalIP := remoteIP
+	if testPort > 0 {
+		ipv4Ok := false
+		if reportedIPv4 != "" {
+			// 主控尝试连接节点的 IPv4
+			if c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", reportedIPv4, testPort), 2*time.Second); err == nil {
+				c.Close()
+				ipv4Ok = true
+				finalIP = reportedIPv4
+			}
+		}
+		// 如果 IPv4 连不通 (说明是出栈/NAT)，再去试 IPv6
+		if !ipv4Ok && reportedIPv6 != "" {
+			if c, err := net.DialTimeout("tcp", fmt.Sprintf("[%s]:%d", reportedIPv6, testPort), 2*time.Second); err == nil {
+				c.Close()
+				finalIP = reportedIPv6
+			}
+		}
 	}
-	// ------------------------------------------------
+	remoteIP = finalIP
+	// ----------------------------------------------------------
 
 	mu.Lock()
 	if old, exists := agents[name]; exists {
@@ -2697,16 +2719,19 @@ func doRestart() {
 // ================= AGENT CORE =================
 
 func runAgent(name, masterAddr, token string) {
-	// --- 新增：节点启动时主动探测公网 IPv4 ---
-	var publicIPv4 string
-	client := http.Client{Timeout: 3 * time.Second}
-	if resp, err := client.Get("http://ipv4.icanhazip.com"); err == nil {
-		if b, err := io.ReadAll(resp.Body); err == nil {
-			publicIPv4 = strings.TrimSpace(string(b))
-		}
+	// --- 新增：精准探测公网 IPv4 / IPv6 ---
+	var publicIPv4, publicIPv6 string
+	client4 := http.Client{Timeout: 3 * time.Second}
+	if resp, err := client4.Get("http://ipv4.icanhazip.com"); err == nil {
+		if b, err := io.ReadAll(resp.Body); err == nil { publicIPv4 = strings.TrimSpace(string(b)) }
 		resp.Body.Close()
 	}
-	// ---------------------------------------
+	client6 := http.Client{Timeout: 3 * time.Second}
+	if resp, err := client6.Get("http://ipv6.icanhazip.com"); err == nil {
+		if b, err := io.ReadAll(resp.Body); err == nil { publicIPv6 = strings.TrimSpace(string(b)) }
+		resp.Body.Close()
+	}
+	// ------------------------------------
 
 	for {
 		var conn net.Conn
@@ -2727,8 +2752,26 @@ func runAgent(name, masterAddr, token string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		// 修改：将探测到的 IPv4 一并汇报给主控
-		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token, "ipv4": publicIPv4}})
+
+		// --- 新增：开启临时测试端口，供主控测试入站连通性 ---
+		testLn, _ := net.Listen("tcp", ":0")
+		var testPort int
+		if testLn != nil {
+			testPort = testLn.Addr().(*net.TCPAddr).Port
+			go func(ln net.Listener) {
+				defer ln.Close()
+				// 10 秒后自动关闭测试端口，防止端口泄露
+				ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+				if c, err := ln.Accept(); err == nil { c.Close() }
+			}(testLn)
+		}
+		// -------------------------------------------------
+
+		// 修改：将 IPv4、IPv6 和 测试端口 一并发送，Payload 类型改为 interface{}
+		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]interface{}{
+			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort,
+		}})
+
 		stop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(1 * time.Second)
