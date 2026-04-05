@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.4"
+	AppVersion      = "v3.1.5"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -92,6 +92,7 @@ type LogicalRule struct {
 	Alert80  bool `json:"alert_80"`
 	Alert95  bool `json:"alert_95"`
 	Alert100 bool `json:"alert_100"`
+	EntryIP string `json:"-"`
 }
 
 type OpLog struct {
@@ -1838,7 +1839,19 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		totalTraffic += (r.TotalTx + r.TotalRx)
 	}
 	displayRules := make([]LogicalRule, len(rules))
-	copy(displayRules, rules)
+	for i, r := range rules {
+		displayRules[i] = r
+		// 根据节点名称查找当前真实的入口 IP
+		if a, ok := agents[r.EntryAgent]; ok {
+			rip := a.RemoteIP
+			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
+				rip = "[" + rip + "]" // 处理 IPv6
+			}
+			displayRules[i].EntryIP = rip
+		} else {
+			displayRules[i].EntryIP = "离线"
+		}
+	}
 	mu.Unlock()
 
 	sort.Slice(displayRules, func(i, j int) bool {
@@ -5085,9 +5098,13 @@ input:focus, select:focus {
                             <td>
                                 <div style="font-weight:600;font-size:14px;margin-bottom:4px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
-                                    <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)">{{.EntryAgent}}:{{.EntryPort}}</span> 
+                                    <span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border);cursor:pointer;transition:all 0.3s;" 
+                                          onclick="this.innerHTML='<i class=\'ri-links-line\'></i> {{.EntryIP}}:{{.EntryPort}}'; this.style.color='var(--primary)'; this.style.borderColor='var(--primary-light)'; copyText('{{.EntryIP}}:{{.EntryPort}}')" 
+                                          title="点击显示真实 IP 并复制">
+                                        <i class="ri-server-line"></i> {{.EntryAgent}}:{{.EntryPort}}
+                                    </span> 
                                     <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
-                                    <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)">{{.ExitAgent}}</span>
+                                    <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)" title="出口节点: {{.ExitAgent}}">{{.ExitAgent}}</span>
                                 </div>
                             </td>
                             <td>
