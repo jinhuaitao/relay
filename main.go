@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.5"
+	AppVersion      = "v3.1.6"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5099,8 +5099,9 @@ input:focus, select:focus {
                                 <div style="font-weight:600;font-size:14px;margin-bottom:4px">{{if .Note}}{{.Note}}{{else}}未命名规则{{end}}</div>
                                 <div style="font-size:12px;color:var(--text-sub);display:flex;align-items:center;gap:6px">
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border);cursor:pointer;transition:all 0.3s;" 
-                                          onclick="this.innerHTML='<i class=\'ri-links-line\'></i> {{.EntryIP}}:{{.EntryPort}}'; this.style.color='var(--primary)'; this.style.borderColor='var(--primary-light)'; copyText('{{.EntryIP}}:{{.EntryPort}}')" 
-                                          title="点击显示真实 IP 并复制">
+                                          data-show-ip="false"
+                                          onclick="if(this.dataset.showIp==='true'){ this.innerHTML='<i class=\'ri-server-line\'></i> {{.EntryAgent}}:{{.EntryPort}}'; this.style.color='var(--text-main)'; this.style.borderColor='var(--border)'; this.dataset.showIp='false'; } else { this.innerHTML='<i class=\'ri-links-line\'></i> {{.EntryIP}}:{{.EntryPort}}'; this.style.color='var(--primary)'; this.style.borderColor='var(--primary-light)'; copyText('{{.EntryIP}}:{{.EntryPort}}'); this.dataset.showIp='true'; }" 
+                                          title="点击切换显示 IP/节点名">
                                         <i class="ri-server-line"></i> {{.EntryAgent}}:{{.EntryPort}}
                                     </span> 
                                     <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
