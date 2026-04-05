@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.6"
+	AppVersion      = "v3.1.7"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1617,6 +1617,7 @@ func handleAgentConn(conn net.Conn) {
 	}
 	reqToken, _ := data["token"].(string)
 	name, _ := data["name"].(string)
+	reportedIPv4, _ := data["ipv4"].(string) // 新增：提取节点汇报的 IPv4
 
 	mu.Lock()
 	globalTk := config.AgentToken
@@ -1636,6 +1637,13 @@ func handleAgentConn(conn net.Conn) {
 	}
 
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	
+	// --- 新增：如果有探测到的 IPv4，则优先覆盖通信 IP ---
+	if reportedIPv4 != "" {
+		remoteIP = reportedIPv4
+	}
+	// ------------------------------------------------
+
 	mu.Lock()
 	if old, exists := agents[name]; exists {
 		old.Conn.Close()
@@ -2689,6 +2697,17 @@ func doRestart() {
 // ================= AGENT CORE =================
 
 func runAgent(name, masterAddr, token string) {
+	// --- 新增：节点启动时主动探测公网 IPv4 ---
+	var publicIPv4 string
+	client := http.Client{Timeout: 3 * time.Second}
+	if resp, err := client.Get("http://ipv4.icanhazip.com"); err == nil {
+		if b, err := io.ReadAll(resp.Body); err == nil {
+			publicIPv4 = strings.TrimSpace(string(b))
+		}
+		resp.Body.Close()
+	}
+	// ---------------------------------------
+
 	for {
 		var conn net.Conn
 		var err error
@@ -2708,7 +2727,8 @@ func runAgent(name, masterAddr, token string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token}})
+		// 修改：将探测到的 IPv4 一并汇报给主控
+		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]string{"name": name, "token": token, "ipv4": publicIPv4}})
 		stop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(1 * time.Second)
