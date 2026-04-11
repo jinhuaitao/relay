@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.8"
+	AppVersion      = "v3.1.9"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -157,6 +157,7 @@ type AgentInfo struct {
 	Conn      net.Conn `json:"-"`
 	SysStatus string   `json:"sys_status"`
 	ConnectedAt time.Time `json:"-"`
+    Version     string    `json:"version"`
 }
 
 type Message struct {
@@ -1622,6 +1623,10 @@ func handleAgentConn(conn net.Conn) {
 	reportedIPv6, _ := data["ipv6"].(string)
 	testPortFloat, _ := data["test_port"].(float64)
 	testPort := int(testPortFloat)
+    reportedVersion, _ := data["version"].(string)
+	if reportedVersion == "" {
+		reportedVersion = "未知"
+	}
 	// --------------------------------------
 
 	mu.Lock()
@@ -1670,7 +1675,8 @@ func handleAgentConn(conn net.Conn) {
 	if old, exists := agents[name]; exists {
 		old.Conn.Close()
 	}
-	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now()}
+	// 修改：将 reportedVersion 保存进去
+	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), Version: reportedVersion}
 	mu.Unlock()
 	log.Printf("Agent上线: %s", name)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
@@ -2769,7 +2775,7 @@ func runAgent(name, masterAddr, token string) {
 
 		// 修改：将 IPv4、IPv6 和 测试端口 一并发送，Payload 类型改为 interface{}
 		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]interface{}{
-			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort,
+			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort, "version": AppVersion,
 		}})
 
 		stop := make(chan struct{})
@@ -5253,12 +5259,15 @@ input:focus, select:focus {
                 <div class="table-container" id="agents-container">
                     {{if .Agents}}
                     <table>
-                        <thead><tr><th>状态</th><th>节点名称</th><th>远程 IP</th><th>资源监控 (CPU/内存/硬盘)</th><th>操作</th></tr></thead>
+                        <thead><tr><th>状态</th><th>节点名称</th><th>版本</th><th>远程 IP</th><th>资源监控 (CPU/内存/硬盘)</th><th>操作</th></tr></thead>
                         <tbody>
                         {{range .Agents}}
                         <tr>
                             <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
                             <td><div style="font-weight:600">{{.Name}}</div></td>
+                            
+                            <td><span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border);font-family:var(--font-mono)">{{if .Version}}{{.Version}}{{else}}未知{{end}}</span></td>
+                            
                             <td><span class="badge" style="font-family:var(--font-mono);background:var(--input-bg);color:var(--text-sub);cursor:pointer" onclick="copyText('{{.RemoteIP}}')">{{.RemoteIP}}</span></td>
                             
                             <td style="width:280px" id="sys-status-{{.Name}}">
