@@ -45,7 +45,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.1.9"
+	AppVersion      = "v3.2.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -158,6 +158,7 @@ type AgentInfo struct {
 	SysStatus string   `json:"sys_status"`
 	ConnectedAt time.Time `json:"-"`
     Version     string    `json:"version"`
+    Region      string    `json:"region"`
 }
 
 type Message struct {
@@ -1675,9 +1676,34 @@ func handleAgentConn(conn net.Conn) {
 	if old, exists := agents[name]; exists {
 		old.Conn.Close()
 	}
-	// 修改：将 reportedVersion 保存进去
-	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), Version: reportedVersion}
+	// 初始化为获取中
+	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), Version: reportedVersion, Region: "🌍 --"}
 	mu.Unlock()
+
+	// --- 新增：异步获取 IP 地理位置，并转换为 Emoji 国旗 ---
+	go func(ipStr, agentName string) {
+		host := ipStr
+		if h, _, err := net.SplitHostPort(ipStr); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		client := http.Client{Timeout: 3 * time.Second}
+		// 使用免费接口查询 IP 信息
+		if resp, err := client.Get("http://ip-api.com/json/" + host + "?fields=countryCode"); err == nil {
+			defer resp.Body.Close()
+			var res struct{ CountryCode string `json:"countryCode"` }
+			if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.CountryCode) == 2 {
+				cc := strings.ToUpper(res.CountryCode)
+				// 巧妙利用 Unicode 偏移量将两位字母转为国旗 Emoji (例如 US 会变成 🇺🇸)
+				flag := string([]rune{rune(cc[0]) + 127397, rune(cc[1]) + 127397}) + " " + cc
+				mu.Lock()
+				if a, ok := agents[agentName]; ok {
+					a.Region = flag
+				}
+				mu.Unlock()
+			}
+		}
+	}(remoteIP, name)
 	log.Printf("Agent上线: %s", name)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
 	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s", name))
@@ -5259,12 +5285,14 @@ input:focus, select:focus {
                 <div class="table-container" id="agents-container">
                     {{if .Agents}}
                     <table>
-                        <thead><tr><th>状态</th><th>节点名称</th><th>版本</th><th>远程 IP</th><th>资源监控 (CPU/内存/硬盘)</th><th>操作</th></tr></thead>
+                        <thead><tr><th>状态</th><th>节点名称</th><th>区域</th><th>版本</th><th>远程 IP</th><th>资源监控 (CPU/内存/硬盘)</th><th>操作</th></tr></thead>
                         <tbody>
                         {{range .Agents}}
                         <tr>
                             <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
                             <td><div style="font-weight:600">{{.Name}}</div></td>
+                            
+                            <td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border);font-size:13px">{{if .Region}}{{.Region}}{{else}}🌍 --{{end}}</span></td>
                             
                             <td><span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border);font-family:var(--font-mono)">{{if .Version}}{{.Version}}{{else}}未知{{end}}</span></td>
                             
