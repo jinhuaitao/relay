@@ -33,6 +33,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+    "context" // 如果原先没有，请加上
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
@@ -45,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.0"
+	AppVersion      = "v3.2.1"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -126,6 +129,10 @@ type AppConfig struct {
 	GithubAllowedUsers string            `json:"github_allowed_users"`
 	TrafficResetDay    int               `json:"traffic_reset_day"`
 	LastResetMonth     string            `json:"last_reset_month"`
+    R2AccessKey        string            `json:"r2_access_key"`
+	R2SecretKey        string            `json:"r2_secret_key"`
+	R2Endpoint         string            `json:"r2_endpoint"`
+	R2Bucket           string            `json:"r2_bucket"`
 	Rules              []LogicalRule     `json:"saved_rules"`
 	Logs               []OpLog           `json:"logs"`
 }
@@ -790,6 +797,48 @@ func sendTelegramDocument(filePath string, caption string) {
 	client.Do(req)
 }
 
+func uploadToR2(filePath string) error {
+	mu.Lock()
+	ak := config.R2AccessKey
+	sk := config.R2SecretKey
+	endpoint := config.R2Endpoint
+	bucket := config.R2Bucket
+	mu.Unlock()
+
+	// 如果没有配置，就不执行备份
+	if ak == "" || sk == "" || endpoint == "" || bucket == "" {
+		return fmt.Errorf("R2 配置未启用")
+	}
+
+	// 强制 SQLite 刷盘，保证上传的是最完整的数据快照
+	if db != nil {
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	}
+
+	// MinIO SDK 要求 Endpoint 不带协议头
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	endpoint = strings.TrimPrefix(endpoint, "http://")
+
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(ak, sk, ""),
+		Secure: true,
+	})
+	if err != nil {
+		return err
+	}
+
+	// 文件名带上时间戳：gorelay_backup_20260412_120000.db
+	fileName := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, err = client.FPutObject(ctx, bucket, fileName, filePath, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	return err
+}
+
 func autoBackupLoop() {
 	var lastBackupWeek int = -1
 	for {
@@ -810,6 +859,13 @@ func autoBackupLoop() {
 		if now.Weekday() == time.Monday && now.Hour() == 2 && lastBackupWeek != week {
 			lastBackupWeek = week
 			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
+			
+			// === 触发 R2 备份 ===
+			if err := uploadToR2(DBFile); err == nil {
+				sendTelegram("✅ <b>R2 容灾备份成功</b>\n数据库已安全同步至 Cloudflare R2。")
+			} else if err.Error() != "R2 配置未启用" {
+				sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+			}
 		}
 	}
 }
@@ -1142,7 +1198,17 @@ func startTgBotLoop() {
 						"reply_markup": buildRulesMenuMarkup(page),
 					})
 				} else if data == "cmd:backup" {
-					go sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
+					go func() {
+						// 1. 先发送到 Telegram
+						sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
+						
+						// 2. 触发 Cloudflare R2 备份
+						if err := uploadToR2(DBFile); err == nil {
+							sendTelegram("✅ <b>R2 容灾备份成功</b>\n手动触发的备份已同步至 Cloudflare R2。")
+						} else if err.Error() != "R2 配置未启用" {
+							sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+						}
+					}()
 				} else if strings.HasPrefix(data, "toggle:") {
 					// 格式: toggle:id:page
 					parts := strings.Split(data, ":")
@@ -2485,6 +2551,10 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.GithubClientID = r.FormValue("github_client_id")
 	config.GithubClientSecret = r.FormValue("github_client_secret")
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
+    config.R2AccessKey = r.FormValue("r2_access_key")
+	config.R2SecretKey = r.FormValue("r2_secret_key")
+	config.R2Endpoint = r.FormValue("r2_endpoint")
+	config.R2Bucket = r.FormValue("r2_bucket")
 	
 	if rd := r.FormValue("traffic_reset_day"); rd != "" {
 		d, _ := strconv.Atoi(rd)
@@ -3369,6 +3439,14 @@ func loadConfig() {
 				config.TrafficResetDay = d
 			case "last_reset_month":
 				config.LastResetMonth = v
+            case "r2_access_key":
+				config.R2AccessKey = v
+			case "r2_secret_key":
+				config.R2SecretKey = v
+			case "r2_endpoint":
+				config.R2Endpoint = v
+			case "r2_bucket":
+				config.R2Bucket = v
 			}
 		}
 	}
@@ -3427,6 +3505,10 @@ func saveConfigNoLock() {
 	setS("github_allowed_users", conf.GithubAllowedUsers)
 	setS("traffic_reset_day", strconv.Itoa(conf.TrafficResetDay))
 	setS("last_reset_month", conf.LastResetMonth)
+    setS("r2_access_key", conf.R2AccessKey)
+	setS("r2_secret_key", conf.R2SecretKey)
+	setS("r2_endpoint", conf.R2Endpoint)
+	setS("r2_bucket", conf.R2Bucket)
 
 	_, _ = tx.Exec("DELETE FROM rules")
 	for _, r := range lRules {
@@ -5459,6 +5541,16 @@ input:focus, select:focus {
                         </div>
 
                         <div id="tab-notify" class="settings-content">
+                            <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);margin-top:20px;">
+                                <h4 style="margin:0 0 16px 0;font-size:14px;color:#f59e0b"><i class="ri-cloud-line"></i> Cloudflare R2 对象存储容灾备份</h4>
+                                <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
+                                    <div class="form-group" style="grid-column: 1/-1"><label>S3 Endpoint URL</label><input name="r2_endpoint" value="{{.Config.R2Endpoint}}" placeholder="例如: https://<你的账户ID>.r2.cloudflarestorage.com"></div>
+                                    <div class="form-group"><label>Bucket 存储桶</label><input name="r2_bucket" value="{{.Config.R2Bucket}}" placeholder="例如: gorelay-backup"></div>
+                                    <div class="form-group"><label>Access Key ID</label><input name="r2_access_key" value="{{.Config.R2AccessKey}}"></div>
+                                    <div class="form-group" style="grid-column: 1/-1"><label>Secret Access Key</label><input type="password" name="r2_secret_key" value="{{.Config.R2SecretKey}}"></div>
+                                </div>
+                                <div style="font-size:12px;color:var(--text-sub);margin-top:12px;">* 填写后，系统在每周一凌晨触发自动 TG 备份时（或您手动在 TG 机器人点击备份时），会同步上传一份数据库至 Cloudflare R2 进行深度容灾。不需要请留空。</div>
+                            </div>
                             <div style="background:var(--input-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
                                 <h4 style="margin:0 0 16px 0;font-size:14px;color:#3b82f6"><i class="ri-telegram-fill"></i> Telegram 机器人与自动任务</h4>
                                 <div class="grid-form" style="gap:16px;grid-template-columns: 1fr 1fr;">
