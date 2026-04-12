@@ -1048,8 +1048,13 @@ func startTgBotLoop() {
 
 					// 将原来的 for _, a := range agents 改为遍历 sortedAgents
 					for _, a := range sortedAgents {
-					// ===========================
-					
+						// === 新增：如果是离线节点，直接显示离线状态并跳过资源渲染 ===
+						if !a.IsOnline {
+							reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🔴 离线)\n\n", a.Name, a.RemoteIP)
+							continue
+						}
+						// =======================================================
+
 						var cpu, mem, dsk float64
 						parts := strings.Split(a.SysStatus, "|")
 						for _, p := range parts {
@@ -1061,11 +1066,10 @@ func startTgBotLoop() {
 								if kv[0] == "DSK" { dsk = v }
 							}
 						}
-						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code>\n", a.Name, a.RemoteIP)
+						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🟢 在线)\n", a.Name, a.RemoteIP)
 						reply += fmt.Sprintf(" ├ 🟢 <code>CPU: %5.1f%% [%s]</code>\n", cpu, makeAestheticBar(cpu, "━", "─"))
 						reply += fmt.Sprintf(" ├ 🔵 <code>MEM: %5.1f%% [%s]</code>\n", mem, makeAestheticBar(mem, "━", "─"))
 						reply += fmt.Sprintf(" └ 🟡 <code>DSK: %5.1f%% [%s]</code>\n\n", dsk, makeAestheticBar(dsk, "━", "─"))
-
 					}
 					if len(agents) == 0 {
 						reply += "⚠️ <i>暂无节点在线</i>\n\n"
