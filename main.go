@@ -159,6 +159,7 @@ type AgentInfo struct {
 	ConnectedAt time.Time `json:"-"`
     Version     string    `json:"version"`
     Region      string    `json:"region"`
+    IsOnline    bool      `json:"is_online"`
 }
 
 type Message struct {
@@ -193,6 +194,7 @@ type WSDashboardData struct {
 type AgentStatusData struct {
 	Name      string `json:"name"`
 	SysStatus string `json:"sys_status"`
+    IsOnline  bool   `json:"is_online"`
 }
 
 type RuleStatusData struct {
@@ -1530,7 +1532,7 @@ func broadcastLoop() {
 			return agentList[i].ConnectedAt.Before(agentList[j].ConnectedAt)
 		})
 		for _, a := range agentList {
-			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus})
+			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus, IsOnline: a.IsOnline})
 		}
 		
 		for _, r := range rules {
@@ -1677,7 +1679,7 @@ func handleAgentConn(conn net.Conn) {
 		old.Conn.Close()
 	}
 	// 初始化为获取中
-	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), Version: reportedVersion, Region: "🌍 --"}
+	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), IsOnline: true, Version: reportedVersion, Region: "🌍 --"}
 	mu.Unlock()
 
 	// --- 新增：异步获取 IP 地理位置，并转换为 Emoji 国旗 ---
@@ -1732,7 +1734,7 @@ func handleAgentConn(conn net.Conn) {
 	}
 	mu.Lock()
 	if curr, ok := agents[name]; ok && curr.Conn == conn {
-		delete(agents, name)
+		curr.IsOnline = false  // <--- 修改这里：不删除，仅标记离线
 		mu.Unlock()
 		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", name))
 	} else {
@@ -1838,7 +1840,7 @@ func pushConfigToAll() {
 		tasksMap[r.ExitAgent] = append(tasksMap[r.ExitAgent], ForwardTask{
 			ID: r.ID + "_exit", Protocol: r.Protocol, Listen: ":" + r.BridgePort, Target: finalTargetStr, SpeedLimit: r.SpeedLimit, LBStrategy: lb,
 		})
-		if exit, ok := agents[r.ExitAgent]; ok {
+		if exit, ok := agents[r.ExitAgent]; ok && exit.IsOnline {
 			rip := exit.RemoteIP
 			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
 				rip = "[" + rip + "]"
@@ -1850,7 +1852,9 @@ func pushConfigToAll() {
 	}
 	activeAgents := make(map[string]*AgentInfo)
 	for k, v := range agents {
-		activeAgents[k] = v
+		if v.IsOnline {
+			activeAgents[k] = v
+		}
 	}
 	mu.Unlock()
 	for n, a := range activeAgents {
@@ -2446,7 +2450,10 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	mu.Lock()
 	if a, ok := agents[name]; ok {
-		json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
+		if a.IsOnline {
+			json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
+		}
+		delete(agents, name) // 点击卸载时才彻底删除
 	}
 	mu.Unlock()
 	http.Redirect(w, r, "/#dashboard", http.StatusSeeOther)
@@ -5289,7 +5296,13 @@ input:focus, select:focus {
                         <tbody>
                         {{range .Agents}}
                         <tr>
-                            <td><span class="badge success"><span class="status-dot pulse"></span> 在线</span></td>
+                            <td id="agent-status-badge-{{.Name}}">
+                                {{if .IsOnline}}
+                                <span class="badge success"><span class="status-dot pulse"></span> 在线</span>
+                                {{else}}
+                                <span class="badge" style="background:var(--input-bg);color:var(--text-sub)"><span class="status-dot"></span> 离线</span>
+                                {{end}}
+                            </td>
                             <td><div style="font-weight:600">{{.Name}}</div></td>
                             
                             <td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border);font-size:13px">{{if .Region}}{{.Region}}{{else}}🌍 --{{end}}</span></td>
@@ -6533,19 +6546,32 @@ input:focus, select:focus {
                     }
 
                     if(d.agents) d.agents.forEach(a => {
+                        // 新增：实时更新在线/离线徽章
+                        const badgeContainer = document.getElementById('agent-status-badge-'+a.name);
+                        if (badgeContainer) {
+                            if (a.is_online) {
+                                badgeContainer.innerHTML = '<span class="badge success"><span class="status-dot pulse"></span> 在线</span>';
+                            } else {
+                                badgeContainer.innerHTML = '<span class="badge" style="background:var(--input-bg);color:var(--text-sub)"><span class="status-dot"></span> 离线</span>';
+                            }
+                        }
+
                         const loadContainer = document.getElementById('sys-status-'+a.name);
                         if(loadContainer) {
                             let cpu=0, mem=0, dsk=0;
-                            let parts = a.sys_status.split('|');
-                            parts.forEach(p => {
-                                let kv = p.split(':');
-                                if(kv.length === 2) {
-                                    let val = parseFloat(kv[1]) || 0;
-                                    if(kv[0]==='CPU') cpu = val;
-                                    if(kv[0]==='MEM') mem = val;
-                                    if(kv[0]==='DSK') dsk = val;
-                                }
-                            });
+                            // 仅在节点在线且有状态数据时解析，否则保持为 0
+                            if (a.is_online && a.sys_status) {
+                                let parts = a.sys_status.split('|');
+                                parts.forEach(p => {
+                                    let kv = p.split(':');
+                                    if(kv.length === 2) {
+                                        let val = parseFloat(kv[1]) || 0;
+                                        if(kv[0]==='CPU') cpu = val;
+                                        if(kv[0]==='MEM') mem = val;
+                                        if(kv[0]==='DSK') dsk = val;
+                                    }
+                                });
+                            }
                             
                             const setBar = (type, val, dangerColor, safeColor) => {
                                 const elVal = document.getElementById(type+'-val-'+a.name);
@@ -6553,7 +6579,8 @@ input:focus, select:focus {
                                 if(elVal && elBar) {
                                     elVal.innerText = val.toFixed(1)+'%';
                                     elBar.style.width = val+'%';
-                                    elBar.style.background = val>80 ? dangerColor : safeColor;
+                                    // 如果离线则显示灰色，否则按数值显示颜色
+                                    elBar.style.background = !a.is_online ? '#64748b' : (val>80 ? dangerColor : safeColor);
                                 }
                             };
                             
