@@ -162,7 +162,7 @@ IP 连接限制：为了防止中间人攻击，如果您生成的 Agent 命令�
 <img width="1521" height="1115" alt="cadbe6e7-80c3-492e-ad06-ea30f2e17118" src="https://github.com/user-attachments/assets/25248c27-a4dc-4700-89e5-44ac50e2551e" />
 
 
-<img width="1527" height="1121" alt="811ab725-4264-4a31-88fe-94f03904277a" src="https://github.com/user-attachments/assets/b4bf7536-db57-4378-b1ba-ed677e78c048" />
+<img width="1583" height="1178" alt="329d2333-3acb-4924-8407-1d30f0930ab8" src="https://github.com/user-attachments/assets/507cab32-c548-464e-9f85-4ac37f4d51b3" />
 
 
 <img width="1525" height="1115" alt="aa24c8c5-8446-428f-aeab-1d9cf758f460" src="https://github.com/user-attachments/assets/48f4e8fb-2b2d-422c-ac07-b79a2b689f23" />
