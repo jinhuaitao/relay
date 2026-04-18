@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.2"
+	AppVersion      = "v3.2.3"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -116,6 +116,7 @@ type AppConfig struct {
 	WebPass            string            `json:"web_pass"`
 	AgentToken         string            `json:"agent_token"`
 	AgentTokens        map[string]string `json:"agent_tokens"`
+	AgentAddTimes      map[string]int64  `json:"agent_add_times"`
 	AgentPorts         string            `json:"agent_ports"`
 	MasterDomain       string            `json:"master_domain"`
 	PanelDomain        string            `json:"panel_domain"`
@@ -1099,7 +1100,12 @@ func startTgBotLoop() {
 						sortedAgents = append(sortedAgents, a)
 					}
 					sort.Slice(sortedAgents, func(i, j int) bool {
-						return sortedAgents[i].ConnectedAt.Before(sortedAgents[j].ConnectedAt)
+						t1 := config.AgentAddTimes[sortedAgents[i].Name]
+						t2 := config.AgentAddTimes[sortedAgents[j].Name]
+						if t1 == t2 {
+							return sortedAgents[i].Name < sortedAgents[j].Name
+						}
+						return t1 < t2
 					})
 
 					// 将原来的 for _, a := range agents 改为遍历 sortedAgents
@@ -1553,10 +1559,14 @@ func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 	if config.AgentTokens == nil {
 		config.AgentTokens = make(map[string]string)
 	}
+	if config.AgentAddTimes == nil {
+		config.AgentAddTimes = make(map[string]int64)
+	}
 	tk, exists := config.AgentTokens[name]
 	if !exists {
 		tk = generateUUID()
 		config.AgentTokens[name] = tk
+		config.AgentAddTimes[name] = time.Now().Unix() // 记录永久添加时间
 		saveConfigNoLock()
 	}
 	mu.Unlock()
@@ -1599,7 +1609,12 @@ func broadcastLoop() {
 			agentList = append(agentList, a)
 		}
 		sort.Slice(agentList, func(i, j int) bool {
-			return agentList[i].ConnectedAt.Before(agentList[j].ConnectedAt)
+			t1 := config.AgentAddTimes[agentList[i].Name]
+			t2 := config.AgentAddTimes[agentList[j].Name]
+			if t1 == t2 {
+				return agentList[i].Name < agentList[j].Name
+			}
+			return t1 < t2
 		})
 		for _, a := range agentList {
 			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus, IsOnline: a.IsOnline})
@@ -1970,7 +1985,12 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		al = append(al, *a)
 	}
 	sort.Slice(al, func(i, j int) bool {
-		return al[i].ConnectedAt.Before(al[j].ConnectedAt)
+		t1 := config.AgentAddTimes[al[i].Name]
+		t2 := config.AgentAddTimes[al[j].Name]
+		if t1 == t2 {
+			return al[i].Name < al[j].Name // 时间相同的老节点按名称字母排序
+		}
+		return t1 < t2
 	})
 	var totalTraffic int64
 	for _, r := range rules {
@@ -3414,6 +3434,8 @@ func loadConfig() {
 				config.AgentToken = v
 			case "agent_tokens":
 				json.Unmarshal([]byte(v), &config.AgentTokens)
+			case "agent_add_times":
+				json.Unmarshal([]byte(v), &config.AgentAddTimes)
 			case "agent_ports":
 				config.AgentPorts = v
 			case "master_domain":
@@ -3493,6 +3515,10 @@ func saveConfigNoLock() {
 	if conf.AgentTokens != nil {
 		b, _ := json.Marshal(conf.AgentTokens)
 		setS("agent_tokens", string(b))
+	}
+	if conf.AgentAddTimes != nil {
+		b, _ := json.Marshal(conf.AgentAddTimes)
+		setS("agent_add_times", string(b))
 	}
 	setS("agent_ports", conf.AgentPorts)
 	setS("master_domain", conf.MasterDomain)
