@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.1"
+	AppVersion      = "v3.2.2"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1807,6 +1807,8 @@ func handleAgentConn(conn net.Conn) {
 		curr.IsOnline = false  // <--- 修改这里：不删除，仅标记离线
 		mu.Unlock()
 		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", name))
+		// === 新增：将节点下线事件写入系统日志 ===
+		addSystemLog(remoteIP, "Agent 下线", fmt.Sprintf("节点 %s 已断开连接", name))
 	} else {
 		mu.Unlock()
 	}
