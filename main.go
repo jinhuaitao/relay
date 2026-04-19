@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.7"
+	AppVersion      = "v3.2.8"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2478,12 +2478,15 @@ func handlePingRule(w http.ResponseWriter, r *http.Request) {
 
 	mu.Lock()
 	var agentName string
-	for _, rule := range rules {
-		if rule.ID == id {
+	// 这里将原来的 for _, rule := range rules 替换为 i := range rules 以便修改内存
+	for i := range rules {
+		if rules[i].ID == id {
 			if pingType == "bridge" {
-				agentName = rule.EntryAgent
+				agentName = rules[i].EntryAgent
+				rules[i].BridgeLatency = -1 // === 新增：强制将旧数据设为 -1 (测速中状态) ===
 			} else {
-				agentName = rule.ExitAgent
+				agentName = rules[i].ExitAgent
+				rules[i].TargetLatency = -1 // === 新增：强制将旧数据设为 -1 (测速中状态) ===
 			}
 			break
 		}
@@ -6714,8 +6717,13 @@ input:focus, select:focus {
                             const lat = document.getElementById('rule-latency-'+r.id);
                             if (lat) {
                                 if (r.status) { 
-                                    let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
-                                    lat.innerHTML = '<i class="ri-pulse-line" style="color:'+latColor+'"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
+                                    if (r.latency === -1) {
+                                        // 收到 -1 代表正在真实测速中
+                                        lat.innerHTML = '<i class="ri-loader-4-line ri-spin" style="color:var(--text-sub)"></i> <span style="color:var(--text-sub)">测速中...</span>';
+                                    } else {
+                                        let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
+                                        lat.innerHTML = '<i class="ri-pulse-line" style="color:'+latColor+'"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
+                                    }
                                 } else { 
                                     lat.innerHTML = '<i class="ri-alert-line"></i> <span style="color:#ef4444">检测失败</span>'; 
                                 }
@@ -6736,9 +6744,11 @@ input:focus, select:focus {
                             // --- 新增：实时更新桥接延迟 ---
                             const bLat = document.getElementById('rule-bridge-lat-'+r.id);
                             if(bLat) {
-                                if (r.bridge_latency >= 0) {
+                                if (r.bridge_latency === -1) {
+                                    // 收到 -1 代表后端正在真实测速，保持转圈
+                                    bLat.innerHTML = '<i class="ri-loader-4-line ri-spin" style="color:var(--text-sub)"></i>';
+                                } else if (r.bridge_latency >= 0) {
                                     bLat.innerText = r.bridge_latency + 'ms';
-                                    // 智能固定变色：>300ms红色，>150ms橙色，健康状态固定绿色
                                     if (r.bridge_latency > 300) {
                                         bLat.style.color = '#ef4444'; 
                                     } else if (r.bridge_latency > 150) {
