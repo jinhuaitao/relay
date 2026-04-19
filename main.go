@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.8"
+	AppVersion      = "v3.2.6"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1463,7 +1463,6 @@ func runMaster() {
 	http.HandleFunc("/edit", authMiddleware(handleEditRule))
 	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
 	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
-	http.HandleFunc("/ping_rule", authMiddleware(handlePingRule))
 	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
 	http.HandleFunc("/batch", authMiddleware(handleBatchRule))
 	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
@@ -2472,37 +2471,6 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
-func handlePingRule(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	pingType := r.URL.Query().Get("type")
-
-	mu.Lock()
-	var agentName string
-	// 这里将原来的 for _, rule := range rules 替换为 i := range rules 以便修改内存
-	for i := range rules {
-		if rules[i].ID == id {
-			if pingType == "bridge" {
-				agentName = rules[i].EntryAgent
-				rules[i].BridgeLatency = -1 // === 新增：强制将旧数据设为 -1 (测速中状态) ===
-			} else {
-				agentName = rules[i].ExitAgent
-				rules[i].TargetLatency = -1 // === 新增：强制将旧数据设为 -1 (测速中状态) ===
-			}
-			break
-		}
-	}
-	var conn net.Conn
-	if a, ok := agents[agentName]; ok {
-		conn = a.Conn
-	}
-	mu.Unlock()
-
-	if conn != nil {
-		json.NewEncoder(conn).Encode(Message{Type: "force_ping"})
-	}
-	w.Write([]byte("ok"))
-}
-
 func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	mu.Lock()
@@ -2953,7 +2921,7 @@ func runAgent(name, masterAddr, token string) {
 		stop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(1 * time.Second)
-			h := time.NewTicker(60 * time.Second)
+			h := time.NewTicker(20 * time.Second)
 			defer t.Stop()
 			defer h.Stop()
 			for {
@@ -3003,9 +2971,6 @@ func runAgent(name, masterAddr, token string) {
 				} else {
 					log.Printf("更新失败: %v", err)
 				}
-				if msg.Type == "force_ping" {
-				go checkTargetHealth(conn)
-			    }
 			}
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
@@ -5367,7 +5332,7 @@ input:focus, select:focus {
                                         <i class="ri-server-line"></i> {{.EntryAgent}}:{{.EntryPort}}
                                     </span> 
                                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:36px">
-                                        <span id="rule-bridge-lat-{{.ID}}" style="font-size:10px;transform:scale(0.85);color:#10b981;font-family:var(--font-mono);margin-bottom:-2px;cursor:pointer" onclick="forcePing('{{.ID}}', 'bridge')" title="点击立即测速">{{if and (ne .BridgeLatency 0) (ge .BridgeLatency 0)}}{{.BridgeLatency}}ms{{else}}-{{end}}</span>
+                                        <span id="rule-bridge-lat-{{.ID}}" style="font-size:10px;transform:scale(0.85);color:#10b981;font-family:var(--font-mono);margin-bottom:-2px">{{if and (ne .BridgeLatency 0) (ge .BridgeLatency 0)}}{{.BridgeLatency}}ms{{else}}-{{end}}</span>
                                         <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
                                     </div> 
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)" title="出口节点: {{.ExitAgent}}">{{.ExitAgent}}</span>
@@ -5375,7 +5340,7 @@ input:focus, select:focus {
                             </td>
                             <td>
                                 <div style="font-family:var(--font-mono);font-size:13px">{{.TargetIP}}:{{.TargetPort}}</div>
-                                <div style="font-size:12px;margin-top:4px;display:flex;align-items:center;gap:5px;color:var(--text-sub);cursor:pointer" id="rule-latency-{{.ID}}" onclick="forcePing('{{.ID}}', 'target')" title="点击立即测速"><i class="ri-loader-4-line ri-spin"></i> 检测中...</div>
+                                <div style="font-size:12px;margin-top:4px;display:flex;align-items:center;gap:5px;color:var(--text-sub)" id="rule-latency-{{.ID}}"><i class="ri-loader-4-line ri-spin"></i> 检测中...</div>
                                 <div style="font-size:11px;color:var(--accent);margin-top:4px;opacity:0.9"><i class="ri-guide-line"></i> {{if eq .LBStrategy "rr"}}轮询{{else if eq .LBStrategy "least_conn"}}最少连接{{else if eq .LBStrategy "fastest"}}最低延迟{{else}}随机负载{{end}}</div>
                             </td>
                             <td style="min-width:180px">
@@ -6625,17 +6590,6 @@ input:focus, select:focus {
             });
     }
 
-	function forcePing(id, type) {
-        const el = type === 'bridge' ? document.getElementById('rule-bridge-lat-'+id) : document.getElementById('rule-latency-'+id);
-        if(el) {
-            // 点击瞬间变灰并转圈圈
-            el.innerHTML = '<i class="ri-loader-4-line ri-spin"></i>';
-            el.style.color = 'var(--text-sub)';
-        }
-        // 发送给后端，测速完成后 WebSocket 会自动覆盖上面的转圈动画
-        fetch('/ping_rule?id=' + id + '&type=' + type).catch(()=>{});
-    }
-
     function connectWS() {
         const ws = new WebSocket((location.protocol==='https:'?'wss:':'ws:') + '//' + location.host + '/ws');
         ws.onmessage = function(e) {
@@ -6717,13 +6671,8 @@ input:focus, select:focus {
                             const lat = document.getElementById('rule-latency-'+r.id);
                             if (lat) {
                                 if (r.status) { 
-                                    if (r.latency === -1) {
-                                        // 收到 -1 代表正在真实测速中
-                                        lat.innerHTML = '<i class="ri-loader-4-line ri-spin" style="color:var(--text-sub)"></i> <span style="color:var(--text-sub)">测速中...</span>';
-                                    } else {
-                                        let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
-                                        lat.innerHTML = '<i class="ri-pulse-line" style="color:'+latColor+'"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
-                                    }
+                                    let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
+                                    lat.innerHTML = '<i class="ri-pulse-line" style="color:'+latColor+'"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
                                 } else { 
                                     lat.innerHTML = '<i class="ri-alert-line"></i> <span style="color:#ef4444">检测失败</span>'; 
                                 }
@@ -6744,11 +6693,9 @@ input:focus, select:focus {
                             // --- 新增：实时更新桥接延迟 ---
                             const bLat = document.getElementById('rule-bridge-lat-'+r.id);
                             if(bLat) {
-                                if (r.bridge_latency === -1) {
-                                    // 收到 -1 代表后端正在真实测速，保持转圈
-                                    bLat.innerHTML = '<i class="ri-loader-4-line ri-spin" style="color:var(--text-sub)"></i>';
-                                } else if (r.bridge_latency >= 0) {
+                                if (r.bridge_latency >= 0) {
                                     bLat.innerText = r.bridge_latency + 'ms';
+                                    // 智能固定变色：>300ms红色，>150ms橙色，健康状态固定绿色
                                     if (r.bridge_latency > 300) {
                                         bLat.style.color = '#ef4444'; 
                                     } else if (r.bridge_latency > 150) {
