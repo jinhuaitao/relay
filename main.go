@@ -6669,19 +6669,24 @@ input:focus, select:focus {
                             const traf = document.getElementById('rule-traffic-'+r.id); if(traf) traf.innerText = formatBytes(r.total);
                             const uc = document.getElementById('rule-uc-'+r.id); if(uc) uc.innerText = r.uc;
                             const lat = document.getElementById('rule-latency-'+r.id);
-                            const dot = document.getElementById('rule-status-dot-'+r.id);
-                            if(lat && dot) {
-                                if(r.status) { 
-                                    // 延迟大于 150ms 变橙黄色，否则保持原版的翡翠绿
+                            if (lat) {
+                                if (r.status) { 
                                     let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
-                                    lat.innerHTML = '<span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
-                                    
-                                    dot.parentElement.className = 'badge success'; 
-                                    dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中'; 
+                                    lat.innerHTML = '<i class="ri-pulse-line" style="color:'+latColor+'"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
                                 } else { 
-                                    lat.innerHTML = '<span style="color:#ef4444">离线</span>'; 
+                                    lat.innerHTML = '<i class="ri-alert-line"></i> <span style="color:#ef4444">检测失败</span>'; 
+                                }
+                            }
+
+                            const dot = document.getElementById('rule-status-dot-'+r.id);
+                            if (dot) {
+                                if (r.status) { 
+                                    dot.parentElement.className = 'badge success'; 
+                                    // 重点修复：把 id 补回来，防止下一秒找不到元素
+                                    dot.parentElement.innerHTML = '<span class="status-dot pulse" id="rule-status-dot-'+r.id+'"></span> 运行中'; 
+                                } else { 
                                     dot.parentElement.className = 'badge danger'; 
-                                    dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常'; 
+                                    dot.parentElement.innerHTML = '<span class="status-dot" id="rule-status-dot-'+r.id+'"></span> 异常'; 
                                 }
                             }
                             
