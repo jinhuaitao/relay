@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.3"
+	AppVersion      = "v3.2.4"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -95,6 +95,7 @@ type LogicalRule struct {
 	Alert80  bool `json:"alert_80"`
 	Alert95  bool `json:"alert_95"`
 	Alert100 bool `json:"alert_100"`
+	BridgeLatency int64 `json:"-"`
 	EntryIP string `json:"-"`
 }
 
@@ -216,6 +217,7 @@ type RuleStatusData struct {
 	Limit     int64  `json:"limit"`
 	Status    bool   `json:"status"`
 	Latency   int64  `json:"latency"`
+	BridgeLatency int64 `json:"bridge_latency"`
 }
 
 var (
@@ -1634,6 +1636,7 @@ func broadcastLoop() {
 				Limit:     r.TrafficLimit,
 				Status:    r.TargetStatus,
 				Latency:   r.TargetLatency,
+				BridgeLatency: r.BridgeLatency,
 			})
 		}
 		mu.Unlock()
@@ -1892,6 +1895,14 @@ func handleHealthReport(payload interface{}) {
 				if rules[i].ID == rid {
 					rules[i].TargetStatus = (rep.Latency >= 0)
 					rules[i].TargetLatency = rep.Latency
+					break
+				}
+			}
+		} else if strings.HasSuffix(rep.TaskID, "_entry") { // --- 新增：截获入口到出口的延迟 ---
+			rid := strings.TrimSuffix(rep.TaskID, "_entry")
+			for i := range rules {
+				if rules[i].ID == rid {
+					rules[i].BridgeLatency = rep.Latency
 					break
 				}
 			}
@@ -5320,7 +5331,10 @@ input:focus, select:focus {
                                           title="点击切换显示 IP/节点名">
                                         <i class="ri-server-line"></i> {{.EntryAgent}}:{{.EntryPort}}
                                     </span> 
-                                    <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
+                                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:36px">
+                                        <span id="rule-bridge-lat-{{.ID}}" style="font-size:10px;transform:scale(0.85);color:var(--primary);font-family:var(--font-mono);margin-bottom:-2px">{{if and (ne .BridgeLatency 0) (ge .BridgeLatency 0)}}{{.BridgeLatency}}ms{{else}}-{{end}}</span>
+                                        <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
+                                    </div> 
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)" title="出口节点: {{.ExitAgent}}">{{.ExitAgent}}</span>
                                 </div>
                             </td>
@@ -6660,6 +6674,21 @@ input:focus, select:focus {
                                 if(r.status) { lat.innerHTML = '<span style="color:#10b981;font-weight:600">'+r.latency+' ms</span>'; dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中'; } 
                                 else { lat.innerHTML = '<span style="color:#ef4444">离线</span>'; dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常'; }
                             }
+                            
+                            // --- 新增：实时更新桥接延迟 ---
+                            const bLat = document.getElementById('rule-bridge-lat-'+r.id);
+                            if(bLat) {
+                                if (r.bridge_latency >= 0) {
+                                    bLat.innerText = r.bridge_latency + 'ms';
+                                    // 延迟>150ms显示黄色，否则绿色
+                                    bLat.style.color = r.bridge_latency > 150 ? '#f59e0b' : 'var(--primary)'; 
+                                } else {
+                                    bLat.innerText = '-';
+                                    bLat.style.color = 'var(--text-sub)';
+                                }
+                            }
+                            // -----------------------------
+
                             if(r.limit > 0) {
                                 let pct = (r.total / r.limit) * 100; if(pct > 100) pct = 100;
                                 const bar = document.getElementById('rule-bar-'+r.id);
