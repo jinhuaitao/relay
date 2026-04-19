@@ -33,7 +33,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-    "context" // 如果原先没有，请加上
+    "context" 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.4"
+	AppVersion      = "v3.2.5"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -6671,8 +6671,18 @@ input:focus, select:focus {
                             const lat = document.getElementById('rule-latency-'+r.id);
                             const dot = document.getElementById('rule-status-dot-'+r.id);
                             if(lat && dot) {
-                                if(r.status) { lat.innerHTML = '<span style="color:#10b981;font-weight:600">'+r.latency+' ms</span>'; dot.parentElement.className = 'badge success'; dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中'; } 
-                                else { lat.innerHTML = '<span style="color:#ef4444">离线</span>'; dot.parentElement.className = 'badge danger'; dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常'; }
+                                if(r.status) { 
+                                    // 延迟大于 150ms 变橙黄色，否则保持原版的翡翠绿
+                                    let latColor = r.latency > 150 ? '#f59e0b' : '#10b981';
+                                    lat.innerHTML = '<span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
+                                    
+                                    dot.parentElement.className = 'badge success'; 
+                                    dot.parentElement.innerHTML = '<span class="status-dot pulse"></span> 运行中'; 
+                                } else { 
+                                    lat.innerHTML = '<span style="color:#ef4444">离线</span>'; 
+                                    dot.parentElement.className = 'badge danger'; 
+                                    dot.parentElement.innerHTML = '<span class="status-dot"></span> 异常'; 
+                                }
                             }
                             
                             // --- 新增：实时更新桥接延迟 ---
