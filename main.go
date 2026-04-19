@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.5"
+	AppVersion      = "v3.2.4"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -2921,7 +2921,7 @@ func runAgent(name, masterAddr, token string) {
 		stop := make(chan struct{})
 		go func() {
 			t := time.NewTicker(1 * time.Second)
-			h := time.NewTicker(10 * time.Second)
+			h := time.NewTicker(20 * time.Second)
 			defer t.Stop()
 			defer h.Stop()
 			for {
