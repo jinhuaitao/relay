@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.5"
+	AppVersion      = "v3.2.6"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5332,7 +5332,7 @@ input:focus, select:focus {
                                         <i class="ri-server-line"></i> {{.EntryAgent}}:{{.EntryPort}}
                                     </span> 
                                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:36px">
-                                        <span id="rule-bridge-lat-{{.ID}}" style="font-size:10px;transform:scale(0.85);color:var(--primary);font-family:var(--font-mono);margin-bottom:-2px">{{if and (ne .BridgeLatency 0) (ge .BridgeLatency 0)}}{{.BridgeLatency}}ms{{else}}-{{end}}</span>
+                                        <span id="rule-bridge-lat-{{.ID}}" style="font-size:10px;transform:scale(0.85);color:#10b981;font-family:var(--font-mono);margin-bottom:-2px">{{if and (ne .BridgeLatency 0) (ge .BridgeLatency 0)}}{{.BridgeLatency}}ms{{else}}-{{end}}</span>
                                         <i class="ri-arrow-right-line" style="color:var(--text-sub);font-size:12px"></i> 
                                     </div> 
                                     <span class="badge" style="background:var(--input-bg);color:var(--text-sub);border:1px solid var(--border)" title="出口节点: {{.ExitAgent}}">{{.ExitAgent}}</span>
@@ -6695,8 +6695,14 @@ input:focus, select:focus {
                             if(bLat) {
                                 if (r.bridge_latency >= 0) {
                                     bLat.innerText = r.bridge_latency + 'ms';
-                                    // 延迟>150ms显示黄色，否则绿色
-                                    bLat.style.color = r.bridge_latency > 150 ? '#f59e0b' : 'var(--primary)'; 
+                                    // 智能固定变色：>300ms红色，>150ms橙色，健康状态固定绿色
+                                    if (r.bridge_latency > 300) {
+                                        bLat.style.color = '#ef4444'; 
+                                    } else if (r.bridge_latency > 150) {
+                                        bLat.style.color = '#f59e0b';
+                                    } else {
+                                        bLat.style.color = '#10b981';
+                                    }
                                 } else {
                                     bLat.innerText = '-';
                                     bLat.style.color = 'var(--text-sub)';
