@@ -323,7 +323,7 @@ func initDB() {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
 }
 
-// --- 基础工具函数 ---
+// -- 基础工具函数 --
 
 func generateUUID() string {
 	b := make([]byte, 16)
