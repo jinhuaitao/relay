@@ -1,4 +1,4 @@
-# 🌐 GoRelay Pro
+# [🌐 GoRelay Pro](https://gorelay.888021.xyz)
 
 ![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)
