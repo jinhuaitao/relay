@@ -293,6 +293,18 @@ tail -n 50 /var/log/relay.log
 
 ---
 
+## 💖 赞助支持
+
+<p align="center">
+  <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay">
+    <img src="https://img.shields.io/badge/💖_赞助支持-ForZTN-e74c3c?style=for-the-badge" alt="Sponsor"/>
+  </a>
+</p>
+
+> 如果本项目对您有帮助，欢迎通过 [ForZTN 赞助平台](https://sponsorship.forztn.com/github/jinhuaitao/relay) 支持开发者持续维护！
+
+
+
 <div align="center">
   <h3>💖 鸣谢赞助商 / ForZTN </h3>
   <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank">
