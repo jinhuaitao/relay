@@ -295,6 +295,12 @@ tail -n 50 /var/log/relay.log
 
 💖 [感谢赞助商 - ForZTN](https://sponsorship.forztn.com/github/jinhuaitao/relay)
 
+<div align="center">
+  <h3>💖 鸣谢赞助商 / ForZTN </h3>
+  <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank">
+    <img src="https://img.shields.io/badge/Sponsor-forztn-blue?style=for-the-badge&logo=github" alt="Sponsor" />
+  </a>
+</div>
 
 ## 📄 开源协议
 
