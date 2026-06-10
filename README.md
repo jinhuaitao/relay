@@ -312,6 +312,19 @@ tail -n 50 /var/log/relay.log
   </a>
 </div>
 
+
+<div align="center">
+  <br />
+  <h3>💖 鸣谢赞助商 / Sponsors</h3>
+  <br />
+  <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank">
+    <img src="https://path-to-your-hosted-image/sponsor_card.png" alt="Forztn Relay Sponsor Card" width="600px" style="border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: transform 0.3s ease-in-out;" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
+  </a>
+  <br />
+  <br />
+</div>
+
+
 ## 📄 开源协议
 
 本项目基于 [MIT](LICENSE) 协议开源。
