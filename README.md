@@ -293,6 +293,9 @@ tail -n 50 /var/log/relay.log
 
 ---
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-forztn-blue.svg?logo=github)](https://sponsorship.forztn.com/github/jinhuaitao/relay)
+
+
 ## 📄 开源协议
 
 本项目基于 [MIT](LICENSE) 协议开源。
