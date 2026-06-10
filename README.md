@@ -293,7 +293,7 @@ tail -n 50 /var/log/relay.log
 
 ---
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-forztn-blue.svg?logo=github)](https://sponsorship.forztn.com/github/jinhuaitao/relay)
+💖 [感谢赞助商 - Sponsorship](https://sponsorship.forztn.com/github/jinhuaitao/relay)
 
 
 ## 📄 开源协议
