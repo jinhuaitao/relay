@@ -299,7 +299,7 @@ This project is open source under the [MIT](LICENSE) license.
 ---
 
 
-💖 [Thank you to our sponsors - Sponsorship](https://sponsorship.forztn.com/github/jinhuaitao/relay)
+💖 [Thank you to our sponsors - ForZTN](https://sponsorship.forztn.com/github/jinhuaitao/relay)
 
 <p align="center">
 <sub>Built with ❤️ by <a href="https://github.com/jinhuaitao">jinhuaitao</a></sub>
