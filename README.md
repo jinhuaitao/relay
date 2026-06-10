@@ -293,7 +293,7 @@ tail -n 50 /var/log/relay.log
 
 ---
 
-💖 [感谢赞助商 - Sponsorship](https://sponsorship.forztn.com/github/jinhuaitao/relay)
+💖 [感谢赞助商 - ForZTN](https://sponsorship.forztn.com/github/jinhuaitao/relay)
 
 
 ## 📄 开源协议
