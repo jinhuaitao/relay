@@ -306,8 +306,13 @@ This project is open source under the [MIT](LICENSE) license.
 </div>
 
 
+---
 
+## License
 
+This project is open-sourced under the [MIT](LICENSE) license.
+
+---
 <p align="center">
 <sub>Built with ❤️ by <a href="https://github.com/jinhuaitao">jinhuaitao</a></sub>
 </p>
