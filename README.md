@@ -311,7 +311,7 @@ tail -n 50 /var/log/relay.log
     <img src="https://img.shields.io/badge/Sponsor-forztn-blue?style=for-the-badge&logo=github" alt="Sponsor" />
   </a>
 </div>
-
+> 如果本项目对您有帮助，欢迎通过    [ForZTN 赞助平台](https://sponsorship.forztn.com/github/jinhuaitao/relay) 支持开发者持续维护！
 
 
 
