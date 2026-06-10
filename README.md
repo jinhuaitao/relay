@@ -301,7 +301,7 @@ tail -n 50 /var/log/relay.log
   </a>
 </p>
 
-> 如果本项目对您有帮助，欢迎通过 [ForZTN 赞助平台](https://sponsorship.forztn.com/github/jinhuaitao/relay) 支持开发者持续维护！
+> 如果本项目对您有帮助，欢迎通过    [ForZTN 赞助平台](https://sponsorship.forztn.com/github/jinhuaitao/relay) 支持开发者持续维护！
 
 
 
@@ -313,61 +313,6 @@ tail -n 50 /var/log/relay.log
 </div>
 
 
-## 💖 赞助支持
-
-<div align="center">
-
-  <div style="
-    display: inline-block;
-    padding: 20px;
-    background: #0f0f0f;
-    border-radius: 20px;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    border: 2px solid rgba(0, 180, 255, 0.5);
-    margin-bottom: 30px;
-    max-width: 650px;
-    width: 100%;
-  ">
-    <!-- 使用生成的图片作为卡片核心 -->
-    <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank" style="text-decoration: none;">
-      <img src="image_0.png" alt="Forztn Relay Sponsor Card" style="
-        border-radius: 12px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
-        max-width: 600px;
-        width: 100%;
-        transition: transform 0.3s ease-in-out, box-shadow 0.3s;
-      " onmouseover="this.style.transform='scale(1.02)'; this.style.boxShadow='0 10px 20px rgba(0,0,0,0.4)'" onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 4px 10px rgba(0,0,0,0.3)'">
-    </a>
-
-    <!-- 文字描述和按钮区域 -->
-    <div style="margin-top: 25px; text-align: left; padding: 0 15px;">
-      <p style="color: #cccccc; font-size: 1.1em; line-height: 1.6; margin-bottom: 20px;">
-        <span style="font-size: 1.3em;">💖</span> 如果本项目对您有帮助，欢迎通过 
-        <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank" style="color: #3498db; text-decoration: none; font-weight: bold;">
-          ForZTN 赞助平台
-        </a>
-         支持开发者持续维护！
-      </p>
-
-      <a href="https://sponsorship.forztn.com/github/jinhuaitao/relay" target="_blank" style="
-        display: inline-block;
-        padding: 12px 30px;
-        background: linear-gradient(135deg, #e74c3c, #c0392b);
-        color: #ffffff;
-        font-size: 1.1em;
-        font-weight: bold;
-        text-decoration: none;
-        border-radius: 30px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.3);
-        transition: all 0.3s;
-      " onmouseover="this.style.background='linear-gradient(135deg, #d35400, #b03a2e)'; this.style.transform='translateY(-2px)'" onmouseout="this.style.background='linear-gradient(135deg, #e74c3c, #c0392b)'; this.style.transform='translateY(0)'">
-        <span style="margin-right: 8px;">💸</span> 即刻赞助支持
-      </a>
-    </div>
-
-  </div>
-
-</div>
 
 
 
