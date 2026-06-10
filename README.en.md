@@ -292,11 +292,7 @@ Please keep the `data.db` database file and node credentials generated in the ba
 
 ---
 
-## 📄 License
 
-This project is open source under the [MIT](LICENSE) license.
-
----
 
 <div align="center">
   <h3>💖 Thank you to our sponsors / ForZTN </h3>
@@ -308,9 +304,9 @@ This project is open source under the [MIT](LICENSE) license.
 
 ---
 
-## License
+## 📄 License
 
-This project is open-sourced under the [MIT](LICENSE) license.
+This project is open source under the [MIT](LICENSE) license.
 
 ---
 <p align="center">
