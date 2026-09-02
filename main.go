@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.8"
+	AppVersion      = "v3.2.9"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1849,10 +1849,10 @@ func handleStatsReport(payload interface{}) {
 	var reports []TrafficReport
 	json.Unmarshal(d, &reports)
 
-	mu.Lock()
-	defer mu.Unlock()
+	var alertMsgs []string
 	limitTriggered := false
 
+	mu.Lock()
 	// 构建 O(1) 快速索引映射，消除 O(N*M) 的双层嵌套遍历
 	ruleIndex := make(map[string]int, len(rules))
 	for i := range rules {
@@ -1880,19 +1880,25 @@ func handleStatsReport(payload interface{}) {
 					pct := float64(total) / float64(limit)
 					if pct >= 1.0 && !rules[i].Alert100 {
 						rules[i].Alert100 = true
-						sendTelegram(fmt.Sprintf("🚨 <b>流量耗尽熔断</b>\n\n规则：【%s】\n状态：已切断连接\n说明：流量达到 100%%，该端口已自动熔断！", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("🚨 <b>流量耗尽熔断</b>\n\n规则：【%s】\n状态：已切断连接\n说明：流量达到 100%%，该端口已自动熔断！", rules[i].Note))
 						limitTriggered = true
 					} else if pct >= 0.95 && pct < 1.0 && !rules[i].Alert95 {
 						rules[i].Alert95 = true
-						sendTelegram(fmt.Sprintf("⚠️ <b>流量极高预警</b>\n\n规则：【%s】\n状态：即将熔断\n说明：流量已使用超过 95%%！", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("⚠️ <b>流量极高预警</b>\n\n规则：【%s】\n状态：即将熔断\n说明：流量已使用超过 95%%！", rules[i].Note))
 					} else if pct >= 0.80 && pct < 0.95 && !rules[i].Alert80 {
 						rules[i].Alert80 = true
-						sendTelegram(fmt.Sprintf("🔔 <b>流量使用预警</b>\n\n规则：【%s】\n状态：运行中\n说明：流量已使用超过 80%%。", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("🔔 <b>流量使用预警</b>\n\n规则：【%s】\n状态：运行中\n说明：流量已使用超过 80%%。", rules[i].Note))
 					}
 				}
 				// --- 智能预警机制结束 ---
 			}
 		}
+	}
+	mu.Unlock()
+
+	// 锁外发送预警消息，避免死锁
+	for _, msg := range alertMsgs {
+		sendTelegram(msg)
 	}
 	if limitTriggered {
 		go pushConfigToAll()
