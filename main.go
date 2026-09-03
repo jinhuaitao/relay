@@ -48,24 +48,16 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.0"
+	AppVersion      = "v3.3.1"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest"
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
-	CopyBufferSize  = 32 * 1024
 	MaxLogEntries   = 200
 	MaxLogRetention = 1000
 )
-
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		b := make([]byte, CopyBufferSize)
-		return &b
-	},
-}
 
 // --- 数据结构 ---
 
@@ -222,6 +214,7 @@ type RuleStatusData struct {
 }
 
 var (
+	dbMu             sync.RWMutex
 	db               *sql.DB
 	config           AppConfig
 	agents           = make(map[string]*AgentInfo)
@@ -302,11 +295,11 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 );
 `
 
-func initDB() {
+func initDB() error {
 	var err error
 	db, err = sql.Open("sqlite", DBFile)
 	if err != nil {
-		log.Fatalf("❌ 无法打开数据库文件: %v", err)
+		return fmt.Errorf("❌ 无法打开数据库文件: %v", err)
 	}
 
 	db.SetMaxOpenConns(1)
@@ -316,7 +309,7 @@ func initDB() {
 	db.Exec("PRAGMA synchronous = NORMAL;")
 
 	if _, err := db.Exec(dbSchema); err != nil {
-		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
+		return fmt.Errorf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
@@ -324,6 +317,7 @@ func initDB() {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
+	return nil
 }
 
 // -- 基础工具函数 --
@@ -445,7 +439,9 @@ func main() {
 	setupSignalHandler()
 
 	if *mode == "master" {
-		initDB()
+		if err := initDB(); err != nil {
+			log.Fatal(err)
+		}
 		loadConfig()
 		runMaster()
 	} else if *mode == "agent" {
@@ -1291,6 +1287,12 @@ func sessionCleanupLoop() {
 				delete(sessions, k)
 			}
 		}
+		// 顺带清理过期的 GitHub OAuth state，防止 map 无限增长
+		for k, exp := range oauthStates {
+			if now.After(exp) {
+				delete(oauthStates, k)
+			}
+		}
 		mu.Unlock()
 	}
 }
@@ -1376,9 +1378,11 @@ func runMaster() {
 			}
 			cleanOldLogs()
 			flushDailyStats()
+			dbMu.RLock()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
+			dbMu.RUnlock()
 		}
 	}()
 	go broadcastLoop()
@@ -1549,6 +1553,8 @@ func runMaster() {
 
 // 每日流量统计定期刷盘
 func flushDailyStats() {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 	if db == nil {
 		return
 	}
@@ -1659,6 +1665,7 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
+		dbMu.RLock()
 		if db != nil {
 			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
 			if err == nil {
@@ -1670,6 +1677,7 @@ func broadcastLoop() {
 				lRows.Close()
 			}
 		}
+		dbMu.RUnlock()
 
 		var speedTx int64 = 0
 		var speedRx int64 = 0
@@ -1835,6 +1843,7 @@ func handleAgentConn(conn net.Conn) {
 	pushConfigToAll()
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var m Message
 		if dec.Decode(&m) != nil {
 			break
@@ -1848,7 +1857,7 @@ func handleAgentConn(conn net.Conn) {
 		if m.Type == "ping" {
 			if status, ok := m.Payload.(string); ok {
 				mu.Lock()
-				if agent, exists := agents[name]; exists {
+				if agent, exists := agents[name]; exists && agent.Conn == conn {
 					agent.SysStatus = status
 				}
 				mu.Unlock()
@@ -2728,6 +2737,7 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 1. 获取锁，安全地清理旧数据库连接
 	mu.Lock()
+	dbMu.Lock() // 阻止其他 goroutine 并发读写 db
 
 	if db != nil {
 		db.Close()
@@ -2739,22 +2749,45 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
+		dbMu.Unlock()
 		mu.Unlock() // 发生错误必须解锁
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
 
 	// 2. 覆盖写入新数据
-	io.Copy(out, file)
+	if _, err := io.Copy(out, file); err != nil {
+		out.Close()
+		dbMu.Unlock()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "写入数据失败"})
+		return
+	}
 	out.Close() // 必须显式关闭文件句柄
 
 	// 3. 重新初始化数据库连接
-	initDB()
-	
+	if err := initDB(); err != nil {
+		log.Printf("恢复数据库初始化失败: %v，尝试保留原始连接", err)
+		// 重新打开原数据库，尽量恢复服务
+		if rerr := initDB(); rerr != nil {
+			db = nil
+			log.Printf("恢复原始数据库也失败: %v", rerr)
+		}
+		dbMu.Unlock()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "数据库初始化失败"})
+		return
+	}
+	dbMu.Unlock()
+
 	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
 	mu.Unlock()
 
 	// 5. 将新数据库中的配置重新加载到内存中
+	if db == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "数据库不可用"})
+		return
+	}
 	loadConfig()
 
 	// 获取恢复后的新面板域名
@@ -3436,8 +3469,8 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx, limit)
-	copyCount(src, dst, &cnt.Rx, limit)
+	go copyCountBuf(dst, src, &cnt.Tx, limit, make([]byte, 32*1024))
+	copyCountBuf(src, dst, &cnt.Rx, limit, make([]byte, 32*1024))
 }
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
@@ -3461,9 +3494,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
+	buf := make([]byte, UDPBufferSize)
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -3502,9 +3533,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				bPtr := bufPool.Get().(*[]byte)
-				defer bufPool.Put(bPtr)
-				b := *bPtr
+				b := make([]byte, UDPBufferSize)
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
@@ -3523,11 +3552,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 }
 
-func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
-
+func copyCountBuf(dst io.Writer, src io.Reader, c *int64, limit int64, buf []byte) {
 	// 初始化官方令牌桶限速器
 	var limiter *rate.Limiter
 	if limit > 0 {
@@ -3560,6 +3585,9 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 func loadConfig() {
 	mu.Lock()
 	defer mu.Unlock()
+	if db == nil {
+		return
+	}
 	rows, err := db.Query("SELECT key, value FROM settings")
 	if err == nil {
 		defer rows.Close()
@@ -3694,6 +3722,8 @@ func saveConfigNoLock() {
 }
 
 func cleanOldLogs() {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 	if db == nil {
 		return
 	}
