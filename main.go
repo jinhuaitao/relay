@@ -2857,7 +2857,7 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	mu.Lock()
 	delete(agents, name)
-	delete(agentSendMu, name)
+	agentSendMu.Delete(name)
 	mu.Unlock()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
