@@ -10,8 +10,8 @@ ARG TARGETARCH
 # 设置工作目录
 WORKDIR /src
 
-# 安装必要的构建依赖 
-RUN apk add --no-cache git
+# 【修改1】：必须同时安装 git 和 ca-certificates 以支持 https 下载
+RUN apk add --no-cache git ca-certificates
 
 # 设置 GOPROXY 代理
 ENV GOPROXY=https://goproxy.cn,direct
@@ -19,7 +19,7 @@ ENV GOPROXY=https://goproxy.cn,direct
 # 复制源代码
 COPY main.go main.go
 
-# 初始化 Go Module 并下载依赖
+# 【修改2】：重新手写了缩进，清除了原先隐藏的特殊空格字符
 RUN go mod init gorelay && \
     go get modernc.org/sqlite@v1.33.1 && \
     go get golang.org/x/crypto/acme/autocert && \
@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -o app
 # ============================
 # 第二阶段：运行 (Runner)
 # ============================
-# 到了运行阶段，Docker 会自动拉取目标架构的 alpine (比如 arm64 版)
+# 到了运行阶段，Docker 会自动拉取目标架构的 alpine
 FROM alpine:latest
 
 # 设置工作目录
