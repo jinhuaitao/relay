@@ -20,6 +20,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -48,7 +49,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.9"
+	AppVersion      = "v3.3.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -233,15 +234,32 @@ var (
 	agentUserCounts  sync.Map
 	targetHealthMap  sync.Map
 	sessions         = make(map[string]time.Time)
+	oauthStates      = make(map[string]time.Time)
+	oauthStateMu     sync.Mutex
 	configDirty      int32
 
 	rrCounters   sync.Map
 	connCounters sync.Map
 
+	agentSendMu sync.Map
+	agentConnMu sync.Mutex
+
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
 
-	wsUpgrader = websocket.Upgrader{}
+	wsUpgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			o, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			return strings.EqualFold(o.Host, r.Host)
+		},
+	}
 	wsClients  = make(map[*websocket.Conn]bool)
 	wsMu       sync.Mutex
 
@@ -299,28 +317,37 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 );
 `
 
+func openDB() (*sql.DB, error) {
+	d, err := sql.Open("sqlite", DBFile)
+	if err != nil {
+		return nil, err
+	}
+
+	d.SetMaxOpenConns(1)
+	d.Exec("PRAGMA journal_mode=WAL;")
+	d.Exec("PRAGMA journal_size_limit = 10485760;")
+	d.Exec("PRAGMA wal_autocheckpoint = 100;")
+	d.Exec("PRAGMA synchronous = NORMAL;")
+
+	if _, err := d.Exec(dbSchema); err != nil {
+		d.Close()
+		return nil, err
+	}
+
+	_, _ = d.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
+	_, _ = d.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
+	_, _ = d.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
+	_, _ = d.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
+	return d, nil
+}
+
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", DBFile)
+	db, err = openDB()
 	if err != nil {
 		log.Fatalf("❌ 无法打开数据库文件: %v", err)
 	}
-
-	db.SetMaxOpenConns(1)
-	db.Exec("PRAGMA journal_mode=WAL;")
-	db.Exec("PRAGMA journal_size_limit = 10485760;")
-	db.Exec("PRAGMA wal_autocheckpoint = 100;")
-	db.Exec("PRAGMA synchronous = NORMAL;")
-
-	if _, err := db.Exec(dbSchema); err != nil {
-		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
-	}
-
-	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
-	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN lb_strategy TEXT DEFAULT 'random'")
-	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
 }
 
 // -- 基础工具函数 --
@@ -371,6 +398,51 @@ func recordLoginFail(ip string) {
 	}
 }
 
+func isExecutableImage(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var magic [8]byte
+	n, _ := io.ReadFull(f, magic[:])
+	if n < 2 {
+		return fmt.Errorf("文件过小，疑似下载不完整")
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if n < 4 || magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F' {
+			return fmt.Errorf("不是有效的 ELF 可执行文件")
+		}
+	case "darwin":
+		if n < 4 {
+			return fmt.Errorf("不是有效的 Mach-O 可执行文件")
+		}
+		validMachO := false
+		for _, k := range [][]byte{
+			{0xFE, 0xED, 0xFA, 0xCE},
+			{0xCE, 0xFA, 0xED, 0xFE},
+			{0xFE, 0xED, 0xFA, 0xCF},
+			{0xCF, 0xFA, 0xED, 0xFE},
+			{0xCA, 0xFE, 0xBA, 0xBE},
+			{0xBE, 0xBA, 0xFE, 0xCA},
+		} {
+			if bytes.Equal(magic[:4], k) {
+				validMachO = true
+				break
+			}
+		}
+		if !validMachO {
+			return fmt.Errorf("不是有效的 Mach-O 可执行文件")
+		}
+	case "windows":
+		if magic[0] != 'M' || magic[1] != 'Z' {
+			return fmt.Errorf("不是有效的 PE 可执行文件")
+		}
+	}
+	return nil
+}
+
 func performSelfUpdate() error {
 	arch := runtime.GOARCH
 	osName := runtime.GOOS
@@ -407,14 +479,20 @@ func performSelfUpdate() error {
 	_, err = io.Copy(out, resp.Body)
 	out.Close()
 	if err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %v", err)
 	}
 
 	os.Chmod(tmpPath, 0755)
+	if err := isExecutableImage(tmpPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("更新文件校验失败，已中止: %v", err)
+	}
 
 	oldPath := exePath + ".old"
 	os.Remove(oldPath)
 	if err := os.Rename(exePath, oldPath); err != nil {
+		return fmt.Errorf("备份旧文件失败: %v", err)
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		os.Rename(oldPath, exePath)
@@ -546,19 +624,73 @@ func getSysStatus() string {
 	return fmt.Sprintf("CPU:%.1f|MEM:%.1f|DSK:%.1f", cpuPct, memPct, diskPct)
 }
 
+type trustedProxyRule struct {
+	ip   net.IP
+	cidr *net.IPNet
+}
+
+var trustedProxies []trustedProxyRule
+
+func init() {
+	for _, p := range strings.Split(os.Getenv("RELAY_TRUSTED_PROXIES"), ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.Contains(p, "/") {
+			if _, ipnet, err := net.ParseCIDR(p); err == nil {
+				trustedProxies = append(trustedProxies, trustedProxyRule{cidr: ipnet})
+			}
+		} else if ip := net.ParseIP(p); ip != nil {
+			trustedProxies = append(trustedProxies, trustedProxyRule{ip: ip})
+		}
+	}
+}
+
+func isIPLiteral(s string) bool {
+	return net.ParseIP(strings.TrimSpace(strings.Trim(s, "[]"))) != nil
+}
+
+func isTrustedProxy(host string) bool {
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, tp := range trustedProxies {
+		if tp.ip != nil && tp.ip.Equal(ip) {
+			return true
+		}
+		if tp.cidr != nil && tp.cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func getClientIP(r *http.Request) string {
 	if r == nil {
 		return "System"
 	}
+	remoteHost := ""
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		remoteHost = h
+	} else {
+		remoteHost = strings.TrimSpace(r.RemoteAddr)
+	}
+	if !isTrustedProxy(remoteHost) {
+		return remoteHost
+	}
 	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return ip
+		return strings.TrimSpace(ip)
 	}
 	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
 		ips := strings.Split(ip, ",")
 		return strings.TrimSpace(ips[0])
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return ip
+	return remoteHost
 }
 
 func addLog(r *http.Request, action, msg string) {
@@ -573,6 +705,26 @@ func addSystemLog(ip, action, msg string) {
 	now := time.Now().Format("01-02 15:04:05")
 	if db != nil {
 		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	}
+}
+
+func logRecover(name string) {
+	if r := recover(); r != nil {
+		log.Printf("⚠️ [%s] 内部异常已捕获: %v", name, r)
+	}
+}
+
+func supervised(name string, fn func()) {
+	for {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("⚠️ [%s] 异常退出，3 秒后自动重启: %v", name, r)
+				}
+			}()
+			fn()
+		}()
+		time.Sleep(3 * time.Second)
 	}
 }
 
@@ -1054,6 +1206,12 @@ func startTgBotLoop() {
 			}
 
 			// 处理内联键盘回调
+			if update.CallbackQuery != nil && update.CallbackQuery.Message == nil {
+				if update.CallbackQuery.ID != "" {
+					tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
+				}
+				continue
+			}
 			if update.CallbackQuery != nil {
 				chatIdStr := fmt.Sprintf("%d", update.CallbackQuery.Message.Chat.ID)
 				if chatIdStr != allowedChat {
@@ -1352,25 +1510,32 @@ func dailyTrafficReportLoop() {
 
 // ================= MASTER =================
 
-func runMaster() {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		for range ticker.C {
+func masterMaintenanceLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	for range ticker.C {
+		func() {
+			defer logRecover("maintenance")
 			if atomic.CompareAndSwapInt32(&configDirty, 1, 0) {
 				saveConfig()
 			}
 			cleanOldLogs()
+			cleanupSessions()
+			cleanupOAuthStates()
 			flushDailyStats()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
-		}
-	}()
-	go broadcastLoop()
-	go startTgBotLoop()   
-	go autoBackupLoop()   
-	go trafficResetLoop()
-	go dailyTrafficReportLoop()
+		}()
+	}
+}
+
+func runMaster() {
+	go supervised("maintenance", masterMaintenanceLoop)
+	go supervised("broadcast", broadcastLoop)
+	go supervised("telegram-bot", startTgBotLoop)
+	go supervised("auto-backup", autoBackupLoop)
+	go supervised("traffic-reset", trafficResetLoop)
+	go supervised("daily-report", dailyTrafficReportLoop)
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -1385,14 +1550,23 @@ func runMaster() {
 	isMasterTLS = false
 
 	var allowedDomains []string
-	if panelDomain != "" && !strings.Contains(panelDomain, "127.0.0.1") && !strings.Contains(panelDomain, "localhost") {
-		allowedDomains = append(allowedDomains, panelDomain)
-	}
-	if nodeDomain != "" && !strings.Contains(nodeDomain, "127.0.0.1") && !strings.Contains(nodeDomain, "localhost") {
-		if nodeDomain != panelDomain {
-			allowedDomains = append(allowedDomains, nodeDomain)
+	addDomain := func(d string) {
+		d = strings.TrimSpace(strings.ToLower(d))
+		if d == "" || isIPLiteral(d) {
+			return
 		}
+		if strings.Contains(d, "localhost") || !strings.Contains(d, ".") {
+			return
+		}
+		for _, x := range allowedDomains {
+			if x == d {
+				return
+			}
+		}
+		allowedDomains = append(allowedDomains, d)
 	}
+	addDomain(panelDomain)
+	addDomain(nodeDomain)
 
 	if len(allowedDomains) > 0 {
 		log.Printf("🌐 检测到有效域名: %v，准备全自动申请合法 TLS 证书", allowedDomains)
@@ -1578,6 +1752,7 @@ func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWS(w http.ResponseWriter, r *http.Request) {
+	defer logRecover("ws")
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -1708,7 +1883,9 @@ func broadcastLoop() {
 }
 
 func handleAgentConn(conn net.Conn) {
+	defer logRecover("agent-conn")
 	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	dec := json.NewDecoder(conn)
 	var msg Message
 	if err := dec.Decode(&msg); err != nil || msg.Type != "auth" {
@@ -1812,6 +1989,7 @@ func handleAgentConn(conn net.Conn) {
 	pushConfigToAll()
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		var m Message
 		if dec.Decode(&m) != nil {
 			break
@@ -1933,6 +2111,26 @@ func handleHealthReport(payload interface{}) {
 	}
 }
 
+func sendAgentMsg(name string, a *AgentInfo, m Message) {
+	if a == nil || a.Conn == nil {
+		return
+	}
+	l, _ := agentSendMu.LoadOrStore(name, &sync.Mutex{})
+	writeLock := l.(*sync.Mutex)
+	writeLock.Lock()
+	defer writeLock.Unlock()
+	_ = json.NewEncoder(a.Conn).Encode(m)
+}
+
+func sendMaster(conn net.Conn, m Message) {
+	if conn == nil {
+		return
+	}
+	agentConnMu.Lock()
+	defer agentConnMu.Unlock()
+	_ = json.NewEncoder(conn).Encode(m)
+}
+
 func pushConfigToAll() {
 	mu.Lock()
 	tasksMap := make(map[string][]ForwardTask)
@@ -1983,9 +2181,9 @@ func pushConfigToAll() {
 		if t == nil {
 			t = []ForwardTask{}
 		}
-		go func(conn net.Conn, tasks []ForwardTask) {
-			json.NewEncoder(conn).Encode(Message{Type: "update", Payload: tasks})
-		}(a.Conn, t)
+		go func(name string, agent *AgentInfo, tasks []ForwardTask) {
+			sendAgentMsg(name, agent, Message{Type: "update", Payload: tasks})
+		}(n, a, t)
 	}
 }
 
@@ -2268,13 +2466,61 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	
 	// 智能判断是否开启安全 Cookie
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
+	if c, err := r.Cookie("sid"); err == nil {
+		mu.Lock()
+		delete(sessions, c.Value)
+		mu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1, HttpOnly: true, Path: "/"})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func cleanupSessions() {
+	mu.Lock()
+	now := time.Now()
+	for k, exp := range sessions {
+		if now.After(exp) {
+			delete(sessions, k)
+		}
+	}
+	mu.Unlock()
+}
+
+func newOAuthState() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	s := hex.EncodeToString(b)
+	oauthStateMu.Lock()
+	oauthStates[s] = time.Now().Add(10 * time.Minute)
+	oauthStateMu.Unlock()
+	return s
+}
+
+func consumeOAuthState(s string) bool {
+	if s == "" {
+		return false
+	}
+	oauthStateMu.Lock()
+	defer oauthStateMu.Unlock()
+	exp, ok := oauthStates[s]
+	delete(oauthStates, s)
+	return ok && time.Now().Before(exp)
+}
+
+func cleanupOAuthStates() {
+	oauthStateMu.Lock()
+	defer oauthStateMu.Unlock()
+	now := time.Now()
+	for k, exp := range oauthStates {
+		if now.After(exp) {
+			delete(oauthStates, k)
+		}
+	}
 }
 
 // ================= GITHUB OAUTH =================
@@ -2289,13 +2535,26 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	state := newOAuthState()
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, url.QueryEscape(state))
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
+	ip := getClientIP(r)
+	if !checkLoginRateLimit(ip) {
+		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
+	if !consumeOAuthState(r.URL.Query().Get("state")) {
+		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
 		return
 	}
@@ -2353,7 +2612,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isAllowed || userData.Login == "" {
-		ip := getClientIP(r)
 		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=4", http.StatusSeeOther)
 		return
@@ -2369,7 +2627,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -2480,7 +2738,11 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleToggleRule(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.FormValue("id")
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
@@ -2491,11 +2753,15 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 	go pushConfigToAll()
-	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.FormValue("id")
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
@@ -2506,12 +2772,16 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	saveConfigNoLock()
 	mu.Unlock()
-	go pushConfigToAll() 
-	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+	go pushConfigToAll()
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := r.FormValue("id")
 	mu.Lock()
 	var nr []LogicalRule
 	for _, x := range rules {
@@ -2523,7 +2793,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 	go pushConfigToAll()
-	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleBatchRule(w http.ResponseWriter, r *http.Request) {
@@ -2573,16 +2843,23 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	mu.Lock()
-	if a, ok := agents[name]; ok {
-		if a.IsOnline {
-			json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
-		}
-		delete(agents, name) // 点击卸载时才彻底删除
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+	name := r.FormValue("name")
+	mu.Lock()
+	a, ok := agents[name]
+	online := ok && a.IsOnline
 	mu.Unlock()
-	http.Redirect(w, r, "/#dashboard", http.StatusSeeOther)
+	if online {
+		sendAgentMsg(name, a, Message{Type: "uninstall"})
+	}
+	mu.Lock()
+	delete(agents, name)
+	agentSendMu.Delete(name)
+	mu.Unlock()
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -2666,7 +2943,6 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	if db != nil {
 		db.Close()
-		db = nil
 	}
 
 	os.Remove(DBFile + "-wal")
@@ -2683,14 +2959,24 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	io.Copy(out, file)
 	out.Close() // 必须显式关闭文件句柄
 
-	// 3. 重新初始化数据库连接
-	initDB()
-	
+	// 3. 先打开并校验新库，成功后才发布；发布期间全局 db 始终非 nil，
+	//    避免其他 goroutine 在 nil 判断与调用之间命中空指针
+	ndb, err := openDB()
+	if err != nil {
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "新数据库文件无法打开: " + err.Error()})
+		return
+	}
+	db = ndb
+
 	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
 	mu.Unlock()
 
 	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
+
+	// 同步推送给在线节点，避免面板规则与节点实际任务不一致
+	go pushConfigToAll()
 
 	// 获取恢复后的新面板域名
 	mu.Lock()
@@ -2803,7 +3089,11 @@ func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
+	if r.Method != "POST" {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.FormValue("name")
 	mu.Lock()
 	agent, ok := agents[name]
 	mu.Unlock()
@@ -2811,7 +3101,7 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", 404)
 		return
 	}
-	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+	go sendAgentMsg(name, agent, Message{Type: "upgrade"})
 	w.Write([]byte("ok"))
 }
 
@@ -2819,22 +3109,28 @@ func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
-	
+
+	type namedAgent struct {
+		name  string
+		agent *AgentInfo
+	}
 	mu.Lock()
-	count := 0
-	// 遍历所有节点，仅向在线节点发送更新指令
-	for _, agent := range agents {
+	var targets []namedAgent
+	for name, agent := range agents {
 		if agent.IsOnline {
-			json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
-			count++
+			targets = append(targets, namedAgent{name: name, agent: agent})
 		}
 	}
 	mu.Unlock()
-	
+
+	for _, t := range targets {
+		sendAgentMsg(t.name, t.agent, Message{Type: "upgrade"})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true, 
-		"count":   count,
+		"success": true,
+		"count":   len(targets),
 	})
 }
 
@@ -2960,7 +3256,7 @@ func runAgent(name, masterAddr, token string) {
 		// -------------------------------------------------
 
 		// 修改：将 IPv4、IPv6 和 测试端口 一并发送，Payload 类型改为 interface{}
-		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]interface{}{
+		sendMaster(conn, Message{Type: "auth", Payload: map[string]interface{}{
 			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort, "version": AppVersion,
 		}})
 
@@ -2989,9 +3285,9 @@ func runAgent(name, masterAddr, token string) {
 						return true
 					})
 					if len(reps) > 0 {
-						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
+						sendMaster(conn, Message{Type: "stats", Payload: reps})
 					}
-					json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
+					sendMaster(conn, Message{Type: "ping", Payload: getSysStatus()})
 				case <-h.C:
 					checkTargetHealth(conn)
 				}
@@ -3006,7 +3302,7 @@ func runAgent(name, masterAddr, token string) {
 				break
 			}
 			if msg.Type == "uninstall" {
-				json.NewEncoder(conn).Encode(Message{Type: "uninstalling"})
+				sendMaster(conn, Message{Type: "uninstalling"})
 				doSelfUninstall()
 				return
 			}
@@ -3153,7 +3449,7 @@ func checkTargetHealth(conn net.Conn) {
 	})
 
 	if len(results) > 0 {
-		_ = json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
+		sendMaster(conn, Message{Type: "health", Payload: results})
 	}
 }
 
@@ -3334,6 +3630,17 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 }
 
+func closeWriteSide(c net.Conn) {
+	switch t := c.(type) {
+	case *net.TCPConn:
+		t.CloseWrite()
+	case *tls.Conn:
+		t.CloseWrite()
+	default:
+		c.Close()
+	}
+}
+
 func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	defer src.Close()
 
@@ -3359,8 +3666,41 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx, limit)
-	copyCount(src, dst, &cnt.Rx, limit)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{}, 2)
+	fail := func() {
+		cancel()
+		src.Close()
+		dst.Close()
+	}
+
+	// 客户端 -> 目标 (上行)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		err := copyCount(ctx, dst, src, &cnt.Tx, limit)
+		if err == io.EOF || err == nil {
+			closeWriteSide(dst)
+		} else {
+			fail()
+		}
+	}()
+
+	// 目标 -> 客户端 (下行)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		err := copyCount(ctx, src, dst, &cnt.Rx, limit)
+		if err == io.EOF || err == nil {
+			closeWriteSide(src)
+		} else {
+			fail()
+		}
+	}()
+
+	<-done
+	<-done
 }
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
@@ -3384,9 +3724,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
+	buf := make([]byte, 65536)
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -3425,9 +3763,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				bPtr := bufPool.Get().(*[]byte)
-				defer bufPool.Put(bPtr)
-				b := *bPtr
+				b := make([]byte, 65536)
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
@@ -3446,7 +3782,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 }
 
-func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
+func copyCount(ctx context.Context, dst io.Writer, src io.Reader, c *int64, limit int64) error {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -3458,22 +3794,26 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 		limiter = rate.NewLimiter(rate.Limit(limit), 32*1024)
 	}
 
-	ctx := context.Background()
 	for {
 		nr, err := src.Read(buf)
 		if nr > 0 {
 			// 如果开启了限速，平滑消费令牌，替代粗暴的 time.Sleep
 			if limiter != nil {
-				_ = limiter.WaitN(ctx, nr)
+				if werr := limiter.WaitN(ctx, nr); werr != nil {
+					return werr
+				}
 			}
-			
-			nw, _ := dst.Write(buf[0:nr])
+
+			nw, werr := dst.Write(buf[0:nr])
 			if nw > 0 {
 				atomic.AddInt64(c, int64(nw))
 			}
+			if werr != nil {
+				return werr
+			}
 		}
 		if err != nil {
-			break
+			return err
 		}
 	}
 }
@@ -6200,7 +6540,11 @@ input:focus, select:focus {
         });
     }
 
-    function delAgent(name) { showConfirm("卸载节点", "节点 <b>"+name+"</b> 将自毁，确定吗？", "danger", () => location.href="/delete_agent?name="+name); }
+    function delAgent(name) {
+        showConfirm("卸载节点", "节点 <b>"+name+"</b> 将自毁，确定吗？", "danger", () => {
+            postForm('/delete_agent', {name: name}).then(d => { if(d.success) { showToast("卸载指令已发送", "success"); setTimeout(() => location.reload(), 800); } else showToast("操作失败", "warn"); }).catch(() => showToast("请求发送失败", "warn"));
+        });
+    }
 
     function toggleTheme() {
         const html = document.documentElement;
@@ -6360,9 +6704,27 @@ input:focus, select:focus {
     }
     function copyCmd() { copyText(document.getElementById('cmdText').innerText); }
 
-    function delRule(id) { showConfirm("删除规则", "端口将停止服务，确定删除吗？", "danger", () => location.href="/delete?id="+id); }
-    function toggleRule(id) { location.href="/toggle?id="+id; }
-    function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
+    function postForm(url, params) {
+        return fetch(url, {
+            method: 'POST',
+            body: new URLSearchParams(params || {}),
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        }).then(r => r.json());
+    }
+
+    function delRule(id) {
+        showConfirm("删除规则", "端口将停止服务，确定删除吗？", "danger", () => {
+            postForm('/delete', {id: id}).then(d => { if(d.success) { showToast("规则已删除", "success"); setTimeout(() => location.reload(), 600); } else showToast("操作失败", "warn"); }).catch(() => showToast("请求发送失败", "warn"));
+        });
+    }
+    function toggleRule(id) {
+        postForm('/toggle', {id: id}).then(d => { if(d.success) { setTimeout(() => location.reload(), 300); } }).catch(() => showToast("请求发送失败", "warn"));
+    }
+    function resetTraffic(id) {
+        showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => {
+            postForm('/reset_traffic', {id: id}).then(d => { if(d.success) { showToast("流量已重置", "success"); setTimeout(() => location.reload(), 600); } else showToast("操作失败", "warn"); }).catch(() => showToast("请求发送失败", "warn"));
+        });
+    }
 	function clearLogs() {
         showConfirm("清空日志", "确定要清空所有系统操作日志吗？此操作不可逆！", "danger", () => {
             fetch('/clear_logs', {method: 'POST'})
