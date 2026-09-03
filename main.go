@@ -47,16 +47,24 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.2"
+	AppVersion      = "v3.2.9"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 	GithubLatestAPI = "https://api.github.com/repos/jinhuaitao/relay/releases/latest"
 	TCPKeepAlive    = 60 * time.Second
 	UDPBufferSize   = 4 * 1024 * 1024
+	CopyBufferSize  = 32 * 1024
 	MaxLogEntries   = 200
 	MaxLogRetention = 1000
 )
+
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, CopyBufferSize)
+		return &b
+	},
+}
 
 // --- 数据结构 ---
 
@@ -160,7 +168,6 @@ type AgentInfo struct {
     Version     string    `json:"version"`
     Region      string    `json:"region"`
     IsOnline    bool      `json:"is_online"`
-	writeMu   sync.Mutex
 }
 
 type Message struct {
@@ -213,7 +220,6 @@ type RuleStatusData struct {
 }
 
 var (
-	dbMu             sync.RWMutex
 	db               *sql.DB
 	config           AppConfig
 	agents           = make(map[string]*AgentInfo)
@@ -233,8 +239,6 @@ var (
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
-
-	oauthStates = make(map[string]time.Time)
 
 	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
@@ -294,11 +298,11 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 );
 `
 
-func initDB() error {
+func initDB() {
 	var err error
 	db, err = sql.Open("sqlite", DBFile)
 	if err != nil {
-		return fmt.Errorf("❌ 无法打开数据库文件: %v", err)
+		log.Fatalf("❌ 无法打开数据库文件: %v", err)
 	}
 
 	db.SetMaxOpenConns(1)
@@ -308,7 +312,7 @@ func initDB() error {
 	db.Exec("PRAGMA synchronous = NORMAL;")
 
 	if _, err := db.Exec(dbSchema); err != nil {
-		return fmt.Errorf("❌ 初始化数据库表结构失败: %v", err)
+		log.Fatalf("❌ 初始化数据库表结构失败: %v", err)
 	}
 
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN group_name TEXT DEFAULT ''")
@@ -316,7 +320,6 @@ func initDB() error {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
-	return nil
 }
 
 // -- 基础工具函数 --
@@ -359,8 +362,9 @@ func checkLoginRateLimit(ip string) bool {
 }
 
 func recordLoginFail(ip string) {
-	v, _ := loginAttempts.LoadOrStore(ip, new(int32))
-	count := atomic.AddInt32(v.(*int32), 1)
+	v, _ := loginAttempts.LoadOrStore(ip, 0)
+	count := v.(int) + 1
+	loginAttempts.Store(ip, count)
 	if count >= 5 {
 		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
 	}
@@ -384,14 +388,9 @@ func performSelfUpdate() error {
 	log.Printf("正在下载更新: %s", targetURL)
 
 	resp, err := http.Get(targetURL)
-	if err != nil {
-		return fmt.Errorf("下载请求失败: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		defer resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 {
 		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
 	}
-	downloadLen := resp.ContentLength
 	defer resp.Body.Close()
 
 	exePath, err := os.Executable()
@@ -404,35 +403,20 @@ func performSelfUpdate() error {
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
-	n, err := io.Copy(out, resp.Body)
+	_, err = io.Copy(out, resp.Body)
 	out.Close()
 	if err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %v", err)
-	}
-
-	// 完整性校验：下载大小必须与服务器声明一致，避免截断的损坏二进制
-	if downloadLen > 0 && n != downloadLen {
-		os.Remove(tmpPath)
-		return fmt.Errorf("下载不完整: 期望 %d 字节，实际 %d 字节", downloadLen, n)
 	}
 
 	os.Chmod(tmpPath, 0755)
 
-	// 原子替换：先把旧文件改名为 .old（仅在新文件已完整落盘后），再改名新文件
-	// 任一步失败都回滚，绝不删除旧备份，保证磁盘上始终有可用二进制
 	oldPath := exePath + ".old"
 	os.Remove(oldPath)
 	if err := os.Rename(exePath, oldPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("备份旧文件失败: %v", err)
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
-		// 回滚：恢复旧二进制，丢弃新文件
-		if rbErr := os.Rename(oldPath, exePath); rbErr != nil {
-			return fmt.Errorf("覆盖文件失败且回滚失败: %v (请手动恢复 %s)", err, oldPath)
-		}
-		os.Remove(tmpPath)
+		os.Rename(oldPath, exePath)
 		return fmt.Errorf("覆盖文件失败: %v", err)
 	}
 	return nil
@@ -458,9 +442,7 @@ func main() {
 	setupSignalHandler()
 
 	if *mode == "master" {
-		if err := initDB(); err != nil {
-			log.Fatal(err)
-		}
+		initDB()
 		loadConfig()
 		runMaster()
 	} else if *mode == "agent" {
@@ -1165,6 +1147,8 @@ func startTgBotLoop() {
 					if db != nil {
 						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 						if err == nil {
+							defer dsRows.Close()
+							
 							for dsRows.Next() {
 								var d string
 								var dTx, dRx int64
@@ -1178,7 +1162,6 @@ func startTgBotLoop() {
 									historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
 								}
 							}
-							dsRows.Close()
 						}
 					}
 					
@@ -1296,26 +1279,6 @@ func startTgBotLoop() {
 
 // ================= TRAFFIC AUTO RESET =================
 
-func sessionCleanupLoop() {
-	ticker := time.NewTicker(30 * time.Minute)
-	for range ticker.C {
-		mu.Lock()
-		now := time.Now()
-		for k, exp := range sessions {
-			if now.After(exp) {
-				delete(sessions, k)
-			}
-		}
-		// 顺带清理过期的 GitHub OAuth state，防止 map 无限增长
-		for k, exp := range oauthStates {
-			if now.After(exp) {
-				delete(oauthStates, k)
-			}
-		}
-		mu.Unlock()
-	}
-}
-
 func trafficResetLoop() {
 	for {
 		time.Sleep(1 * time.Hour)
@@ -1397,11 +1360,9 @@ func runMaster() {
 			}
 			cleanOldLogs()
 			flushDailyStats()
-			dbMu.RLock()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
-			dbMu.RUnlock()
 		}
 	}()
 	go broadcastLoop()
@@ -1409,7 +1370,6 @@ func runMaster() {
 	go autoBackupLoop()   
 	go trafficResetLoop()
 	go dailyTrafficReportLoop()
-	go sessionCleanupLoop()
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -1572,8 +1532,6 @@ func runMaster() {
 
 // 每日流量统计定期刷盘
 func flushDailyStats() {
-	dbMu.RLock()
-	defer dbMu.RUnlock()
 	if db == nil {
 		return
 	}
@@ -1684,7 +1642,6 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
-		dbMu.RLock()
 		if db != nil {
 			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
 			if err == nil {
@@ -1696,7 +1653,6 @@ func broadcastLoop() {
 				lRows.Close()
 			}
 		}
-		dbMu.RUnlock()
 
 		var speedTx int64 = 0
 		var speedRx int64 = 0
@@ -1718,8 +1674,8 @@ func broadcastLoop() {
 			wsMu.Unlock()
 			continue
 		}
-
-		// 1. 先构建好需要发送的消息对象
+		
+		// 1. 先构建好需要发送的消息对象 (这就是编译器之前找不到的 msg)
 		msg := WSMessage{
 			Type: "stats",
 			Data: WSDashboardData{
@@ -1732,28 +1688,21 @@ func broadcastLoop() {
 			},
 		}
 
-		// 2. 在锁内完成且仅完成一次 JSON 序列化
+		// 2. 在锁内，循环外部完成且仅完成一次 JSON 序列化
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
 			wsMu.Unlock()
 			continue
 		}
 
-		// 3. 拷贝客户端快照后释放锁，再在锁外发送，避免慢客户端阻塞整个广播
-		snapshot := make([]*websocket.Conn, 0, len(wsClients))
+		// 3. 遍历客户端发送原生 Byte 数据，极大节省 CPU 和内存分配
 		for client := range wsClients {
-			snapshot = append(snapshot, client)
-		}
-		wsMu.Unlock()
-
-		for _, client := range snapshot {
 			if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
 				client.Close()
-				wsMu.Lock()
 				delete(wsClients, client)
-				wsMu.Unlock()
 			}
 		}
+		wsMu.Unlock()
 	}
 }
 
@@ -1862,7 +1811,6 @@ func handleAgentConn(conn net.Conn) {
 	pushConfigToAll()
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var m Message
 		if dec.Decode(&m) != nil {
 			break
@@ -1876,7 +1824,7 @@ func handleAgentConn(conn net.Conn) {
 		if m.Type == "ping" {
 			if status, ok := m.Payload.(string); ok {
 				mu.Lock()
-				if agent, exists := agents[name]; exists && agent.Conn == conn {
+				if agent, exists := agents[name]; exists {
 					agent.SysStatus = status
 				}
 				mu.Unlock()
@@ -1984,15 +1932,6 @@ func handleHealthReport(payload interface{}) {
 	}
 }
 
-func sendToAgent(a *AgentInfo, msg Message) {
-	if a == nil || a.Conn == nil {
-		return
-	}
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	_ = json.NewEncoder(a.Conn).Encode(msg)
-}
-
 func pushConfigToAll() {
 	mu.Lock()
 	tasksMap := make(map[string][]ForwardTask)
@@ -2043,9 +1982,9 @@ func pushConfigToAll() {
 		if t == nil {
 			t = []ForwardTask{}
 		}
-		go func(conn net.Conn, tasks []ForwardTask, agent *AgentInfo) {
-			sendToAgent(agent, Message{Type: "update", Payload: tasks})
-		}(a.Conn, t, a)
+		go func(conn net.Conn, tasks []ForwardTask) {
+			json.NewEncoder(conn).Encode(Message{Type: "update", Payload: tasks})
+		}(a.Conn, t)
 	}
 }
 
@@ -2131,12 +2070,12 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if db != nil {
 		dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 		if err == nil {
+			defer dsRows.Close()
 			for dsRows.Next() {
 				var ds DailyStat
 				dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
 				dailyStats = append(dailyStats, ds)
 			}
-			dsRows.Close()
 		}
 	}
 	// 将数据按时间顺序颠倒，方便图表显示
@@ -2339,17 +2278,6 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // ================= GITHUB OAUTH =================
 
-func cleanupOauthStates() {
-	mu.Lock()
-	now := time.Now()
-	for k, exp := range oauthStates {
-		if now.After(exp) {
-			delete(oauthStates, k)
-		}
-	}
-	mu.Unlock()
-}
-
 func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	clientID := config.GithubClientID
@@ -2360,35 +2288,13 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 生成一次性 state 防止 CSRF，并设置 5 分钟有效期
-	state := make([]byte, 16)
-	rand.Read(state)
-	stateStr := hex.EncodeToString(state)
-
-	mu.Lock()
-	oauthStates[stateStr] = time.Now().Add(5 * time.Minute)
-	mu.Unlock()
-
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, stateStr)
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-	if code == "" || state == "" {
-		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
-		return
-	}
-
-	// 校验 OAuth state，防止 CSRF 劫持登录流程
-	mu.Lock()
-	exp, valid := oauthStates[state]
-	if valid {
-		delete(oauthStates, state)
-	}
-	mu.Unlock()
-	if !valid || time.Now().After(exp) {
+	if code == "" {
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
 		return
 	}
@@ -2670,7 +2576,7 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if a, ok := agents[name]; ok {
 		if a.IsOnline {
-			sendToAgent(a, Message{Type: "uninstall"})
+			json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
 		}
 		delete(agents, name) // 点击卸载时才彻底删除
 	}
@@ -2756,7 +2662,6 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 1. 获取锁，安全地清理旧数据库连接
 	mu.Lock()
-	dbMu.Lock() // 阻止其他 goroutine 并发读写 db
 
 	if db != nil {
 		db.Close()
@@ -2768,45 +2673,22 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
-		dbMu.Unlock()
 		mu.Unlock() // 发生错误必须解锁
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
 
 	// 2. 覆盖写入新数据
-	if _, err := io.Copy(out, file); err != nil {
-		out.Close()
-		dbMu.Unlock()
-		mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "写入数据失败"})
-		return
-	}
+	io.Copy(out, file)
 	out.Close() // 必须显式关闭文件句柄
 
 	// 3. 重新初始化数据库连接
-	if err := initDB(); err != nil {
-		log.Printf("恢复数据库初始化失败: %v，尝试保留原始连接", err)
-		// 重新打开原数据库，尽量恢复服务
-		if rerr := initDB(); rerr != nil {
-			db = nil
-			log.Printf("恢复原始数据库也失败: %v", rerr)
-		}
-		dbMu.Unlock()
-		mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "数据库初始化失败"})
-		return
-	}
-	dbMu.Unlock()
-
+	initDB()
+	
 	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
 	mu.Unlock()
 
 	// 5. 将新数据库中的配置重新加载到内存中
-	if db == nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "数据库不可用"})
-		return
-	}
 	loadConfig()
 
 	// 获取恢复后的新面板域名
@@ -2928,7 +2810,7 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", 404)
 		return
 	}
-	sendToAgent(agent, Message{Type: "upgrade"})
+	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
 	w.Write([]byte("ok"))
 }
 
@@ -2942,7 +2824,7 @@ func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	// 遍历所有节点，仅向在线节点发送更新指令
 	for _, agent := range agents {
 		if agent.IsOnline {
-			sendToAgent(agent, Message{Type: "upgrade"})
+			json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
 			count++
 		}
 	}
@@ -2975,7 +2857,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
 
-	hasUpdate := compareVersions(remoteVer, currentVer) > 0
+	hasUpdate := remoteVer != currentVer
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
@@ -2992,19 +2874,10 @@ func doRestart() {
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
-				if out, err := exec.Command("systemctl", "restart", s).CombinedOutput(); err == nil {
-					// 等待 systemd 报告服务处于 active 状态，再退出当前进程
-					for i := 0; i < 30; i++ {
-						time.Sleep(500 * time.Millisecond)
-						if exec.Command("systemctl", "is-active", s).Run() == nil {
-							break
-						}
-					}
-					os.Exit(0)
-					return
-				} else {
-					log.Printf("⚠️ systemctl restart %s 失败: %v (%s)", s, err, string(out))
-				}
+				exec.Command("systemctl", "restart", s).Start()
+				time.Sleep(1 * time.Second)
+				os.Exit(0)
+				return
 			}
 		}
 	}
@@ -3012,13 +2885,10 @@ func doRestart() {
 	if _, err := os.Stat("/etc/init.d"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
-				if out, err := exec.Command("rc-service", s, "restart").CombinedOutput(); err == nil {
-					time.Sleep(1 * time.Second)
-					os.Exit(0)
-					return
-				} else {
-					log.Printf("⚠️ rc-service restart %s 失败: %v (%s)", s, err, string(out))
-				}
+				exec.Command("rc-service", s, "restart").Start()
+				time.Sleep(1 * time.Second)
+				os.Exit(0)
+				return
 			}
 		}
 	}
@@ -3488,8 +3358,8 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
-	go copyCountBuf(dst, src, &cnt.Tx, limit, make([]byte, 32*1024))
-	copyCountBuf(src, dst, &cnt.Rx, limit, make([]byte, 32*1024))
+	go copyCount(dst, src, &cnt.Tx, limit)
+	copyCount(src, dst, &cnt.Rx, limit)
 }
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
@@ -3513,7 +3383,9 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	buf := make([]byte, UDPBufferSize)
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -3552,7 +3424,9 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				b := make([]byte, UDPBufferSize)
+				bPtr := bufPool.Get().(*[]byte)
+				defer bufPool.Put(bPtr)
+				b := *bPtr
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
@@ -3571,7 +3445,11 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 }
 
-func copyCountBuf(dst io.Writer, src io.Reader, c *int64, limit int64, buf []byte) {
+func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
+	bufPtr := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bufPtr)
+	buf := *bufPtr
+
 	// 初始化官方令牌桶限速器
 	var limiter *rate.Limiter
 	if limit > 0 {
@@ -3604,9 +3482,6 @@ func copyCountBuf(dst io.Writer, src io.Reader, c *int64, limit int64, buf []byt
 func loadConfig() {
 	mu.Lock()
 	defer mu.Unlock()
-	if db == nil {
-		return
-	}
 	rows, err := db.Query("SELECT key, value FROM settings")
 	if err == nil {
 		defer rows.Close()
@@ -3741,8 +3616,6 @@ func saveConfigNoLock() {
 }
 
 func cleanOldLogs() {
-	dbMu.RLock()
-	defer dbMu.RUnlock()
 	if db == nil {
 		return
 	}
@@ -3769,33 +3642,6 @@ func setupSignalHandler() {
 		}
 		os.Exit(0)
 	}()
-}
-
-// compareVersions 语义化比较两个版本号（如 3.3.0），返回:
-// -1 表示 a<b, 0 表示 a==b, 1 表示 a>b
-func compareVersions(a, b string) int {
-	na := strings.Split(strings.TrimPrefix(a, "v"), ".")
-	nb := strings.Split(strings.TrimPrefix(b, "v"), ".")
-	maxLen := len(na)
-	if len(nb) > maxLen {
-		maxLen = len(nb)
-	}
-	for i := 0; i < maxLen; i++ {
-		var x, y int
-		if i < len(na) {
-			x, _ = strconv.Atoi(na[i])
-		}
-		if i < len(nb) {
-			y, _ = strconv.Atoi(nb[i])
-		}
-		if x < y {
-			return -1
-		}
-		if x > y {
-			return 1
-		}
-	}
-	return 0
 }
 
 func formatBytes(b int64) string {
