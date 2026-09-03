@@ -234,6 +234,8 @@ var (
 	agentUserCounts  sync.Map
 	targetHealthMap  sync.Map
 	sessions         = make(map[string]time.Time)
+	oauthStates      = make(map[string]time.Time)
+	oauthStateMu     sync.Mutex
 	configDirty      int32
 
 	rrCounters   sync.Map
@@ -643,6 +645,10 @@ func init() {
 			trustedProxies = append(trustedProxies, trustedProxyRule{ip: ip})
 		}
 	}
+}
+
+func isIPLiteral(s string) bool {
+	return net.ParseIP(strings.TrimSpace(strings.Trim(s, "[]"))) != nil
 }
 
 func isTrustedProxy(host string) bool {
@@ -1514,6 +1520,7 @@ func masterMaintenanceLoop() {
 			}
 			cleanOldLogs()
 			cleanupSessions()
+			cleanupOAuthStates()
 			flushDailyStats()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -1543,14 +1550,23 @@ func runMaster() {
 	isMasterTLS = false
 
 	var allowedDomains []string
-	if panelDomain != "" && !strings.Contains(panelDomain, "127.0.0.1") && !strings.Contains(panelDomain, "localhost") {
-		allowedDomains = append(allowedDomains, panelDomain)
-	}
-	if nodeDomain != "" && !strings.Contains(nodeDomain, "127.0.0.1") && !strings.Contains(nodeDomain, "localhost") {
-		if nodeDomain != panelDomain {
-			allowedDomains = append(allowedDomains, nodeDomain)
+	addDomain := func(d string) {
+		d = strings.TrimSpace(strings.ToLower(d))
+		if d == "" || isIPLiteral(d) {
+			return
 		}
+		if strings.Contains(d, "localhost") || !strings.Contains(d, ".") {
+			return
+		}
+		for _, x := range allowedDomains {
+			if x == d {
+				return
+			}
+		}
+		allowedDomains = append(allowedDomains, d)
 	}
+	addDomain(panelDomain)
+	addDomain(nodeDomain)
 
 	if len(allowedDomains) > 0 {
 		log.Printf("🌐 检测到有效域名: %v，准备全自动申请合法 TLS 证书", allowedDomains)
@@ -2475,6 +2491,38 @@ func cleanupSessions() {
 	mu.Unlock()
 }
 
+func newOAuthState() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	s := hex.EncodeToString(b)
+	oauthStateMu.Lock()
+	oauthStates[s] = time.Now().Add(10 * time.Minute)
+	oauthStateMu.Unlock()
+	return s
+}
+
+func consumeOAuthState(s string) bool {
+	if s == "" {
+		return false
+	}
+	oauthStateMu.Lock()
+	defer oauthStateMu.Unlock()
+	exp, ok := oauthStates[s]
+	delete(oauthStates, s)
+	return ok && time.Now().Before(exp)
+}
+
+func cleanupOAuthStates() {
+	oauthStateMu.Lock()
+	defer oauthStateMu.Unlock()
+	now := time.Now()
+	for k, exp := range oauthStates {
+		if now.After(exp) {
+			delete(oauthStates, k)
+		}
+	}
+}
+
 // ================= GITHUB OAUTH =================
 
 func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
@@ -2487,13 +2535,26 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	state := newOAuthState()
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, url.QueryEscape(state))
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
+	ip := getClientIP(r)
+	if !checkLoginRateLimit(ip) {
+		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
+	if !consumeOAuthState(r.URL.Query().Get("state")) {
+		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
 		return
 	}
@@ -2551,7 +2612,6 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isAllowed || userData.Login == "" {
-		ip := getClientIP(r)
 		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=4", http.StatusSeeOther)
 		return
@@ -2914,6 +2974,9 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
+
+	// 同步推送给在线节点，避免面板规则与节点实际任务不一致
+	go pushConfigToAll()
 
 	// 获取恢复后的新面板域名
 	mu.Lock()
@@ -3567,6 +3630,17 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 }
 
+func closeWriteSide(c net.Conn) {
+	switch t := c.(type) {
+	case *net.TCPConn:
+		t.CloseWrite()
+	case *tls.Conn:
+		t.CloseWrite()
+	default:
+		c.Close()
+	}
+}
+
 func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	defer src.Close()
 
@@ -3592,8 +3666,41 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	v, _ := agentTraffic.Load(tid)
 	cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx, limit)
-	copyCount(src, dst, &cnt.Rx, limit)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{}, 2)
+	fail := func() {
+		cancel()
+		src.Close()
+		dst.Close()
+	}
+
+	// 客户端 -> 目标 (上行)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		err := copyCount(ctx, dst, src, &cnt.Tx, limit)
+		if err == io.EOF || err == nil {
+			closeWriteSide(dst)
+		} else {
+			fail()
+		}
+	}()
+
+	// 目标 -> 客户端 (下行)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		err := copyCount(ctx, src, dst, &cnt.Rx, limit)
+		if err == io.EOF || err == nil {
+			closeWriteSide(src)
+		} else {
+			fail()
+		}
+	}()
+
+	<-done
+	<-done
 }
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
@@ -3617,9 +3724,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
+	buf := make([]byte, 65536)
 	for {
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
@@ -3658,9 +3763,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				bPtr := bufPool.Get().(*[]byte)
-				defer bufPool.Put(bPtr)
-				b := *bPtr
+				b := make([]byte, 65536)
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
@@ -3679,7 +3782,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 }
 
-func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
+func copyCount(ctx context.Context, dst io.Writer, src io.Reader, c *int64, limit int64) error {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -3691,22 +3794,26 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 		limiter = rate.NewLimiter(rate.Limit(limit), 32*1024)
 	}
 
-	ctx := context.Background()
 	for {
 		nr, err := src.Read(buf)
 		if nr > 0 {
 			// 如果开启了限速，平滑消费令牌，替代粗暴的 time.Sleep
 			if limiter != nil {
-				_ = limiter.WaitN(ctx, nr)
+				if werr := limiter.WaitN(ctx, nr); werr != nil {
+					return werr
+				}
 			}
-			
-			nw, _ := dst.Write(buf[0:nr])
+
+			nw, werr := dst.Write(buf[0:nr])
 			if nw > 0 {
 				atomic.AddInt64(c, int64(nw))
 			}
+			if werr != nil {
+				return werr
+			}
 		}
 		if err != nil {
-			break
+			return err
 		}
 	}
 }
