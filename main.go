@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.1"
+	AppVersion      = "v3.3.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5164,163 +5164,6 @@ input:focus, select:focus {
     bottom: 90px; 
 }
 
-/* ============ 视觉精致度增强 ============ */
-
-/* 欢迎横幅 */
-.welcome-banner {
-    position: relative;
-    overflow: hidden;
-    border-radius: 22px;
-    padding: 30px 32px;
-    margin-bottom: 26px;
-    background: linear-gradient(120deg, var(--primary-light), var(--accent-light) 55%, transparent);
-    border: 1px solid var(--border);
-    animation: welcomeIn 0.7s cubic-bezier(0.16, 1, 0.3, 1);
-}
-[data-theme="dark"] .welcome-banner {
-    background: linear-gradient(120deg, rgba(16,185,129,0.16), rgba(6,182,212,0.1) 60%, transparent);
-}
-.welcome-banner::after {
-    content: '';
-    position: absolute;
-    right: -60px; top: -60px;
-    width: 220px; height: 220px;
-    border-radius: 50%;
-    background: radial-gradient(circle, var(--glow-primary), transparent 70%);
-    pointer-events: none;
-}
-.welcome-content { position: relative; z-index: 2; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
-.welcome-text h2 { margin: 0 0 6px 0; font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
-.welcome-text p { margin: 0; color: var(--text-sub); font-size: 14px; }
-.welcome-actions { display: flex; gap: 10px; }
-@keyframes welcomeIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
-
-/* 统计卡片增强 */
-.stat-item { overflow: hidden; }
-.stat-crystal {
-    position: absolute;
-    top: 18px; right: 18px;
-    width: 44px; height: 44px;
-    border-radius: 13px;
-    background: linear-gradient(135deg, var(--primary), var(--accent));
-    color: #fff;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 22px;
-    box-shadow: 0 8px 20px -4px var(--glow-primary);
-    transform: rotate(-6deg);
-    transition: var(--trans);
-    z-index: 3;
-}
-.stat-item:hover .stat-crystal { transform: rotate(0deg) scale(1.08); }
-.stat-crystal::after {
-    content: '';
-    position: absolute; inset: 0;
-    border-radius: 13px;
-    background: linear-gradient(135deg, transparent, rgba(255,255,255,0.2), transparent);
-    transform: translateX(-100%);
-    transition: transform 0.6s;
-}
-.stat-item:hover .stat-crystal::after { transform: translateX(100%); }
-.stat-item .bg-icon { opacity: 0.05; }
-
-/* 卡片入场动画 */
-.card { animation: cardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1); }
-@keyframes cardIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
-.page .card:nth-child(2) { animation-delay: 0.05s; }
-.page .card:nth-child(3) { animation-delay: 0.1s; }
-
-/* 数字滚动高亮 */
-.stat-val, .num-flash { transition: color 0.3s; }
-.num-flash { animation: numFlash 0.8s ease; }
-@keyframes numFlash { 0% { color: var(--primary); } 100% { } }
-
-/* 菜单项 hover 高亮光斑 */
-.item::after {
-    content: '';
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 100%;
-    background: linear-gradient(90deg, transparent, var(--primary-light), transparent);
-    transform: translateX(-100%);
-    opacity: 0;
-    transition: transform 0.4s, opacity 0.3s;
-    pointer-events: none;
-}
-.item:hover::after { transform: translateX(100%); opacity: 1; }
-.item i { position: relative; z-index: 2; }
-
-/* 头部渐变光条 */
-.header::before {
-    content: '';
-    position: absolute;
-    left: 32px; right: 32px; bottom: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--glow-primary), transparent);
-    opacity: 0;
-    transition: opacity 0.3s;
-}
-.main.scrolled .header::before { opacity: 1; }
-
-/* 卡片标题图标呼吸 */
-h3 i { animation: iconPulse 3s ease-in-out infinite; }
-h3 i:nth-child(odd) { animation-delay: 0.8s; }
-@keyframes iconPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
-
-/* 全局命令面板 (Ctrl+K) */
-.cmd-palette {
-    position: fixed;
-    top: 12%; left: 50%;
-    transform: translateX(-50%) translateY(-14px) scale(0.97);
-    width: min(560px, 92vw);
-    background: var(--bg-glass);
-    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    box-shadow: 0 25px 60px -15px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.06);
-    z-index: 1200;
-    opacity: 0; visibility: hidden;
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-    overflow: hidden;
-}
-.cmd-palette.open { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0) scale(1); }
-.cmd-palette-input {
-    display: flex; align-items: center; gap: 10px;
-    padding: 16px 18px;
-    border-bottom: 1px solid var(--border);
-}
-.cmd-palette-input i { color: var(--text-sub); font-size: 18px; }
-.cmd-palette-input input {
-    border: none; background: transparent; padding: 0;
-    font-size: 16px; box-shadow: none;
-}
-.cmd-palette-input input:focus { border: none; box-shadow: none; background: transparent; }
-.cmd-palette-items { max-height: 320px; overflow-y: auto; padding: 8px; }
-.cmd-palette-item {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 14px; border-radius: 10px; cursor: pointer;
-    color: var(--text-main); font-size: 14px; font-weight: 500;
-    transition: var(--trans);
-}
-.cmd-palette-item i { font-size: 18px; color: var(--text-sub); width: 22px; }
-.cmd-palette-item:hover, .cmd-palette-item.active { background: var(--primary-light); color: var(--primary); }
-.cmd-palette-item:hover i, .cmd-palette-item.active i { color: var(--primary); }
-.cmd-palette-item .kbd {
-    margin-left: auto; font-family: var(--font-mono); font-size: 11px;
-    color: var(--text-sub); background: var(--input-bg);
-    padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border);
-}
-.cmd-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); backdrop-filter: blur(4px); z-index: 1199; opacity: 0; visibility: hidden; transition: opacity 0.25s; }
-.cmd-overlay.open { opacity: 1; visibility: visible; }
-
-/* 表格行 hover 滑动高亮 */
-tr { position: relative; }
-tr td { position: relative; }
-tr::after {
-    content: '';
-    position: absolute; left: 0; right: 0; top: 0; bottom: 0;
-    pointer-events: none;
-}
-
 /* 系统设置 Tab 样式 */
 .settings-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 0 24px 20px 24px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
 .settings-tabs::-webkit-scrollbar { display: none; }
@@ -5418,24 +5261,8 @@ tr::after {
 
 <div id="toast" class="toast"><i id="t-icon"></i><span id="t-msg"></span></div>
 
-<div class="cmd-overlay" id="cmdOverlay" onclick="toggleCmdPalette(false)"></div>
-<div class="cmd-palette" id="cmdPalette">
-    <div class="cmd-palette-input">
-        <i class="ri-search-line"></i>
-        <input id="cmdInput" placeholder="搜索功能或跳转... (↑↓ 选择, Enter 执行, Esc 关闭)" autocomplete="off">
-        <span class="kbd" style="font-size:11px;color:var(--text-sub)">ESC</span>
-    </div>
-    <div class="cmd-palette-items" id="cmdItems"></div>
-</div>
-
 <div class="sidebar">
-    <div class="brand">
-        <div class="brand-icon"><i class="ri-rocket-2-fill"></i></div>
-<div class="brand-text">
-                <div>GoRelay Pro</div>
-                <div class="brand-ver">{{.Version}}</div>
-            </div>
-    </div>
+    <div class="brand"><div class="brand-icon"><i class="ri-rocket-2-fill"></i></div> GoRelay Pro</div>
     <div class="menu">
         <div class="item active" onclick="nav('dashboard',this)"><i class="ri-dashboard-line"></i> 概览监控</div>
         <div class="item" onclick="nav('rules',this)"><i class="ri-route-line"></i> 转发管理</div>
@@ -5476,36 +5303,28 @@ tr::after {
                         <h2>欢迎回来，{{.User}} 👋</h2>
                         <p>这是你的 GoRelay Pro 控制面板，当前版本 {{.Version}}</p>
                     </div>
-                    <div class="welcome-actions">
-                        <button class="btn secondary" style="padding:9px 16px;font-size:13px" onclick="nav('rules')"><i class="ri-add-line"></i> 新建规则</button>
-                        <button class="btn secondary" style="padding:9px 16px;font-size:13px" onclick="nav('deploy')"><i class="ri-server-line"></i> 部署节点</button>
-                    </div>
                 </div>
             </div>
             <div class="stats-grid">
                 <div class="card stat-item">
-                    <div class="stat-crystal"><i class="ri-exchange-funds-line"></i></div>
                     <div class="stat-label">累计总流量</div>
-                    <div class="stat-val" id="stat-total-traffic" data-count="0">{{formatBytes .TotalTraffic}}</div>
+                    <div class="stat-val" id="stat-total-traffic">{{formatBytes .TotalTraffic}}</div>
                     <div class="stat-trend"><i class="ri-database-2-line"></i> 数据中继总量</div>
                     <i class="ri-exchange-line bg-icon"></i>
                 </div>
                 <div class="card stat-item">
-                    <div class="stat-crystal" style="background:linear-gradient(135deg,#06b6d4,#3b82f6);box-shadow:0 8px 20px -4px var(--glow-accent)"><i class="ri-arrow-down-circle-line"></i></div>
                     <div class="stat-label">实时下载 (Rx)</div>
                     <div class="stat-val" id="speed-rx">0 B/s</div>
                     <div class="stat-trend"><i class="ri-arrow-down-circle-line"></i> 当前下行带宽</div>
                     <i class="ri-download-cloud-2-line bg-icon"></i>
                 </div>
                 <div class="card stat-item">
-                    <div class="stat-crystal" style="background:linear-gradient(135deg,#34d399,#10b981)"><i class="ri-arrow-up-circle-line"></i></div>
                     <div class="stat-label">实时上传 (Tx)</div>
                     <div class="stat-val" id="speed-tx">0 B/s</div>
                     <div class="stat-trend"><i class="ri-arrow-up-circle-line"></i> 当前上行带宽</div>
                     <i class="ri-upload-cloud-2-line bg-icon"></i>
                 </div>
                 <div class="card stat-item">
-                    <div class="stat-crystal" style="background:linear-gradient(135deg,#a855f7,#6366f1);box-shadow:0 8px 20px -4px rgba(168,85,247,0.3)"><i class="ri-cpu-line"></i></div>
                     <div class="stat-label">节点状态</div>
                     <div style="display: flex; align-items: baseline; gap: 6px; margin: 8px 0;">
                         <div class="stat-val" style="margin: 0;">{{len .Agents}}</div>
@@ -6209,87 +6028,6 @@ tr::after {
 
         if(location.hash !== '#'+id) { if(history.pushState) history.pushState(null,null,'#'+id); else location.hash = '#'+id; }
     }
-
-    // ===== 全局命令面板 (Ctrl+K) =====
-    const cmdCommands = [
-        { icon: 'ri-dashboard-line', label: '概览监控', id: 'dashboard' },
-        { icon: 'ri-route-line', label: '转发管理', id: 'rules' },
-        { icon: 'ri-server-line', label: '节点部署', id: 'deploy' },
-        { icon: 'ri-file-list-2-line', label: '系统日志', id: 'logs' },
-        { icon: 'ri-settings-4-line', label: '系统设置', id: 'settings' }
-    ];
-    let cmdIdx = 0;
-    function renderCmdItems(filter) {
-        const box = document.getElementById('cmdItems');
-        const list = cmdCommands.filter(c => c.label.includes(filter || '') || c.id.includes((filter||'').toLowerCase()));
-        box.innerHTML = '';
-        cmdIdx = 0;
-        list.forEach((c, i) => {
-            const div = document.createElement('div');
-            div.className = 'cmd-palette-item' + (i === 0 ? ' active' : '');
-            div.dataset.id = c.id;
-            div.innerHTML = '<i class="'+c.icon+'"></i><span>'+c.label+'</span><span class="kbd">Enter</span>';
-            div.onclick = () => { nav(c.id); toggleCmdPalette(false); };
-            box.appendChild(div);
-        });
-        if (list.length === 0) {
-            box.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-sub);font-size:13px">没有匹配的功能</div>';
-        }
-    }
-    function toggleCmdPalette(open) {
-        const p = document.getElementById('cmdPalette');
-        const o = document.getElementById('cmdOverlay');
-        const willOpen = open === undefined ? !p.classList.contains('open') : open;
-        p.classList.toggle('open', willOpen);
-        o.classList.toggle('open', willOpen);
-        if (willOpen) { renderCmdItems(''); setTimeout(() => document.getElementById('cmdInput').focus(), 50); }
-    }
-    document.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-            e.preventDefault();
-            toggleCmdPalette();
-        }
-        if (e.key === 'Escape') toggleCmdPalette(false);
-        const p = document.getElementById('cmdPalette');
-        if (!p.classList.contains('open')) return;
-        if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            const items = document.querySelectorAll('.cmd-palette-item');
-            if (items.length) { items[cmdIdx].classList.remove('active'); cmdIdx = (cmdIdx + 1) % items.length; items[cmdIdx].classList.add('active'); }
-        } else if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            const items = document.querySelectorAll('.cmd-palette-item');
-            if (items.length) { items[cmdIdx].classList.remove('active'); cmdIdx = (cmdIdx - 1 + items.length) % items.length; items[cmdIdx].classList.add('active'); }
-        } else if (e.key === 'Enter') {
-            e.preventDefault();
-            const items = document.querySelectorAll('.cmd-palette-item');
-            if (items.length) items[cmdIdx].click();
-        }
-    });
-    document.getElementById('cmdInput').addEventListener('input', (e) => renderCmdItems(e.target.value));
-    document.getElementById('cmdInput').addEventListener('click', (e) => e.stopPropagation());
-    // ===== 命令面板结束 =====
-
-    // ===== 数字滚动动画 =====
-    function animateCountUp(el, target) {
-        if (!el || el.dataset.counting === '1') return;
-        const start = parseFloat(el.dataset.count || '0') || 0;
-        if (start === target) { el.dataset.count = target; return; }
-        el.dataset.counting = '1';
-        const dur = 600;
-        const t0 = performance.now();
-        function tick(now) {
-            const p = Math.min((now - t0) / dur, 1);
-            const ease = 1 - Math.pow(1 - p, 3);
-            const val = Math.round(start + (target - start) * ease);
-            el.innerText = formatBytes(val);
-            el.dataset.count = val;
-            if (p < 1) requestAnimationFrame(tick);
-            else { el.dataset.count = target; el.dataset.counting = '0'; }
-        }
-        requestAnimationFrame(tick);
-    }
-    // ===== 数字滚动结束 =====
     
     function initTab() { const hash = window.location.hash.substring(1); if(hash && document.getElementById(hash)) nav(hash); }
     initTab();
@@ -7021,7 +6759,7 @@ tr::after {
                 const msg = JSON.parse(e.data);
                 if(msg.type === 'stats' && msg.data) {
                     const d = msg.data;
-                    animateCountUp(document.getElementById('stat-total-traffic'), d.total_traffic);
+                    document.getElementById('stat-total-traffic').innerText = formatBytes(d.total_traffic);
                     document.getElementById('speed-rx').innerText = formatBytes(d.speed_rx) + '/s';
                     document.getElementById('speed-tx').innerText = formatBytes(d.speed_tx) + '/s';
                     
