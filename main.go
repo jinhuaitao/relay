@@ -169,6 +169,7 @@ type AgentInfo struct {
     Version     string    `json:"version"`
     Region      string    `json:"region"`
     IsOnline    bool      `json:"is_online"`
+	writeMu   sync.Mutex
 }
 
 type Message struct {
@@ -240,6 +241,8 @@ var (
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
+
+	oauthStates = make(map[string]time.Time)
 
 	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
@@ -363,9 +366,8 @@ func checkLoginRateLimit(ip string) bool {
 }
 
 func recordLoginFail(ip string) {
-	v, _ := loginAttempts.LoadOrStore(ip, 0)
-	count := v.(int) + 1
-	loginAttempts.Store(ip, count)
+	v, _ := loginAttempts.LoadOrStore(ip, new(int32))
+	count := atomic.AddInt32(v.(*int32), 1)
 	if count >= 5 {
 		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
 	}
@@ -1148,8 +1150,6 @@ func startTgBotLoop() {
 					if db != nil {
 						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 						if err == nil {
-							defer dsRows.Close()
-							
 							for dsRows.Next() {
 								var d string
 								var dTx, dRx int64
@@ -1163,6 +1163,7 @@ func startTgBotLoop() {
 									historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
 								}
 							}
+							dsRows.Close()
 						}
 					}
 					
@@ -1280,6 +1281,20 @@ func startTgBotLoop() {
 
 // ================= TRAFFIC AUTO RESET =================
 
+func sessionCleanupLoop() {
+	ticker := time.NewTicker(30 * time.Minute)
+	for range ticker.C {
+		mu.Lock()
+		now := time.Now()
+		for k, exp := range sessions {
+			if now.After(exp) {
+				delete(sessions, k)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
 func trafficResetLoop() {
 	for {
 		time.Sleep(1 * time.Hour)
@@ -1371,6 +1386,7 @@ func runMaster() {
 	go autoBackupLoop()   
 	go trafficResetLoop()
 	go dailyTrafficReportLoop()
+	go sessionCleanupLoop()
 
 	mu.Lock()
 	panelDomain := config.PanelDomain
@@ -1675,8 +1691,8 @@ func broadcastLoop() {
 			wsMu.Unlock()
 			continue
 		}
-		
-		// 1. 先构建好需要发送的消息对象 (这就是编译器之前找不到的 msg)
+
+		// 1. 先构建好需要发送的消息对象
 		msg := WSMessage{
 			Type: "stats",
 			Data: WSDashboardData{
@@ -1689,21 +1705,28 @@ func broadcastLoop() {
 			},
 		}
 
-		// 2. 在锁内，循环外部完成且仅完成一次 JSON 序列化
+		// 2. 在锁内完成且仅完成一次 JSON 序列化
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
 			wsMu.Unlock()
 			continue
 		}
 
-		// 3. 遍历客户端发送原生 Byte 数据，极大节省 CPU 和内存分配
+		// 3. 拷贝客户端快照后释放锁，再在锁外发送，避免慢客户端阻塞整个广播
+		snapshot := make([]*websocket.Conn, 0, len(wsClients))
 		for client := range wsClients {
-			if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-				client.Close()
-				delete(wsClients, client)
-			}
+			snapshot = append(snapshot, client)
 		}
 		wsMu.Unlock()
+
+		for _, client := range snapshot {
+			if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+				client.Close()
+				wsMu.Lock()
+				delete(wsClients, client)
+				wsMu.Unlock()
+			}
+		}
 	}
 }
 
@@ -1933,6 +1956,15 @@ func handleHealthReport(payload interface{}) {
 	}
 }
 
+func sendToAgent(a *AgentInfo, msg Message) {
+	if a == nil || a.Conn == nil {
+		return
+	}
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	_ = json.NewEncoder(a.Conn).Encode(msg)
+}
+
 func pushConfigToAll() {
 	mu.Lock()
 	tasksMap := make(map[string][]ForwardTask)
@@ -1983,9 +2015,9 @@ func pushConfigToAll() {
 		if t == nil {
 			t = []ForwardTask{}
 		}
-		go func(conn net.Conn, tasks []ForwardTask) {
-			json.NewEncoder(conn).Encode(Message{Type: "update", Payload: tasks})
-		}(a.Conn, t)
+		go func(conn net.Conn, tasks []ForwardTask, agent *AgentInfo) {
+			sendToAgent(agent, Message{Type: "update", Payload: tasks})
+		}(a.Conn, t, a)
 	}
 }
 
@@ -2071,12 +2103,12 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if db != nil {
 		dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 		if err == nil {
-			defer dsRows.Close()
 			for dsRows.Next() {
 				var ds DailyStat
 				dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
 				dailyStats = append(dailyStats, ds)
 			}
+			dsRows.Close()
 		}
 	}
 	// 将数据按时间顺序颠倒，方便图表显示
@@ -2279,6 +2311,17 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // ================= GITHUB OAUTH =================
 
+func cleanupOauthStates() {
+	mu.Lock()
+	now := time.Now()
+	for k, exp := range oauthStates {
+		if now.After(exp) {
+			delete(oauthStates, k)
+		}
+	}
+	mu.Unlock()
+}
+
 func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	clientID := config.GithubClientID
@@ -2289,13 +2332,35 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	// 生成一次性 state 防止 CSRF，并设置 5 分钟有效期
+	state := make([]byte, 16)
+	rand.Read(state)
+	stateStr := hex.EncodeToString(state)
+
+	mu.Lock()
+	oauthStates[stateStr] = time.Now().Add(5 * time.Minute)
+	mu.Unlock()
+
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, stateStr)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	if code == "" {
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
+	// 校验 OAuth state，防止 CSRF 劫持登录流程
+	mu.Lock()
+	exp, valid := oauthStates[state]
+	if valid {
+		delete(oauthStates, state)
+	}
+	mu.Unlock()
+	if !valid || time.Now().After(exp) {
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
 		return
 	}
@@ -2577,7 +2642,7 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if a, ok := agents[name]; ok {
 		if a.IsOnline {
-			json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
+			sendToAgent(a, Message{Type: "uninstall"})
 		}
 		delete(agents, name) // 点击卸载时才彻底删除
 	}
@@ -2811,7 +2876,7 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", 404)
 		return
 	}
-	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+	sendToAgent(agent, Message{Type: "upgrade"})
 	w.Write([]byte("ok"))
 }
 
@@ -2825,7 +2890,7 @@ func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	// 遍历所有节点，仅向在线节点发送更新指令
 	for _, agent := range agents {
 		if agent.IsOnline {
-			json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+			sendToAgent(agent, Message{Type: "upgrade"})
 			count++
 		}
 	}
@@ -2875,10 +2940,19 @@ func doRestart() {
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
-				exec.Command("systemctl", "restart", s).Start()
-				time.Sleep(1 * time.Second)
-				os.Exit(0)
-				return
+				if out, err := exec.Command("systemctl", "restart", s).CombinedOutput(); err == nil {
+					// 等待 systemd 报告服务处于 active 状态，再退出当前进程
+					for i := 0; i < 30; i++ {
+						time.Sleep(500 * time.Millisecond)
+						if exec.Command("systemctl", "is-active", s).Run() == nil {
+							break
+						}
+					}
+					os.Exit(0)
+					return
+				} else {
+					log.Printf("⚠️ systemctl restart %s 失败: %v (%s)", s, err, string(out))
+				}
 			}
 		}
 	}
@@ -2886,10 +2960,13 @@ func doRestart() {
 	if _, err := os.Stat("/etc/init.d"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
-				exec.Command("rc-service", s, "restart").Start()
-				time.Sleep(1 * time.Second)
-				os.Exit(0)
-				return
+				if out, err := exec.Command("rc-service", s, "restart").CombinedOutput(); err == nil {
+					time.Sleep(1 * time.Second)
+					os.Exit(0)
+					return
+				} else {
+					log.Printf("⚠️ rc-service restart %s 失败: %v (%s)", s, err, string(out))
+				}
 			}
 		}
 	}
