@@ -36,7 +36,6 @@ import (
 	"golang.org/x/time/rate"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
 	"github.com/gorilla/websocket"
@@ -48,7 +47,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.1"
+	AppVersion      = "v3.3.2"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -385,9 +384,14 @@ func performSelfUpdate() error {
 	log.Printf("正在下载更新: %s", targetURL)
 
 	resp, err := http.Get(targetURL)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil {
+		return fmt.Errorf("下载请求失败: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
 		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
 	}
+	downloadLen := resp.ContentLength
 	defer resp.Body.Close()
 
 	exePath, err := os.Executable()
@@ -400,20 +404,35 @@ func performSelfUpdate() error {
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
-	_, err = io.Copy(out, resp.Body)
+	n, err := io.Copy(out, resp.Body)
 	out.Close()
 	if err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	// 完整性校验：下载大小必须与服务器声明一致，避免截断的损坏二进制
+	if downloadLen > 0 && n != downloadLen {
+		os.Remove(tmpPath)
+		return fmt.Errorf("下载不完整: 期望 %d 字节，实际 %d 字节", downloadLen, n)
 	}
 
 	os.Chmod(tmpPath, 0755)
 
+	// 原子替换：先把旧文件改名为 .old（仅在新文件已完整落盘后），再改名新文件
+	// 任一步失败都回滚，绝不删除旧备份，保证磁盘上始终有可用二进制
 	oldPath := exePath + ".old"
 	os.Remove(oldPath)
 	if err := os.Rename(exePath, oldPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("备份旧文件失败: %v", err)
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
-		os.Rename(oldPath, exePath)
+		// 回滚：恢复旧二进制，丢弃新文件
+		if rbErr := os.Rename(oldPath, exePath); rbErr != nil {
+			return fmt.Errorf("覆盖文件失败且回滚失败: %v (请手动恢复 %s)", err, oldPath)
+		}
+		os.Remove(tmpPath)
 		return fmt.Errorf("覆盖文件失败: %v", err)
 	}
 	return nil
@@ -2956,7 +2975,7 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
 
-	hasUpdate := remoteVer != currentVer
+	hasUpdate := compareVersions(remoteVer, currentVer) > 0
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
@@ -3750,6 +3769,33 @@ func setupSignalHandler() {
 		}
 		os.Exit(0)
 	}()
+}
+
+// compareVersions 语义化比较两个版本号（如 3.3.0），返回:
+// -1 表示 a<b, 0 表示 a==b, 1 表示 a>b
+func compareVersions(a, b string) int {
+	na := strings.Split(strings.TrimPrefix(a, "v"), ".")
+	nb := strings.Split(strings.TrimPrefix(b, "v"), ".")
+	maxLen := len(na)
+	if len(nb) > maxLen {
+		maxLen = len(nb)
+	}
+	for i := 0; i < maxLen; i++ {
+		var x, y int
+		if i < len(na) {
+			x, _ = strconv.Atoi(na[i])
+		}
+		if i < len(nb) {
+			y, _ = strconv.Atoi(nb[i])
+		}
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+	}
+	return 0
 }
 
 func formatBytes(b int64) string {
