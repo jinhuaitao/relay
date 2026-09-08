@@ -416,6 +416,26 @@ func validatePort(port string) bool {
 	p, err := strconv.Atoi(port)
 	return err == nil && p > 0 && p < 65536
 }
+
+// CSRF保护函数
+
+
+
+
+
+// 输入验证函数
+func validateAgentName(name string) bool {
+	return len(name) > 0 && len(name) < 50
+}
+
+func validateIP(ip string) bool {
+	return regexp.MustCompile(`^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z]{2,})+$`).MatchString(ip)
+}
+
+func validatePort(port string) bool {
+	p, err := strconv.Atoi(port)
+	return err == nil && p > 0 && p < 65536
+}
 func checkLoginRateLimit(ip string) bool {
 	if t, ok := blockUntil.Load(ip); ok {
 		if time.Now().Before(t.(time.Time)) {
@@ -2213,6 +2233,11 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 安全响应头
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Cache-Control", "no-store")
 		// 安全响应头
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -4422,6 +4447,7 @@ input:focus + i { color: var(--primary); transform: translateY(-50%) scale(1.1);
         <h2>GoRelay Pro</h2>
         <p>安全内网穿透控制台</p>
     </div>
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     {{if .Error}}<div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>{{end}}
     
