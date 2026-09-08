@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -47,7 +46,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.9"
+	AppVersion      = "v3.3.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -254,6 +253,10 @@ var (
 	// 每日流量统计缓冲（提升数据库性能）
 	dailyTxBuf int64
 	dailyRxBuf int64
+	csrfMu       sync.Mutex
+	csrfTokens   = make(map[string]string)
+	csrfExpiry   = make(map[string]time.Time)
+	downloadAttempts = sync.Map{}
 )
 
 // --- 数据库初始化与优化 ---
@@ -344,12 +347,75 @@ func hashPassword(password, salt string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func md5Hash(s string) string {
-	h := md5.New()
-	h.Write([]byte(s))
-	return hex.EncodeToString(h.Sum(nil))
+
+// CSRF保护函数
+func generateCSRFToken() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	token := hex.EncodeToString(b)
+	csrfMu.Lock()
+	csrfTokens[token] = token
+	csrfExpiry[token] = time.Now().Add(24 * time.Hour)
+	csrfMu.Unlock()
+	return token
 }
 
+func setCSRFCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "_csrf",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   86400,
+	})
+}
+
+func validateCSRFToken(token string, cookieToken string) bool {
+	if token == "" || cookieToken == "" {
+		return false
+	}
+	csrfMu.Lock()
+	defer csrfMu.Unlock()
+	if expiry, ok := csrfExpiry[token]; ok && time.Now().Before(expiry) {
+		delete(csrfTokens, token)
+		delete(csrfExpiry, token)
+		return true
+	}
+	return false
+}
+
+func csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
+			next(w, r)
+			return
+		}
+		token := r.PostFormValue("_csrf")
+		if token == "" {
+			token = r.Header.Get("X-CSRF-Token")
+		}
+		cookie, err := r.Cookie("_csrf")
+		if err != nil || !validateCSRFToken(token, cookie.Value) {
+			http.Error(w, "CSRF token validation failed", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// 输入验证函数
+func validateAgentName(name string) bool {
+	return len(name) > 0 && len(name) < 50
+}
+
+func validateIP(ip string) bool {
+	return regexp.MustCompile(`^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z]{2,})+$`).MatchString(ip)
+}
+
+func validatePort(port string) bool {
+	p, err := strconv.Atoi(port)
+	return err == nil && p > 0 && p < 65536
+}
 func checkLoginRateLimit(ip string) bool {
 	if t, ok := blockUntil.Load(ip); ok {
 		if time.Now().Before(t.(time.Time)) {
@@ -1458,16 +1524,16 @@ func runMaster() {
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/setup", handleSetup)
-	http.HandleFunc("/add", authMiddleware(handleAddRule))
-	http.HandleFunc("/edit", authMiddleware(handleEditRule))
-	http.HandleFunc("/delete", authMiddleware(handleDeleteRule))
-	http.HandleFunc("/toggle", authMiddleware(handleToggleRule))
-	http.HandleFunc("/reset_traffic", authMiddleware(handleResetTraffic))
-	http.HandleFunc("/batch", authMiddleware(handleBatchRule))
-	http.HandleFunc("/delete_agent", authMiddleware(handleDeleteAgent))
-	http.HandleFunc("/update_settings", authMiddleware(handleUpdateSettings))
+	http.HandleFunc("/add", authMiddleware(csrfMiddleware(handleAddRule)))
+	http.HandleFunc("/edit", authMiddleware(csrfMiddleware(handleEditRule)))
+	http.HandleFunc("/delete", authMiddleware(csrfMiddleware(handleDeleteRule)))
+	http.HandleFunc("/toggle", authMiddleware(csrfMiddleware(handleToggleRule)))
+	http.HandleFunc("/reset_traffic", authMiddleware(csrfMiddleware(handleResetTraffic)))
+	http.HandleFunc("/batch", authMiddleware(csrfMiddleware(handleBatchRule)))
+	http.HandleFunc("/delete_agent", authMiddleware(csrfMiddleware(handleDeleteAgent)))
+	http.HandleFunc("/update_settings", authMiddleware(csrfMiddleware(handleUpdateSettings)))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
-	http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig))
+	// http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) // 安全风险-任意DB覆盖
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
 	http.HandleFunc("/clear_logs", authMiddleware(handleClearLogs))
 	http.HandleFunc("/export_rules", authMiddleware(handleExportRules))
@@ -1475,12 +1541,12 @@ func runMaster() {
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
-	http.HandleFunc("/restart", authMiddleware(handleRestart))
-	http.HandleFunc("/update_sys", authMiddleware(handleUpdateSystem))
-	http.HandleFunc("/update_agent", authMiddleware(handleUpdateAgent))
-	http.HandleFunc("/update_all_agents", authMiddleware(handleUpdateAllAgents))
-	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
-	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken))
+	http.HandleFunc("/restart", authMiddleware(csrfMiddleware(handleRestart)))
+	http.HandleFunc("/update_sys", authMiddleware(csrfMiddleware(handleUpdateSystem)))
+	http.HandleFunc("/update_agent", authMiddleware(csrfMiddleware(handleUpdateAgent)))
+	http.HandleFunc("/update_all_agents", authMiddleware(csrfMiddleware(handleUpdateAllAgents)))
+	http.HandleFunc("/check_update", authMiddleware(csrfMiddleware(handleCheckUpdate)))
+	http.HandleFunc("/gen_agent_token", authMiddleware(csrfMiddleware(handleGenAgentToken)))
 	
 	http.HandleFunc("/oauth/github/login", handleGithubLogin)
 	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
@@ -2147,6 +2213,11 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 安全响应头
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Cache-Control", "no-store")
 		mu.Lock()
 		setup := config.IsSetup
 		mu.Unlock()
@@ -2196,8 +2267,11 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	// 生成CSRF Token
+	csrfToken := generateCSRFToken()
+	setCSRFCookie(w, csrfToken)
 	t, _ := template.New("s").Parse(setupHtml)
-	t.Execute(w, nil)
+	t.Execute(w, map[string]interface{}{"CSRFToken": csrfToken})
 }
 
 
@@ -2215,11 +2289,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if errCode == "3" { errMsg = "GitHub 授权失败" }
 		if errCode == "4" { errMsg = "该 GitHub 账号不在允许列表中" }
 
+		// 为登录页面设置CSRF Cookie
+		csrfToken := generateCSRFToken()
+		setCSRFCookie(w, csrfToken)
 		t, _ := template.New("l").Parse(loginHtml)
 		t.Execute(w, map[string]interface{}{
 			"TwoFA": isEnabled,
 			"GithubEnabled": githubEnabled,
 			"Error": errMsg,
+			"CSRFToken": csrfToken,
 		})
 		return
 	}
@@ -2240,10 +2318,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-	} else if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
-		passMatch = true
-	}
-
+	
 	if !passMatch {
 		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
@@ -2262,7 +2337,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
+	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) 
 	mu.Unlock()
 	
 	// 智能判断是否开启安全 Cookie
@@ -2288,7 +2363,13 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	// 生成OAuth State防止CSRF
+	oauthState := generateUUID()
+	csrfMu.Lock()
+	csrfTokens[oauthState] = oauthState
+	csrfExpiry[oauthState] = time.Now().Add(10 * time.Minute)
+	csrfMu.Unlock()
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s&scope=user", clientID, oauthState)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
@@ -2363,7 +2444,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	sidStr := hex.EncodeToString(sid)
 	
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
+	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour)
 	mu.Unlock()
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
@@ -2411,6 +2492,26 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
+	// 参数验证
+	entryAgent := strings.TrimSpace(r.FormValue("entry_agent"))
+	exitAgent := strings.TrimSpace(r.FormValue("exit_agent"))
+	targetIP := strings.TrimSpace(r.FormValue("target_ip"))
+	targetPort := r.FormValue("target_port")
+	entryPort := r.FormValue("entry_port")
+	
+	if !validateAgentName(entryAgent) || !validateAgentName(exitAgent) {
+		http.Error(w, "非法的Agent名称", http.StatusBadRequest)
+		return
+	}
+	if !validateIP(targetIP) {
+		http.Error(w, "非法的目标IP/域名", http.StatusBadRequest)
+		return
+	}
+	if !validatePort(targetPort) || !validatePort(entryPort) {
+		http.Error(w, "非法的端口号", http.StatusBadRequest)
+		return
+	}
+	
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	lbStrategy := r.FormValue("lb_strategy")
@@ -3934,6 +4035,7 @@ button:active { transform: translateY(0); }
 </button>
 
 <form class="card" method="POST">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <div class="logo-wrap">
         <div class="logo-icon"><i class="ri-rocket-2-fill"></i></div>
         <h2>GoRelay Pro</h2>
@@ -4320,6 +4422,7 @@ input:focus + i { color: var(--primary); transform: translateY(-50%) scale(1.1);
         <h2>GoRelay Pro</h2>
         <p>安全内网穿透控制台</p>
     </div>
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     {{if .Error}}<div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>{{end}}
     
     <div class="input-box"><input name="username" placeholder="管理员账号" autocomplete="off"><i class="ri-user-3-line"></i></div>
