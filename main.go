@@ -240,7 +240,7 @@ var (
 	configDirty      int32
 
 	sessionLifetime = 7 * 24 * time.Hour // 会话有效期（滑动续期）
-	maxTTLSeconds   = int64(sessionLifetime / time.Second)
+	maxTTLSeconds   = int(sessionLifetime / time.Second)
 
 	rrCounters   sync.Map
 	connCounters sync.Map
