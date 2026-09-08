@@ -26,7 +26,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,9 +236,8 @@ var (
 	rrCounters   sync.Map
 	connCounters sync.Map
 
-	loginAttempts    = sync.Map{}
-	blockUntil       = sync.Map{}
-	downloadAttempts = sync.Map{}
+	loginAttempts = sync.Map{}
+	blockUntil    = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
@@ -258,6 +256,7 @@ var (
 	csrfMu       sync.Mutex
 	csrfTokens   = make(map[string]string)
 	csrfExpiry   = make(map[string]time.Time)
+	downloadAttempts = sync.Map{}
 )
 
 // --- 数据库初始化与优化 ---
@@ -349,98 +348,70 @@ func hashPassword(password, salt string) string {
 }
 
 
-
 // CSRF保护函数
 func generateCSRFToken() string {
-    b := make([]byte, 32)
-    rand.Read(b)
-    token := hex.EncodeToString(b)
-    csrfMu.Lock()
-    csrfTokens[token] = token
-    csrfExpiry[token] = time.Now().Add(24 * time.Hour)
-    csrfMu.Unlock()
-    return token
+	b := make([]byte, 32)
+	rand.Read(b)
+	token := hex.EncodeToString(b)
+	csrfMu.Lock()
+	csrfTokens[token] = token
+	csrfExpiry[token] = time.Now().Add(24 * time.Hour)
+	csrfMu.Unlock()
+	return token
 }
 
 func setCSRFCookie(w http.ResponseWriter, token string) {
-    http.SetCookie(w, &http.Cookie{
-        Name:     "_csrf",
-        Value:    token,
-        Path:     "/",
-        HttpOnly: true,
-        MaxAge:   86400,
-    })
+	http.SetCookie(w, &http.Cookie{
+		Name:     "_csrf",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   86400,
+	})
 }
 
 func validateCSRFToken(token string, cookieToken string) bool {
-    if token == "" || cookieToken == "" {
-        return false
-    }
-    csrfMu.Lock()
-    defer csrfMu.Unlock()
-    // 验证token存在且未过期
-    if expiry, ok := csrfExpiry[token]; ok && time.Now().Before(expiry) {
-        // 使用后删除token（一次性）
-        delete(csrfTokens, token)
-        delete(csrfExpiry, token)
-        return true
-    }
-    return false
+	if token == "" || cookieToken == "" {
+		return false
+	}
+	csrfMu.Lock()
+	defer csrfMu.Unlock()
+	if expiry, ok := csrfExpiry[token]; ok && time.Now().Before(expiry) {
+		delete(csrfTokens, token)
+		delete(csrfExpiry, token)
+		return true
+	}
+	return false
 }
 
 func csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        // GET请求不需要CSRF
-        if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
-            next(w, r)
-            return
-        }
-        // 检查CSRF Token
-        token := r.PostFormValue("_csrf")
-        if token == "" {
-            token = r.Header.Get("X-CSRF-Token")
-        }
-        cookie, err := r.Cookie("_csrf")
-        if err != nil || !validateCSRFToken(token, cookie.Value) {
-            http.Error(w, "CSRF token validation failed", http.StatusForbidden)
-            return
-        }
-        next(w, r)
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
+			next(w, r)
+			return
+		}
+		token := r.PostFormValue("_csrf")
+		if token == "" {
+			token = r.Header.Get("X-CSRF-Token")
+		}
+		cookie, err := r.Cookie("_csrf")
+		if err != nil || !validateCSRFToken(token, cookie.Value) {
+			http.Error(w, "CSRF token validation failed", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
 }
-
 
 // 输入验证函数
 func validateAgentName(name string) bool {
-    // 允许字母、数字、下划线、连字符、中文、空格
-    return len(name) > 0 && len(name) < 50
+	return len(name) > 0 && len(name) < 50
 }
 
 func validateIP(ip string) bool {
-    // 简单的IP/域名验证
-    return regexp.MustCompile(`^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z]{2,})+$`).MatchString(ip)
+	return regexp.MustCompile(`^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(\.[a-zA-Z]{2,})+$`).MatchString(ip)
 }
 
-
-// 操作速率限制
-var (
-	opRateLimiter = rate.NewLimiter(10, 20) // 每秒10次，突发20次
-	adminRateLimiter = rate.NewLimiter(5, 10) // 管理员操作更严格
-)
-
-// 注意: checkRateLimit 函数已定义，在实际使用中需要手动调用
-// 示例用法:
-// if !checkRateLimit(ip, true) {
-//     http.Error(w, "操作过于频繁，请稍后再试", http.StatusTooManyRequests)
-//     return
-// }
-func checkRateLimit(ip string, isAdmin bool) bool {
-	limiter := adminRateLimiter
-	if !isAdmin {
-		limiter = opRateLimiter
-	}
-	return limiter.Allow()
-}
 func validatePort(port string) bool {
 	p, err := strconv.Atoi(port)
 	return err == nil && p > 0 && p < 65536
@@ -1562,11 +1533,11 @@ func runMaster() {
 	http.HandleFunc("/delete_agent", authMiddleware(csrfMiddleware(handleDeleteAgent)))
 	http.HandleFunc("/update_settings", authMiddleware(csrfMiddleware(handleUpdateSettings)))
 	http.HandleFunc("/download_config", authMiddleware(handleDownloadConfig))
-	// http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) // REMOVED: 安全风险-任意DB覆盖
+	// http.HandleFunc("/upload_config", authMiddleware(handleUploadConfig)) // 安全风险-任意DB覆盖
 	http.HandleFunc("/export_logs", authMiddleware(handleExportLogs))
 	http.HandleFunc("/clear_logs", authMiddleware(handleClearLogs))
-	http.HandleFunc("/export_rules", authMiddleware(csrfMiddleware(handleExportRules)))
-	http.HandleFunc("/import_rules", authMiddleware(csrfMiddleware(handleImportRules)))
+	http.HandleFunc("/export_rules", authMiddleware(handleExportRules))
+	http.HandleFunc("/import_rules", authMiddleware(handleImportRules))
 	http.HandleFunc("/2fa/generate", authMiddleware(handle2FAGenerate))
 	http.HandleFunc("/2fa/verify", authMiddleware(handle2FAVerify))
 	http.HandleFunc("/2fa/disable", authMiddleware(handle2FADisable))
@@ -2299,7 +2270,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	// 生成CSRF Token
 	csrfToken := generateCSRFToken()
 	setCSRFCookie(w, csrfToken)
-	t, _ = template.New("s").Parse(setupHtml)
+	t, _ := template.New("s").Parse(setupHtml)
 	t.Execute(w, map[string]interface{}{"CSRFToken": csrfToken})
 }
 
@@ -2347,8 +2318,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-	}
-
+	
 	if !passMatch {
 		recordLoginFail(ip)
 		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
@@ -2367,7 +2337,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) // 7天有效期 
+	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) 
 	mu.Unlock()
 	
 	// 智能判断是否开启安全 Cookie
@@ -2474,7 +2444,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	sidStr := hex.EncodeToString(sid)
 	
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour) // 7天有效期
+	sessions[sidStr] = time.Now().Add(7 * 24 * time.Hour)
 	mu.Unlock()
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
@@ -2774,26 +2744,11 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// WARNING: 此函数已禁用 - 存在任意数据库覆盖风险
-/*
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
-	// 审计日志
-	addLog(r, "系统", "下载完整数据库配置")
-	// 限制频率
-	ip := getClientIP(r)
-	if t, ok := downloadAttempts.Load(ip); ok {
-		if time.Now().Before(t.(time.Time).Add(1 * time.Hour)) {
-			http.Error(w, "下载频率限制", http.StatusTooManyRequests)
-			return
-		}
-	}
-	downloadAttempts.Store(ip, time.Now())
-	
 	w.Header().Set("Content-Disposition", "attachment; filename=data.db")
 	http.ServeFile(w, r, DBFile)
 }
 
-/* REMOVED: handleUploadConfig 存在安全风险，已禁用
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
