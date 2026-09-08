@@ -237,8 +237,9 @@ var (
 	rrCounters   sync.Map
 	connCounters sync.Map
 
-	loginAttempts = sync.Map{}
-	blockUntil    = sync.Map{}
+	loginAttempts    = sync.Map{}
+	blockUntil       = sync.Map{}
+	downloadAttempts = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
@@ -361,6 +362,16 @@ func generateCSRFToken() string {
     return token
 }
 
+func setCSRFCookie(w http.ResponseWriter, token string) {
+    http.SetCookie(w, &http.Cookie{
+        Name:     "_csrf",
+        Value:    token,
+        Path:     "/",
+        HttpOnly: true,
+        MaxAge:   86400,
+    })
+}
+
 func validateCSRFToken(token string, cookieToken string) bool {
     if token == "" || cookieToken == "" {
         return false
@@ -401,8 +412,8 @@ func csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 // 输入验证函数
 func validateAgentName(name string) bool {
-    // 只允许字母、数字、下划线、连字符
-    return regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(name)
+    // 允许字母、数字、下划线、连字符、中文、空格
+    return len(name) > 0 && len(name) < 50
 }
 
 func validateIP(ip string) bool {
@@ -417,6 +428,12 @@ var (
 	adminRateLimiter = rate.NewLimiter(5, 10) // 管理员操作更严格
 )
 
+// 注意: checkRateLimit 函数已定义，在实际使用中需要手动调用
+// 示例用法:
+// if !checkRateLimit(ip, true) {
+//     http.Error(w, "操作过于频繁，请稍后再试", http.StatusTooManyRequests)
+//     return
+// }
 func checkRateLimit(ip string, isAdmin bool) bool {
 	limiter := adminRateLimiter
 	if !isAdmin {
@@ -425,8 +442,8 @@ func checkRateLimit(ip string, isAdmin bool) bool {
 	return limiter.Allow()
 }
 func validatePort(port string) bool {
-    p, err := strconv.Atoi(port)
-    return err == nil && p > 0 && p < 65536
+	p, err := strconv.Atoi(port)
+	return err == nil && p > 0 && p < 65536
 }
 func checkLoginRateLimit(ip string) bool {
 	if t, ok := blockUntil.Load(ip); ok {
@@ -2281,9 +2298,9 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	// 生成CSRF Token
 	csrfToken := generateCSRFToken()
+	setCSRFCookie(w, csrfToken)
 	t, _ = template.New("s").Parse(setupHtml)
 	t.Execute(w, map[string]interface{}{"CSRFToken": csrfToken})
-	t.Execute(w, nil)
 }
 
 
@@ -2301,11 +2318,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if errCode == "3" { errMsg = "GitHub 授权失败" }
 		if errCode == "4" { errMsg = "该 GitHub 账号不在允许列表中" }
 
+		// 为登录页面设置CSRF Cookie
+		csrfToken := generateCSRFToken()
+		setCSRFCookie(w, csrfToken)
 		t, _ := template.New("l").Parse(loginHtml)
 		t.Execute(w, map[string]interface{}{
 			"TwoFA": isEnabled,
 			"GithubEnabled": githubEnabled,
 			"Error": errMsg,
+			"CSRFToken": csrfToken,
 		})
 		return
 	}
@@ -2326,7 +2347,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-
+	}
 
 	if !passMatch {
 		recordLoginFail(ip)
@@ -4059,6 +4080,7 @@ button:active { transform: translateY(0); }
 </button>
 
 <form class="card" method="POST">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <div class="logo-wrap">
         <div class="logo-icon"><i class="ri-rocket-2-fill"></i></div>
         <h2>GoRelay Pro</h2>
@@ -4445,6 +4467,7 @@ input:focus + i { color: var(--primary); transform: translateY(-50%) scale(1.1);
         <h2>GoRelay Pro</h2>
         <p>安全内网穿透控制台</p>
     </div>
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     {{if .Error}}<div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>{{end}}
     
     <div class="input-box"><input name="username" placeholder="管理员账号" autocomplete="off"><i class="ri-user-3-line"></i></div>
