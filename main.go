@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -47,7 +46,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.9"
+	AppVersion      = "v3.3.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -190,6 +189,11 @@ type WSMessage struct {
 	Data interface{} `json:"data"`
 }
 
+type sessionInfo struct {
+	exp  time.Time
+	csrf string
+}
+
 type WSDashboardData struct {
 	TotalTraffic int64             `json:"total_traffic"`
 	SpeedTx      int64             `json:"speed_tx"`
@@ -221,6 +225,7 @@ type RuleStatusData struct {
 
 var (
 	db               *sql.DB
+	dbMu             sync.RWMutex // 保护全局 db 指针，防止恢复/重载时并发读写导致崩溃
 	config           AppConfig
 	agents           = make(map[string]*AgentInfo)
 	rules            = make([]LogicalRule, 0)
@@ -231,14 +236,19 @@ var (
 	agentTraffic     sync.Map
 	agentUserCounts  sync.Map
 	targetHealthMap  sync.Map
-	sessions         = make(map[string]time.Time)
+	sessions         = make(map[string]sessionInfo)
 	configDirty      int32
+
+	sessionLifetime = 7 * 24 * time.Hour // 会话有效期（滑动续期）
+	maxTTLSeconds   = int64(sessionLifetime / time.Second)
 
 	rrCounters   sync.Map
 	connCounters sync.Map
 
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
+	oauthStates   = sync.Map{}
+	opCounters    = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{}
 	wsClients  = make(map[*websocket.Conn]bool)
@@ -300,10 +310,20 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", DBFile)
+
+	// 持有写锁期间完成 db 指针替换，避免并发读/写旧句柄导致崩溃
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	if db != nil {
+		db.Close()
+	}
+
+	newDB, err := sql.Open("sqlite", DBFile)
 	if err != nil {
 		log.Fatalf("❌ 无法打开数据库文件: %v", err)
 	}
+	db = newDB
 
 	db.SetMaxOpenConns(1)
 	db.Exec("PRAGMA journal_mode=WAL;")
@@ -320,6 +340,13 @@ func initDB() {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
+}
+
+// getDB 安全地返回全局数据库句柄，避免在配置恢复/重载期间并发读到已被关闭或替换的句柄
+func getDB() *sql.DB {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+	return db
 }
 
 // -- 基础工具函数 --
@@ -341,12 +368,6 @@ func generateSalt() string {
 func hashPassword(password, salt string) string {
 	h := sha256.New()
 	h.Write([]byte(salt + password))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func md5Hash(s string) string {
-	h := md5.New()
-	h.Write([]byte(s))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -403,10 +424,16 @@ func performSelfUpdate() error {
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
-	_, err = io.Copy(out, resp.Body)
+	n, err := io.Copy(out, resp.Body)
 	out.Close()
 	if err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %v", err)
+	}
+	// 校验下载完整性，防止把截断/损坏的二进制覆盖到正在运行的程序，导致系统无法启动
+	if resp.ContentLength > 0 && n != resp.ContentLength {
+		os.Remove(tmpPath)
+		return fmt.Errorf("下载不完整: 期望 %d 字节，实际 %d 字节", resp.ContentLength, n)
 	}
 
 	os.Chmod(tmpPath, 0755)
@@ -563,15 +590,15 @@ func getClientIP(r *http.Request) string {
 func addLog(r *http.Request, action, msg string) {
 	ip := getClientIP(r)
 	now := time.Now().Format("01-02 15:04:05")
-	if db != nil {
-		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	if d := getDB(); d != nil {
+		_, _ = d.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
 	}
 }
 
 func addSystemLog(ip, action, msg string) {
 	now := time.Now().Format("01-02 15:04:05")
-	if db != nil {
-		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+	if d := getDB(); d != nil {
+		_, _ = d.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
 	}
 }
 
@@ -768,8 +795,8 @@ func sendTelegramDocument(filePath string, caption string) {
 		return
 	}
 
-	if db != nil {
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if d := getDB(); d != nil {
+		d.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
 	file, err := os.Open(filePath)
@@ -813,8 +840,8 @@ func uploadToR2(filePath string) error {
 	}
 
 	// 强制 SQLite 刷盘，保证上传的是最完整的数据快照
-	if db != nil {
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if d := getDB(); d != nil {
+		d.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
 	// MinIO SDK 要求 Endpoint 不带协议头
@@ -1144,8 +1171,8 @@ func startTgBotLoop() {
 					
 					var total30Tx, total30Rx int64
 					var historyLines []string
-					if db != nil {
-						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+					if d := getDB(); d != nil {
+						dsRows, err := d.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 						if err == nil {
 							defer dsRows.Close()
 							
@@ -1333,12 +1360,13 @@ func dailyTrafficReportLoop() {
 
 			flushDailyStats()
 
-			if db == nil {
+			d := getDB()
+			if d == nil {
 				continue
 			}
 
 			var tx, rx int64
-			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
+			err := d.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
 			if err == nil && (tx > 0 || rx > 0) {
 				msg := fmt.Sprintf("📈 <b>每日流量日报</b>\n\n🗓️ 日期: %s\n⬆️ 今日上传: %s\n⬇️ 今日下载: %s\n🌐 今日总消耗: <b>%s</b>",
 					today, formatBytes(tx), formatBytes(rx), formatBytes(tx+rx))
@@ -1360,8 +1388,8 @@ func runMaster() {
 			}
 			cleanOldLogs()
 			flushDailyStats()
-			if db != nil {
-				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+			if d := getDB(); d != nil {
+				d.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
 		}
 	}()
@@ -1532,6 +1560,7 @@ func runMaster() {
 
 // 每日流量统计定期刷盘
 func flushDailyStats() {
+	db := getDB()
 	if db == nil {
 		return
 	}
@@ -1552,7 +1581,7 @@ func flushDailyStats() {
 
 func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
+	if !validAgentName(name) {
 		w.Write([]byte(""))
 		return
 	}
@@ -1642,8 +1671,8 @@ func broadcastLoop() {
 		mu.Unlock()
 
 		var logData []OpLog
-		if db != nil {
-			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+		if d := getDB(); d != nil {
+			lRows, err := d.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
 			if err == nil {
 				for lRows.Next() {
 					var l OpLog
@@ -2053,8 +2082,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 
 	var displayLogs []OpLog
-	if db != nil {
-		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
+	if d := getDB(); d != nil {
+		rows, err := d.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -2067,8 +2096,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	// 提取近 30 天流量记录
 	var dailyStats []DailyStat
-	if db != nil {
-		dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
+	if d := getDB(); d != nil {
+		dsRows, err := d.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 		if err == nil {
 			defer dsRows.Close()
 			for dsRows.Next() {
@@ -2119,7 +2148,8 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		Ports          []string
 		Version        string
 		DailyStatsJSON template.JS
-	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion, template.JS(string(dsBytes))}
+		CsrfToken      string
+	}{al, displayRules, displayLogs, conf.WebUser, DownloadURL, totalTraffic, conf.MasterDomain, conf.PanelDomain, conf, conf.TwoFAEnabled, isMasterTLS, cleanPorts, AppVersion, template.JS(string(dsBytes)), csrfForSession(r)}
 
 	t := template.New("dash").Funcs(template.FuncMap{
 		"formatBytes": formatBytes,
@@ -2160,17 +2190,115 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		mu.Lock()
-		exp, ok := sessions[c.Value]
+		info, ok := sessions[c.Value]
+		if ok && time.Now().After(info.exp) {
+			delete(sessions, c.Value)
+			ok = false
+		}
+		// 滑动续期：每次访问刷新会话过期时间
+		if ok {
+			info.exp = time.Now().Add(sessionLifetime)
+			sessions[c.Value] = info
+		}
 		mu.Unlock()
-		if !ok || time.Now().After(exp) {
+		if !ok {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		setSecurityHeaders(w)
 		next(w, r)
 	}
 }
 
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'")
+}
+
+// validPort 校验端口号合法
+func validPort(p string) bool {
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// validAgentName 校验节点名称：仅允许字母数字、下划线、中划线，长度 1-64
+func validAgentName(n string) bool {
+	if n == "" || len(n) > 64 {
+		return false
+	}
+	for _, c := range n {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// opRateLimited 对破坏性操作做限速：同一 IP 在 5 秒内最多执行 5 次
+func opRateLimited(ip, action string) bool {
+	if ip == "" || ip == "System" {
+		return false
+	}
+	key := ip + "|" + action
+	now := time.Now()
+	val, _ := opCounters.LoadOrStore(key, &[2]int64{now.Unix(), 0})
+	rec := val.(*[2]int64)
+	if now.Unix() > rec[0]+5 {
+		rec[0] = now.Unix()
+		rec[1] = 0
+	}
+	rec[1]++
+	return rec[1] > 5
+}
+
+// sessionID 返回当前请求的会话 ID
+func sessionID(r *http.Request) string {
+	c, err := r.Cookie("sid")
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
+// csrfForSession 返回当前会话对应的 CSRF Token，用于注入模板
+func csrfForSession(r *http.Request) string {
+	sid := sessionID(r)
+	if sid == "" {
+		return ""
+	}
+	mu.Lock()
+	info, ok := sessions[sid]
+	mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return info.csrf
+}
+
+// verifyCSRF 校验 POST 请求携带的 CSRF Token
+func verifyCSRF(w http.ResponseWriter, r *http.Request) bool {
+	sid := sessionID(r)
+	if sid == "" {
+		return false
+	}
+	mu.Lock()
+	info, ok := sessions[sid]
+	mu.Unlock()
+	if !ok || info.csrf == "" {
+		return false
+	}
+	got := r.Header.Get("X-CSRF-Token")
+	if got == "" {
+		got = r.FormValue("csrf_token")
+	}
+	return got != "" && got == info.csrf
+}
+
 func handleSetup(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	mu.Lock()
 	alreadySetup := config.IsSetup
 	mu.Unlock()
@@ -2202,6 +2330,7 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	if r.Method == "GET" {
 		mu.Lock()
 		isEnabled := config.TwoFAEnabled
@@ -2234,14 +2363,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	twoFASecret := config.TwoFASecret
 	mu.Unlock()
 
+	// 仅支持加盐 SHA-256，移除 MD5 弱哈希回退路径
 	passMatch := false
 	parts := strings.Split(storedVal, "$")
 	if len(parts) == 2 {
 		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
 			passMatch = true
 		}
-	} else if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
-		passMatch = true
 	}
 
 	if !passMatch {
@@ -2262,12 +2390,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
+	sessions[sidStr] = sessionInfo{exp: time.Now().Add(sessionLifetime), csrf: generateUUID()}
 	mu.Unlock()
+	// 登录成功即清零失败计数
+	loginAttempts.Delete(ip)
+	blockUntil.Delete(ip)
 	
 	// 智能判断是否开启安全 Cookie
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: maxTTLSeconds, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -2288,13 +2419,29 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	// 生成一次性 state，防 CSRF 登录劫持
+	state := generateUUID()
+	oauthStates.Store(state, time.Now().Add(10*time.Minute))
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, state)
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
 	if code == "" {
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+	// 校验 state，防止登录 CSRF
+	if exp, ok := oauthStates.Load(state); ok {
+		if t := exp.(time.Time); time.Now().After(t) {
+			oauthStates.Delete(state)
+			http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+			return
+		}
+		oauthStates.Delete(state)
+	} else {
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
 		return
 	}
@@ -2358,17 +2505,20 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := getClientIP(r)
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
+	sessions[sidStr] = sessionInfo{exp: time.Now().Add(sessionLifetime), csrf: generateUUID()}
 	mu.Unlock()
+	loginAttempts.Delete(ip)
+	blockUntil.Delete(ip)
 	
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: maxTTLSeconds, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -2387,6 +2537,10 @@ func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
 }
 
 func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
 	var req struct{ Secret, Code string }
 	json.NewDecoder(r.Body).Decode(&req)
 	if totp.Validate(req.Code, req.Secret) {
@@ -2402,6 +2556,14 @@ func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func handle2FADisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
 	mu.Lock()
 	config.TwoFAEnabled = false
 	config.TwoFASecret = ""
@@ -2411,6 +2573,27 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleAddRule(w http.ResponseWriter, r *http.Request) {
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	// 参数白名单校验
+	if !validPort(r.FormValue("entry_port")) || !validPort(r.FormValue("target_port")) {
+		http.Error(w, "端口号非法（须为 1-65535）", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("target_ip")) == "" {
+		http.Error(w, "目标地址不能为空", http.StatusBadRequest)
+		return
+	}
+	if !validAgentName(r.FormValue("entry_agent")) || !validAgentName(r.FormValue("exit_agent")) {
+		http.Error(w, "节点名称非法", http.StatusBadRequest)
+		return
+	}
+	if r.FormValue("protocol") != "tcp" && r.FormValue("protocol") != "udp" && r.FormValue("protocol") != "both" {
+		http.Error(w, "协议非法", http.StatusBadRequest)
+		return
+	}
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
 	lbStrategy := r.FormValue("lb_strategy")
@@ -2443,6 +2626,26 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleEditRule(w http.ResponseWriter, r *http.Request) {
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if !validPort(r.FormValue("entry_port")) || !validPort(r.FormValue("target_port")) {
+		http.Error(w, "端口号非法（须为 1-65535）", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("target_ip")) == "" {
+		http.Error(w, "目标地址不能为空", http.StatusBadRequest)
+		return
+	}
+	if !validAgentName(r.FormValue("entry_agent")) || !validAgentName(r.FormValue("exit_agent")) {
+		http.Error(w, "节点名称非法", http.StatusBadRequest)
+		return
+	}
+	if r.FormValue("protocol") != "tcp" && r.FormValue("protocol") != "udp" && r.FormValue("protocol") != "both" {
+		http.Error(w, "协议非法", http.StatusBadRequest)
+		return
+	}
 	id := r.FormValue("id")
 	limitGB, _ := strconv.ParseFloat(r.FormValue("traffic_limit"), 64)
 	speedMB, _ := strconv.ParseFloat(r.FormValue("speed_limit"), 64)
@@ -2479,6 +2682,10 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleToggleRule(w http.ResponseWriter, r *http.Request) {
+	if opRateLimited(getClientIP(r), "toggle") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	mu.Lock()
 	for i := range rules {
@@ -2494,6 +2701,10 @@ func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
+	if opRateLimited(getClientIP(r), "reset") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	mu.Lock()
 	for i := range rules {
@@ -2510,6 +2721,10 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
+	if opRateLimited(getClientIP(r), "del_rule") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	mu.Lock()
 	var nr []LogicalRule
@@ -2527,6 +2742,14 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 
 func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "batch") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
 		return
 	}
 	action := r.FormValue("action")
@@ -2572,6 +2795,10 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	if opRateLimited(getClientIP(r), "del_agent") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	name := r.URL.Query().Get("name")
 	mu.Lock()
 	if a, ok := agents[name]; ok {
@@ -2586,6 +2813,10 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
 		return
 	}
 
@@ -2644,12 +2875,21 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
+	addLog(r, "导出配置", "管理员下载了完整配置备份 (data.db)")
 	w.Header().Set("Content-Disposition", "attachment; filename=data.db")
 	http.ServeFile(w, r, DBFile)
 }
 
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "upload_config") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
 		return
 	}
 
@@ -2660,12 +2900,14 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 1. 获取锁，安全地清理旧数据库连接
-	mu.Lock()
-
-	if db != nil {
-		db.Close()
-		db = nil
+	// 1. 在 dbMu 写锁下原子摘除并关闭旧数据库句柄，
+	//    避免与后台 goroutine（广播/定时刷盘/写日志）并发读写 db 导致崩溃
+	dbMu.Lock()
+	oldDB := db
+	db = nil
+	dbMu.Unlock()
+	if oldDB != nil {
+		oldDB.Close()
 	}
 
 	os.Remove(DBFile + "-wal")
@@ -2673,7 +2915,6 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
-		mu.Unlock() // 发生错误必须解锁
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
@@ -2682,13 +2923,28 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	io.Copy(out, file)
 	out.Close() // 必须显式关闭文件句柄
 
-	// 3. 重新初始化数据库连接
-	initDB()
-	
-	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
-	mu.Unlock()
+	// 2.1 校验上传文件是合法 SQLite 数据库且包含配置，防止覆盖成任意/恶意文件
+	vdb, verr := sql.Open("sqlite", DBFile)
+	if verr == nil {
+		var cnt int
+		if qerr := vdb.QueryRow("SELECT COUNT(*) FROM settings").Scan(&cnt); qerr != nil {
+			os.Remove(DBFile)
+			initDB() // 重新打开原始空数据库
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "上传的文件不是有效的 GoRelay 配置数据库"})
+			return
+		}
+		vdb.Close()
+	} else {
+		os.Remove(DBFile)
+		initDB()
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "上传的文件不是有效的 SQLite 数据库"})
+		return
+	}
 
-	// 5. 将新数据库中的配置重新加载到内存中
+	// 3. 重新初始化数据库连接（内部会重新获取 dbMu 写锁）
+	initDB()
+
+	// 4. 将新数据库中的配置重新加载到内存中
 	loadConfig()
 
 	// 获取恢复后的新面板域名
@@ -2705,8 +2961,8 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
-	if db != nil {
-		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
+	if d := getDB(); d != nil {
+		rows, err := d.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -2725,12 +2981,20 @@ func handleClearLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
-	if db != nil {
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "clear_logs") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
+	if d := getDB(); d != nil {
 		// 清空 logs 表
-		_, err := db.Exec("DELETE FROM logs")
+		_, err := d.Exec("DELETE FROM logs")
 		if err == nil {
 			// 重置自增 ID (SQLite 特定语法)
-			db.Exec("DELETE FROM sqlite_sequence WHERE name='logs'")
+			d.Exec("DELETE FROM sqlite_sequence WHERE name='logs'")
 			// 添加一条清空操作的记录
 			addLog(r, "清理日志", "管理员手动清空了所有操作日志")
 		}
@@ -2753,6 +3017,14 @@ func handleExportRules(w http.ResponseWriter, r *http.Request) {
 
 func handleImportRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "import_rules") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
 		return
 	}
 	file, _, err := r.FormFile("rules_file")
@@ -2782,6 +3054,14 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "restart") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	w.Write([]byte("ok"))
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -2793,6 +3073,14 @@ func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "update_sys") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
+		return
+	}
 	if err := performSelfUpdate(); err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 		return
@@ -2802,6 +3090,10 @@ func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
 	name := r.URL.Query().Get("name")
 	mu.Lock()
 	agent, ok := agents[name]
@@ -2816,6 +3108,14 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
+		return
+	}
+	if !verifyCSRF(w, r) {
+		http.Error(w, "CSRF 校验失败", http.StatusForbidden)
+		return
+	}
+	if opRateLimited(getClientIP(r), "update_all") {
+		http.Error(w, "操作过于频繁", http.StatusTooManyRequests)
 		return
 	}
 	
@@ -3271,6 +3571,9 @@ func selectTarget(tid string, targets []string, strategy string) string {
 
 	for _, t := range targets {
 		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
 		if v, ok := targetHealthMap.Load(t); ok {
 			lat := v.(int64)
 			if lat >= 0 {
@@ -3280,9 +3583,19 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		}
 	}
 
+	// 过滤掉空目标，避免在下方按长度取模或随机索引时崩溃
 	if len(valid) == 0 {
-		valid = targets
-		latencies = make([]int64, len(targets))
+		for _, t := range targets {
+			if t = strings.TrimSpace(t); t != "" {
+				valid = append(valid, t)
+			}
+		}
+		latencies = make([]int64, len(valid))
+	}
+
+	// 无任何有效目标时返回空串，由调用方（Dial/Resolve）自然失败，而非 panic
+	if len(valid) == 0 {
+		return ""
 	}
 
 	if len(valid) == 1 {
@@ -3482,6 +3795,10 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 func loadConfig() {
 	mu.Lock()
 	defer mu.Unlock()
+	db := getDB()
+	if db == nil {
+		return
+	}
 	rows, err := db.Query("SELECT key, value FROM settings")
 	if err == nil {
 		defer rows.Close()
@@ -3570,6 +3887,10 @@ func saveConfigNoLock() {
 	lRules := make([]LogicalRule, len(rules))
 	copy(lRules, rules)
 
+	db := getDB()
+	if db == nil {
+		return
+	}
 	tx, _ := db.Begin()
 	setS := func(k, v string) { _, _ = tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
 	setS("web_user", conf.WebUser)
@@ -3616,6 +3937,7 @@ func saveConfigNoLock() {
 }
 
 func cleanOldLogs() {
+	db := getDB()
 	if db == nil {
 		return
 	}
@@ -5584,6 +5906,7 @@ input:focus, select:focus {
                 </div>
 
                 <form id="settingsForm" onsubmit="saveSettings(event)" style="padding: 0 24px;">
+                    <input type="hidden" name="csrf_token" value="{{.CsrfToken}}">
                     <div class="grid-form" style="grid-template-columns: 1fr; gap:0;">
                         
                         <div style="min-height: 420px;">
@@ -5784,6 +6107,7 @@ input:focus, select:focus {
         <p style="color: var(--text-sub); font-size: 14px; margin-bottom: 28px; margin-left: 58px;">配置新的端口转发规则</p>
         
         <form action="/add" method="POST">
+            <input type="hidden" name="csrf_token" value="{{.CsrfToken}}">
             <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div class="form-group">
                     <label>规则名称</label>
@@ -5848,6 +6172,7 @@ input:focus, select:focus {
         <span class="close-modal" onclick="closeEdit()"><i class="ri-close-line"></i></span>
         <h3 style="margin-top:0;font-size:18px">修改规则</h3>
         <form action="/edit" method="POST">
+            <input type="hidden" name="csrf_token" value="{{.CsrfToken}}">
             <input type="hidden" name="id" id="e_id">
             <div class="grid-form" style="grid-template-columns: 1fr 1fr; gap:20px">
                 <div class="form-group"><label>分组</label><select name="group" id="e_group"><option value="">默认分组</option></select></div>
@@ -5918,6 +6243,7 @@ input:focus, select:focus {
 
 <script>
     var m_domain="{{.MasterDomain}}", dwUrl="{{.DownloadURL}}", is_tls={{.IsTLS}};
+    var csrfToken="{{.CsrfToken}}";
     var lastRuleStats = {}; 
     var ruleCharts = {}; 
     
@@ -6018,7 +6344,7 @@ input:focus, select:focus {
             formData.append('action', action);
             formData.append('ids', ids.join(','));
 
-            fetch('/batch', { method: 'POST', body: formData, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+            fetch('/batch', { method: 'POST', body: formData, headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken } })
             .then(r => r.json()).then(d => {
                 if(d.success) { showToast("操作成功", "success"); setTimeout(() => location.reload(), 800); }
             }).catch(() => showToast("操作失败", "warn"));
@@ -6037,7 +6363,7 @@ input:focus, select:focus {
 
     function restartService() {
         showConfirm("重启服务", "确定要重启面板服务吗？连接将短暂中断。", "warning", () => {
-            fetch('/restart', {method: 'POST'}).then(() => {
+            fetch('/restart', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}}).then(() => {
                 showToast("系统正在重启...", "warn");
                 setTimeout(() => location.reload(), 3000);
             }).catch(() => { showToast("请求发送失败", "warn"); });
@@ -6059,12 +6385,12 @@ input:focus, select:focus {
             "restore", () => {
                 
             const formData = new FormData(); formData.append('db_file', file);
-            fetch('/upload_config', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
+            fetch('/upload_config', { method: 'POST', body: formData, headers: {'X-CSRF-Token': csrfToken} }).then(r => r.json()).then(d => {
                 if (d.success) { 
                     // 明确告知需要重新登录
                     showToast("恢复成功，重启并跳转中 (需重新登录)...", "success"); 
                     
-                    fetch('/restart', {method: 'POST'}).finally(() => {
+                    fetch('/restart', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}}).finally(() => {
                         setTimeout(() => {
                             if (d.redirect_host && d.redirect_host !== location.hostname) {
                                 // 自动跳转到新域名
@@ -6093,7 +6419,7 @@ input:focus, select:focus {
             const formData = new FormData(); 
             formData.append('rules_file', file);
             
-            fetch('/import_rules', { method: 'POST', body: formData })
+            fetch('/import_rules', { method: 'POST', body: formData, headers: {'X-CSRF-Token': csrfToken} })
             .then(r => r.json())
             .then(d => {
                 if (d.success) { 
@@ -6120,7 +6446,7 @@ input:focus, select:focus {
         fetch('/update_settings', { 
             method: 'POST', 
             body: formData, 
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'} 
+            headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken} 
         })
         .then(r => r.json())
         .then(d => {
@@ -6166,7 +6492,7 @@ input:focus, select:focus {
     function updateSystem() {
         showConfirm("系统更新", "下载新版本并重启面板吗？", "warning", () => {
             const btn = document.getElementById('btn-update'); btn.disabled = true; btn.innerText = '更新中...';
-            fetch('/update_sys', {method: 'POST'}).then(r=>r.json()).then(d => {
+            fetch('/update_sys', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}}).then(r=>r.json()).then(d => {
                 if(d.success) { showToast("更新成功，重启中...", "success"); setTimeout(() => location.reload(), 5000); } 
                 else { showToast("更新失败: " + d.error, "warn"); btn.disabled = false; btn.innerText = '检查更新'; }
             }).catch(() => { showToast("请求失败", "warn"); btn.disabled = false; btn.innerText = '检查更新'; });
@@ -6175,13 +6501,13 @@ input:focus, select:focus {
 
     function updateAgent(name) {
         showConfirm("更新节点", "确定要远程更新节点 <b>"+name+"</b> 吗？", "warning", () => {
-            fetch('/update_agent?name='+name, {method: 'POST'}).then(r => { if(r.ok) showToast("指令已发送", "success"); else showToast("发送失败", "warn"); });
+            fetch('/update_agent?name='+name, {method: 'POST', headers: {'X-CSRF-Token': csrfToken}}).then(r => { if(r.ok) showToast("指令已发送", "success"); else showToast("发送失败", "warn"); });
         });
     }
 
 	function updateAllAgents() {
         showConfirm("全部更新", "确定要远程更新 <b>所有在线节点</b> 吗？<br><br><span style='font-size:12px;color:var(--text-sub)'>这会导致所有节点的连接短暂中断，节点将自动下载最新版本并重启。</span>", "warning", () => {
-            fetch('/update_all_agents', {method: 'POST'})
+            fetch('/update_all_agents', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}})
             .then(r => r.json())
             .then(d => {
                 if(d.success) {
@@ -6364,7 +6690,7 @@ input:focus, select:focus {
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
 	function clearLogs() {
         showConfirm("清空日志", "确定要清空所有系统操作日志吗？此操作不可逆！", "danger", () => {
-            fetch('/clear_logs', {method: 'POST'})
+            fetch('/clear_logs', {method: 'POST', headers: {'X-CSRF-Token': csrfToken}})
             .then(r => r.json())
             .then(d => {
                 if(d.success) {
@@ -6499,8 +6825,8 @@ input:focus, select:focus {
 
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
-    function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else showToast("验证码错误", "warn"); }); }
-    function disable2FA() { showConfirm("关闭 2FA", "账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
+    function verify2FA() { fetch('/2fa/verify', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken}, body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else showToast("验证码错误", "warn"); }); }
+    function disable2FA() { showConfirm("关闭 2FA", "账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable', {method:'POST', headers:{'X-CSRF-Token':csrfToken}}).then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
     Chart.defaults.font.family = "'Inter', sans-serif";
     Chart.defaults.color = '#94a3b8';
