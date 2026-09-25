@@ -92,6 +92,7 @@ type LogicalRule struct {
 	Alert80       bool   `json:"alert_80"`
 	Alert95       bool   `json:"alert_95"`
 	Alert100      bool   `json:"alert_100"`
+	
 	BridgeLatency int64  `json:"-"`
 	EntryIP       string `json:"-"`
 }
