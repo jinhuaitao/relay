@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,14 +13,24 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/boombuler/barcode"
+	"github.com/boombuler/barcode/qr"
+	"github.com/gorilla/websocket"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/pquerna/otp/totp"
+	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/time/rate"
 	"html/template"
 	"image/png"
 	"io"
 	"log"
 	"math/big"
 	"mime/multipart"
+	_ "modernc.org/sqlite"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,22 +43,12 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-    "context" 
-	"golang.org/x/time/rate"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/boombuler/barcode"
-	"github.com/boombuler/barcode/qr"
-	"github.com/gorilla/websocket"
-	"github.com/pquerna/otp/totp"
-	"golang.org/x/crypto/acme/autocert"
-	_ "modernc.org/sqlite"
 )
 
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.2.9"
+	AppVersion      = "v3.3.0"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -91,11 +92,11 @@ type LogicalRule struct {
 	TargetStatus  bool  `json:"-"`
 	TargetLatency int64 `json:"-"`
 
-	Alert80  bool `json:"alert_80"`
-	Alert95  bool `json:"alert_95"`
-	Alert100 bool `json:"alert_100"`
-	BridgeLatency int64 `json:"-"`
-	EntryIP string `json:"-"`
+	Alert80       bool   `json:"alert_80"`
+	Alert95       bool   `json:"alert_95"`
+	Alert100      bool   `json:"alert_100"`
+	BridgeLatency int64  `json:"-"`
+	EntryIP       string `json:"-"`
 }
 
 type OpLog struct {
@@ -130,7 +131,7 @@ type AppConfig struct {
 	GithubAllowedUsers string            `json:"github_allowed_users"`
 	TrafficResetDay    int               `json:"traffic_reset_day"`
 	LastResetMonth     string            `json:"last_reset_month"`
-    R2AccessKey        string            `json:"r2_access_key"`
+	R2AccessKey        string            `json:"r2_access_key"`
 	R2SecretKey        string            `json:"r2_secret_key"`
 	R2Endpoint         string            `json:"r2_endpoint"`
 	R2Bucket           string            `json:"r2_bucket"`
@@ -160,14 +161,25 @@ type HealthReport struct {
 }
 
 type AgentInfo struct {
-	Name      string   `json:"name"`
-	RemoteIP  string   `json:"remote_ip"`
-	Conn      net.Conn `json:"-"`
-	SysStatus string   `json:"sys_status"`
-	ConnectedAt time.Time `json:"-"`
-    Version     string    `json:"version"`
-    Region      string    `json:"region"`
-    IsOnline    bool      `json:"is_online"`
+	Name        string     `json:"name"`
+	RemoteIP    string     `json:"remote_ip"`
+	Conn        net.Conn   `json:"-"`
+	SysStatus   string     `json:"sys_status"`
+	ConnectedAt time.Time  `json:"-"`
+	Version     string     `json:"version"`
+	Region      string     `json:"region"`
+	IsOnline    bool       `json:"is_online"`
+	writeMu     sync.Mutex `json:"-"`
+}
+
+// sendMessage 串行化对该 Agent 连接的写操作，避免并发 JSON 写交错导致 Agent 侧解码失败
+func (a *AgentInfo) sendMessage(msg Message) error {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	if a.Conn == nil {
+		return fmt.Errorf("agent %s 连接已关闭", a.Name)
+	}
+	return json.NewEncoder(a.Conn).Encode(msg)
 }
 
 type Message struct {
@@ -202,21 +214,21 @@ type WSDashboardData struct {
 type AgentStatusData struct {
 	Name      string `json:"name"`
 	SysStatus string `json:"sys_status"`
-    IsOnline  bool   `json:"is_online"`
+	IsOnline  bool   `json:"is_online"`
 }
 
 type RuleStatusData struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-    Group     string `json:"group"`
-	Total     int64  `json:"total"`
-	Tx        int64  `json:"tx"`
-	Rx        int64  `json:"rx"`
-	UserCount int64  `json:"uc"`
-	Limit     int64  `json:"limit"`
-	Status    bool   `json:"status"`
-	Latency   int64  `json:"latency"`
-	BridgeLatency int64 `json:"bridge_latency"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Group         string `json:"group"`
+	Total         int64  `json:"total"`
+	Tx            int64  `json:"tx"`
+	Rx            int64  `json:"rx"`
+	UserCount     int64  `json:"uc"`
+	Limit         int64  `json:"limit"`
+	Status        bool   `json:"status"`
+	Latency       int64  `json:"latency"`
+	BridgeLatency int64  `json:"bridge_latency"`
 }
 
 var (
@@ -362,9 +374,8 @@ func checkLoginRateLimit(ip string) bool {
 }
 
 func recordLoginFail(ip string) {
-	v, _ := loginAttempts.LoadOrStore(ip, 0)
-	count := v.(int) + 1
-	loginAttempts.Store(ip, count)
+	v, _ := loginAttempts.LoadOrStore(ip, new(int64))
+	count := atomic.AddInt64(v.(*int64), 1)
 	if count >= 5 {
 		blockUntil.Store(ip, time.Now().Add(15*time.Minute))
 	}
@@ -388,10 +399,13 @@ func performSelfUpdate() error {
 	log.Printf("正在下载更新: %s", targetURL)
 
 	resp, err := http.Get(targetURL)
-	if err != nil || resp.StatusCode != 200 {
-		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
+	if err != nil {
+		return fmt.Errorf("下载失败: %v", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("下载失败，状态码: %d", resp.StatusCode)
+	}
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -407,6 +421,23 @@ func performSelfUpdate() error {
 	out.Close()
 	if err != nil {
 		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	// 完整性校验：防止把错误页 / 截断文件当作合法二进制覆盖自身
+	if fi, serr := os.Stat(tmpPath); serr == nil && fi.Size() < 100*1024 {
+		os.Remove(tmpPath)
+		return fmt.Errorf("下载文件过小 (%d 字节)，可能不是合法二进制", fi.Size())
+	}
+	if runtime.GOOS == "linux" {
+		if f, ferr := os.Open(tmpPath); ferr == nil {
+			head := make([]byte, 4)
+			f.Read(head)
+			f.Close()
+			if !(head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
+				os.Remove(tmpPath)
+				return fmt.Errorf("下载文件非合法 ELF 二进制，校验失败")
+			}
+		}
 	}
 
 	os.Chmod(tmpPath, 0755)
@@ -480,17 +511,19 @@ func getSysStatus() string {
 					for i := 1; i < len(fields) && i <= 8; i++ {
 						ticks[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
 					}
-					idleTicks := ticks[3] + ticks[4] 
+					idleTicks := ticks[3] + ticks[4]
 					var totalTicks uint64
 					for _, t := range ticks {
 						totalTicks += t
 					}
 
 					cpuMu.Lock()
-					diffIdle := float64(idleTicks - lastCPUIdle)
-					diffTotal := float64(totalTicks - lastCPUTotal)
-					if diffTotal > 0 {
-						cpuPct = ((diffTotal - diffIdle) / diffTotal) * 100.0
+					if lastCPUTotal > 0 && totalTicks >= lastCPUTotal && idleTicks >= lastCPUIdle {
+						diffIdle := float64(idleTicks - lastCPUIdle)
+						diffTotal := float64(totalTicks - lastCPUTotal)
+						if diffTotal > 0 {
+							cpuPct = ((diffTotal - diffIdle) / diffTotal) * 100.0
+						}
 					}
 					lastCPUIdle = idleTicks
 					lastCPUTotal = totalTicks
@@ -506,11 +539,21 @@ func getSysStatus() string {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					val, _ := strconv.ParseUint(fields[1], 10, 64)
-					if fields[0] == "MemTotal:" { total = val }
-					if fields[0] == "MemAvailable:" { available = val }
-					if fields[0] == "MemFree:" { free = val }
-					if fields[0] == "Buffers:" { buffers = val }
-					if fields[0] == "Cached:" { cached = val }
+					if fields[0] == "MemTotal:" {
+						total = val
+					}
+					if fields[0] == "MemAvailable:" {
+						available = val
+					}
+					if fields[0] == "MemFree:" {
+						free = val
+					}
+					if fields[0] == "Buffers:" {
+						buffers = val
+					}
+					if fields[0] == "Cached:" {
+						cached = val
+					}
 				}
 			}
 			if total > 0 {
@@ -526,7 +569,7 @@ func getSysStatus() string {
 		var stat syscall.Statfs_t
 		if err := syscall.Statfs("/", &stat); err == nil {
 			used := stat.Blocks - stat.Bfree
-			nonRootTotal := used + stat.Bavail 
+			nonRootTotal := used + stat.Bavail
 			if nonRootTotal > 0 {
 				diskPct = (float64(used) / float64(nonRootTotal)) * 100.0
 			}
@@ -534,13 +577,25 @@ func getSysStatus() string {
 	} else {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		memPct = 1.0 
-		cpuPct = float64(runtime.NumGoroutine()) 
+		memPct = 1.0
+		cpuPct = float64(runtime.NumGoroutine())
 	}
 
-	if cpuPct < 0 { cpuPct = 0 } else if cpuPct > 100 { cpuPct = 100 }
-	if memPct < 0 { memPct = 0 } else if memPct > 100 { memPct = 100 }
-	if diskPct < 0 { diskPct = 0 } else if diskPct > 100 { diskPct = 100 }
+	if cpuPct < 0 {
+		cpuPct = 0
+	} else if cpuPct > 100 {
+		cpuPct = 100
+	}
+	if memPct < 0 {
+		memPct = 0
+	} else if memPct > 100 {
+		memPct = 100
+	}
+	if diskPct < 0 {
+		diskPct = 0
+	} else if diskPct > 100 {
+		diskPct = 100
+	}
 
 	return fmt.Sprintf("CPU:%.1f|MEM:%.1f|DSK:%.1f", cpuPct, memPct, diskPct)
 }
@@ -713,24 +768,23 @@ func makeAestheticBar(percent float64, fillChar, emptyChar string) string {
 	if percent > 100 {
 		percent = 100
 	}
-	
+
 	totalWidth := 12 // 12格是极简符号的视觉黄金比例
-	
+
 	filledBlocks := int((percent / 100.0) * float64(totalWidth))
-	
+
 	// 保证只要有占用，就至少亮起一格，避免 1% 显示为空
 	if percent > 0 && filledBlocks == 0 {
-		filledBlocks = 1 
+		filledBlocks = 1
 	}
 	if filledBlocks > totalWidth {
 		filledBlocks = totalWidth
 	}
-	
+
 	emptyBlocks := totalWidth - filledBlocks
-	
+
 	return strings.Repeat(fillChar, filledBlocks) + strings.Repeat(emptyChar, emptyBlocks)
 }
-
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
 func setupTgBotCommands() {
@@ -831,7 +885,7 @@ func uploadToR2(filePath string) error {
 
 	// 文件名带上时间戳：gorelay_backup_20260412_120000.db
 	fileName := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -861,7 +915,7 @@ func autoBackupLoop() {
 		if now.Weekday() == time.Monday && now.Hour() == 2 && lastBackupWeek != week {
 			lastBackupWeek = week
 			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
-			
+
 			// === 触发 R2 备份 ===
 			if err := uploadToR2(DBFile); err == nil {
 				sendTelegram("✅ <b>R2 容灾备份成功</b>\n数据库已安全同步至 Cloudflare R2。")
@@ -1078,7 +1132,9 @@ func startTgBotLoop() {
 						},
 					}
 					tgAction := "editMessageText"
-					if msgID == 0 { tgAction = "sendMessage" }
+					if msgID == 0 {
+						tgAction = "sendMessage"
+					}
 					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
@@ -1094,7 +1150,7 @@ func startTgBotLoop() {
 						rx += r.TotalRx
 					}
 					reply := fmt.Sprintf("📊 <b>系统实时状态</b>\n\n🌐 总中继流量: <b>%s</b>\n🔌 在线节点数: <b>%d</b>\n📜 转发规则数: <b>%d</b>\n\n--- 探针状态 ---\n", formatBytes(tx+rx), len(agents), len(rules))
-					
+
 					// === 新增 TG 节点排序逻辑 ===
 					var sortedAgents []*AgentInfo
 					for _, a := range agents {
@@ -1124,9 +1180,15 @@ func startTgBotLoop() {
 							kv := strings.Split(p, ":")
 							if len(kv) == 2 {
 								v, _ := strconv.ParseFloat(kv[1], 64)
-								if kv[0] == "CPU" { cpu = v }
-								if kv[0] == "MEM" { mem = v }
-								if kv[0] == "DSK" { dsk = v }
+								if kv[0] == "CPU" {
+									cpu = v
+								}
+								if kv[0] == "MEM" {
+									mem = v
+								}
+								if kv[0] == "DSK" {
+									dsk = v
+								}
 							}
 						}
 						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🟢 在线)\n", a.Name, a.RemoteIP)
@@ -1141,37 +1203,41 @@ func startTgBotLoop() {
 
 					// 查询近 30 天流量消耗趋势
 					reply += "--- 历史流量趋势 ---\n"
-					
+
 					var total30Tx, total30Rx int64
 					var historyLines []string
 					if db != nil {
 						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 						if err == nil {
 							defer dsRows.Close()
-							
+
 							for dsRows.Next() {
 								var d string
 								var dTx, dRx int64
 								dsRows.Scan(&d, &dTx, &dRx)
 								total30Tx += dTx
 								total30Rx += dRx
-								
+
 								if len(historyLines) < 10 {
 									shortDate := d
-									if len(d) == 10 { shortDate = d[5:] }
+									if len(d) == 10 {
+										shortDate = d[5:]
+									}
 									historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
 								}
 							}
 						}
 					}
-					
+
 					if len(historyLines) > 0 {
 						reply += fmt.Sprintf("🗓️ <b>近 30 天总计: %s</b>\n", formatBytes(total30Tx+total30Rx))
-						for _, line := range historyLines { reply += line + "\n" }
+						for _, line := range historyLines {
+							reply += line + "\n"
+						}
 					} else {
 						reply += "<i>暂无历史流量数据</i>\n"
 					}
-					
+
 					nowTime := time.Now().Format("2006-01-02 15:04:05")
 					reply += fmt.Sprintf("\n<blockquote expandable>🕒 探针最后同步时间: \n<code>%s</code></blockquote>", nowTime)
 
@@ -1179,7 +1245,9 @@ func startTgBotLoop() {
 						"inline_keyboard": [][]InlineButton{{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}, {Text: "🔄 刷新状态", CallbackData: "cmd:status"}}},
 					}
 					tgAction := "editMessageText"
-					if msgID == 0 { tgAction = "sendMessage" }
+					if msgID == 0 {
+						tgAction = "sendMessage"
+					}
 					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
@@ -1196,7 +1264,9 @@ func startTgBotLoop() {
 						}
 					}
 					tgAction := "editMessageText"
-					if msgID == 0 { tgAction = "sendMessage" }
+					if msgID == 0 {
+						tgAction = "sendMessage"
+					}
 					tgRequest(tgAction, map[string]interface{}{
 						"chat_id":      chatIdStr,
 						"message_id":   msgID,
@@ -1208,7 +1278,7 @@ func startTgBotLoop() {
 					go func() {
 						// 1. 先发送到 Telegram
 						sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
-						
+
 						// 2. 触发 Cloudflare R2 备份
 						if err := uploadToR2(DBFile); err == nil {
 							sendTelegram("✅ <b>R2 容灾备份成功</b>\n手动触发的备份已同步至 Cloudflare R2。")
@@ -1226,7 +1296,7 @@ func startTgBotLoop() {
 							p, _ := strconv.Atoi(parts[2])
 							page = p
 						}
-						
+
 						mu.Lock()
 						for i := range rules {
 							if rules[i].ID == id {
@@ -1282,7 +1352,7 @@ func startTgBotLoop() {
 func trafficResetLoop() {
 	for {
 		time.Sleep(1 * time.Hour)
-		
+
 		mu.Lock()
 		day := config.TrafficResetDay
 		lastM := config.LastResetMonth
@@ -1293,9 +1363,14 @@ func trafficResetLoop() {
 		}
 
 		now := time.Now()
-		currentM := now.Format("2006-01")
-		
-		if now.Day() >= day && lastM != currentM {
+		// 计算"应清零"的月份：本月已到账单日则为本月，否则为上个月。
+		// 这样即使账单日当天服务掉线，下月初也能补清上一个月的统计。
+		dueMonth := now.Format("2006-01")
+		if now.Day() < day {
+			dueMonth = now.AddDate(0, -1, 0).Format("2006-01")
+		}
+
+		if lastM != dueMonth {
 			mu.Lock()
 			for i := range rules {
 				rules[i].TotalTx = 0
@@ -1304,16 +1379,15 @@ func trafficResetLoop() {
 				rules[i].Alert95 = false
 				rules[i].Alert100 = false
 			}
-			config.LastResetMonth = currentM
+			config.LastResetMonth = dueMonth
 			saveConfigNoLock()
 			mu.Unlock()
-			
-			sendTelegram(fmt.Sprintf("📅 <b>账单日触发</b>\n系统已自动清零本月所有规则的流量统计！"))
+
+			sendTelegram(fmt.Sprintf("📅 <b>账单日触发</b>\n系统已自动清零 %s 所有规则的流量统计！", dueMonth))
 			go pushConfigToAll()
 		}
 	}
 }
-
 
 // ================= MASTER =================
 
@@ -1325,27 +1399,32 @@ func dailyTrafficReportLoop() {
 		time.Sleep(1 * time.Minute)
 		now := time.Now()
 
-		if now.Hour() == 23 && now.Minute() >= 59 {
-			today := now.Format("2006-01-02")
-			if lastReportDate == today {
-				continue
-			}
-
-			flushDailyStats()
-
-			if db == nil {
-				continue
-			}
-
-			var tx, rx int64
-			err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", today).Scan(&tx, &rx)
-			if err == nil && (tx > 0 || rx > 0) {
-				msg := fmt.Sprintf("📈 <b>每日流量日报</b>\n\n🗓️ 日期: %s\n⬆️ 今日上传: %s\n⬇️ 今日下载: %s\n🌐 今日总消耗: <b>%s</b>",
-					today, formatBytes(tx), formatBytes(rx), formatBytes(tx+rx))
-				sendTelegram(msg)
-			}
-			lastReportDate = today
+		// 日报在当日 23:59 尝试发送；若该时刻掉线，次日 00:00-00:05 补发昨日报告
+		var reportDay string
+		if now.Hour() == 23 && now.Minute() == 59 {
+			reportDay = now.Format("2006-01-02")
+		} else if now.Hour() == 0 && now.Minute() < 5 {
+			reportDay = now.AddDate(0, 0, -1).Format("2006-01-02")
 		}
+		if reportDay == "" || lastReportDate == reportDay {
+			continue
+		}
+
+		flushDailyStats()
+
+		if db == nil {
+			lastReportDate = reportDay
+			continue
+		}
+
+		var tx, rx int64
+		err := db.QueryRow("SELECT tx, rx FROM daily_stats WHERE date = ?", reportDay).Scan(&tx, &rx)
+		if err == nil && (tx > 0 || rx > 0) {
+			msg := fmt.Sprintf("📈 <b>每日流量日报</b>\n\n🗓️ 日期: %s\n⬆️ 今日上传: %s\n⬇️ 今日下载: %s\n🌐 今日总消耗: <b>%s</b>",
+				reportDay, formatBytes(tx), formatBytes(rx), formatBytes(tx+rx))
+			sendTelegram(msg)
+		}
+		lastReportDate = reportDay
 	}
 }
 
@@ -1360,14 +1439,15 @@ func runMaster() {
 			}
 			cleanOldLogs()
 			flushDailyStats()
+			pruneOfflineAgents()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
 		}
 	}()
 	go broadcastLoop()
-	go startTgBotLoop()   
-	go autoBackupLoop()   
+	go startTgBotLoop()
+	go autoBackupLoop()
 	go trafficResetLoop()
 	go dailyTrafficReportLoop()
 
@@ -1437,7 +1517,7 @@ func runMaster() {
 				log.Printf("❌ 监听端口 %s 失败: %v", p, err)
 				return
 			}
-			
+
 			if isMasterTLS {
 				log.Printf("✅ Agent 监听端口启动 (安全 TLS 模式): %s", p)
 			} else {
@@ -1481,10 +1561,10 @@ func runMaster() {
 	http.HandleFunc("/update_all_agents", authMiddleware(handleUpdateAllAgents))
 	http.HandleFunc("/check_update", authMiddleware(handleCheckUpdate))
 	http.HandleFunc("/gen_agent_token", authMiddleware(handleGenAgentToken))
-	
+
 	http.HandleFunc("/oauth/github/login", handleGithubLogin)
 	http.HandleFunc("/oauth/github/callback", handleGithubCallback)
-	
+
 	http.HandleFunc("/manifest.json", handleManifest)
 	http.HandleFunc("/sw.js", handleServiceWorker)
 	http.HandleFunc("/icon.svg", handleIcon)
@@ -1519,7 +1599,7 @@ func runMaster() {
 			TLSConfig: tlsConfig,
 			Handler:   webHandler,
 		}
-		log.Fatal(server.ListenAndServeTLS("", "")) 
+		log.Fatal(server.ListenAndServeTLS("", ""))
 	} else {
 		log.Printf("🚀 控制面板启动 (普通 HTTP): http://localhost%s", WebPort)
 		server := &http.Server{
@@ -1621,21 +1701,21 @@ func broadcastLoop() {
 		for _, a := range agentList {
 			agentData = append(agentData, AgentStatusData{Name: a.Name, SysStatus: a.SysStatus, IsOnline: a.IsOnline})
 		}
-		
+
 		for _, r := range rules {
 			currentTx += r.TotalTx
 			currentRx += r.TotalRx
 			ruleData = append(ruleData, RuleStatusData{
-				ID:        r.ID,
-				Name:      r.Note,
-                Group:     r.Group,
-				Total:     r.TotalTx + r.TotalRx,
-				Tx:        r.TotalTx,
-				Rx:        r.TotalRx,
-				UserCount: r.UserCount,
-				Limit:     r.TrafficLimit,
-				Status:    r.TargetStatus,
-				Latency:   r.TargetLatency,
+				ID:            r.ID,
+				Name:          r.Note,
+				Group:         r.Group,
+				Total:         r.TotalTx + r.TotalRx,
+				Tx:            r.TotalTx,
+				Rx:            r.TotalRx,
+				UserCount:     r.UserCount,
+				Limit:         r.TrafficLimit,
+				Status:        r.TargetStatus,
+				Latency:       r.TargetLatency,
 				BridgeLatency: r.BridgeLatency,
 			})
 		}
@@ -1674,7 +1754,7 @@ func broadcastLoop() {
 			wsMu.Unlock()
 			continue
 		}
-		
+
 		// 1. 先构建好需要发送的消息对象 (这就是编译器之前找不到的 msg)
 		msg := WSMessage{
 			Type: "stats",
@@ -1725,7 +1805,7 @@ func handleAgentConn(conn net.Conn) {
 	reportedIPv6, _ := data["ipv6"].(string)
 	testPortFloat, _ := data["test_port"].(float64)
 	testPort := int(testPortFloat)
-    reportedVersion, _ := data["version"].(string)
+	reportedVersion, _ := data["version"].(string)
 	if reportedVersion == "" {
 		reportedVersion = "未知"
 	}
@@ -1749,7 +1829,7 @@ func handleAgentConn(conn net.Conn) {
 	}
 
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	
+
 	// --- 新增：智能入站连通性测试 (优先全功能 IPv4，备用全功能 IPv6) ---
 	finalIP := remoteIP
 	if testPort > 0 {
@@ -1792,7 +1872,9 @@ func handleAgentConn(conn net.Conn) {
 		// 使用免费接口查询 IP 信息
 		if resp, err := client.Get("http://ip-api.com/json/" + host + "?fields=countryCode"); err == nil {
 			defer resp.Body.Close()
-			var res struct{ CountryCode string `json:"countryCode"` }
+			var res struct {
+				CountryCode string `json:"countryCode"`
+			}
 			if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.CountryCode) == 2 {
 				cc := strings.ToUpper(res.CountryCode)
 				// 巧妙利用 Unicode 偏移量将两位字母转为国旗 Emoji (例如 US 会变成 🇺🇸)
@@ -1833,7 +1915,7 @@ func handleAgentConn(conn net.Conn) {
 	}
 	mu.Lock()
 	if curr, ok := agents[name]; ok && curr.Conn == conn {
-		curr.IsOnline = false  // <--- 修改这里：不删除，仅标记离线
+		curr.IsOnline = false // <--- 修改这里：不删除，仅标记离线
 		mu.Unlock()
 		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", name))
 		// === 新增：将节点下线事件写入系统日志 ===
@@ -1861,7 +1943,7 @@ func handleStatsReport(payload interface{}) {
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_entry") {
 			rid := strings.TrimSuffix(rep.TaskID, "_entry")
-			
+
 			// 使用哈希映射直接定位规则
 			if i, exists := ruleIndex[rid]; exists {
 				rules[i].TotalTx += rep.TxDelta
@@ -1982,9 +2064,9 @@ func pushConfigToAll() {
 		if t == nil {
 			t = []ForwardTask{}
 		}
-		go func(conn net.Conn, tasks []ForwardTask) {
-			json.NewEncoder(conn).Encode(Message{Type: "update", Payload: tasks})
-		}(a.Conn, t)
+		go func(a *AgentInfo, tasks []ForwardTask) {
+			a.sendMessage(Message{Type: "update", Payload: tasks})
+		}(a, t)
 	}
 }
 
@@ -2003,7 +2085,7 @@ func handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 func handleIcon(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=31536000")
-	
+
 	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 		<rect width="512" height="512" fill="#6366f1"/>
 		<text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" fill="#ffffff" font-family="system-ui, sans-serif" font-size="130" font-weight="bold" letter-spacing="4">Relay</text>
@@ -2013,9 +2095,9 @@ func handleIcon(w http.ResponseWriter, r *http.Request) {
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
-	al := make([]AgentInfo, 0)
+	al := make([]*AgentInfo, 0)
 	for _, a := range agents {
-		al = append(al, *a)
+		al = append(al, a)
 	}
 	sort.Slice(al, func(i, j int) bool {
 		t1 := config.AgentAddTimes[al[i].Name]
@@ -2105,7 +2187,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
-		Agents         []AgentInfo
+		Agents         []*AgentInfo
 		Rules          []LogicalRule
 		Logs           []OpLog
 		User           string
@@ -2166,8 +2248,58 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		// CSRF 防护：仅对"状态变更"请求校验 Origin/Referer 与本机 Host 一致。
+		// 写操作（POST/PUT/DELETE）与通过 GET 触发变更的端点都需校验；
+		// 只读 GET（仪表盘、下载等）放行，避免从书签/外链点入被误拦。
+		if isStateChanging(r) && !isSameOrigin(r) {
+			http.Error(w, "跨站请求已被拒绝", http.StatusForbidden)
+			return
+		}
 		next(w, r)
 	}
+}
+
+// isStateChanging 判断请求是否会修改服务端状态。POST/PUT/DELETE 视为变更；
+// 另外这几个通过 GET 触发写操作的端点也需走 CSRF 校验。
+func isStateChanging(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return true
+	}
+	switch r.URL.Path {
+	case "/toggle", "/delete", "/reset_traffic", "/delete_agent", "/gen_agent_token":
+		return true
+	}
+	return false
+}
+
+// isSameOrigin 判断请求是否来自面板自身。Origin/Referer 缺失时放行
+// （依赖 SameSite=Lax cookie 抵御跨站子资源/表单），存在时必须与本机 Host 匹配。
+func isSameOrigin(r *http.Request) bool {
+	raw := r.Header.Get("Origin")
+	if raw == "" {
+		raw = r.Header.Get("Referer")
+	}
+	if raw == "" {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return equalHost(u.Host, r.Host)
+}
+
+// equalHost 比较两个 host[:port] 的主机名部分是否相同（忽略端口与大小写）。
+func equalHost(a, b string) bool {
+	ha, _, _ := net.SplitHostPort(a)
+	hb, _, _ := net.SplitHostPort(b)
+	if ha == "" {
+		ha = a
+	}
+	if hb == "" {
+		hb = b
+	}
+	return strings.EqualFold(ha, hb)
 }
 
 func handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -2200,26 +2332,33 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 	t.Execute(w, nil)
 }
 
-
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		mu.Lock()
 		isEnabled := config.TwoFAEnabled
 		githubEnabled := config.GithubClientID != "" && config.GithubClientSecret != ""
 		mu.Unlock()
-		
+
 		errCode := r.URL.Query().Get("err")
 		errMsg := ""
-		if errCode == "1" { errMsg = "账号或密码错误" }
-		if errCode == "2" { errMsg = "2FA 动态码错误" }
-		if errCode == "3" { errMsg = "GitHub 授权失败" }
-		if errCode == "4" { errMsg = "该 GitHub 账号不在允许列表中" }
+		if errCode == "1" {
+			errMsg = "账号或密码错误"
+		}
+		if errCode == "2" {
+			errMsg = "2FA 动态码错误"
+		}
+		if errCode == "3" {
+			errMsg = "GitHub 授权失败"
+		}
+		if errCode == "4" {
+			errMsg = "该 GitHub 账号不在允许列表中"
+		}
 
 		t, _ := template.New("l").Parse(loginHtml)
 		t.Execute(w, map[string]interface{}{
-			"TwoFA": isEnabled,
+			"TwoFA":         isEnabled,
 			"GithubEnabled": githubEnabled,
-			"Error": errMsg,
+			"Error":         errMsg,
 		})
 		return
 	}
@@ -2258,13 +2397,25 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 命中旧版无盐 MD5 口令则自动升级为加盐 SHA256，避免库泄露后被彩虹表秒破
+	if !strings.Contains(storedVal, "$") {
+		salt := generateSalt()
+		newHash := salt + "$" + hashPassword(r.FormValue("password"), salt)
+		mu.Lock()
+		if config.WebUser == u {
+			config.WebPass = newHash
+			saveConfigNoLock()
+		}
+		mu.Unlock()
+	}
+
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour) 
+	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
 	mu.Unlock()
-	
+
 	// 智能判断是否开启安全 Cookie
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
@@ -2305,10 +2456,14 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	allowedUsersStr := config.GithubAllowedUsers
 	mu.Unlock()
 
-	tokenURL := fmt.Sprintf("https://github.com/login/oauth/access_token?client_id=%s&client_secret=%s&code=%s", clientID, clientSecret, code)
-	req, _ := http.NewRequest("POST", tokenURL, nil)
+	form := url.Values{}
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
+	form.Set("code", code)
+	req, _ := http.NewRequest("POST", "https://github.com/login/oauth/access_token", strings.NewReader(form.Encode()))
 	req.Header.Set("Accept", "application/json")
-	
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -2329,7 +2484,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	userReq, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
 	userReq.Header.Set("Authorization", "Bearer "+tokenData.AccessToken)
 	userReq.Header.Set("Accept", "application/json")
-	
+
 	userResp, err := client.Do(userReq)
 	if err != nil {
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
@@ -2361,17 +2516,16 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
-	
+
 	mu.Lock()
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
 	mu.Unlock()
-	
+
 	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
-
 
 func handle2FAGenerate(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
@@ -2402,6 +2556,10 @@ func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func handle2FADisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	mu.Lock()
 	config.TwoFAEnabled = false
 	config.TwoFASecret = ""
@@ -2505,7 +2663,7 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	saveConfigNoLock()
 	mu.Unlock()
-	go pushConfigToAll() 
+	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
@@ -2567,7 +2725,7 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 
-	go pushConfigToAll() 
+	go pushConfigToAll()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -2576,7 +2734,7 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if a, ok := agents[name]; ok {
 		if a.IsOnline {
-			json.NewEncoder(a.Conn).Encode(Message{Type: "uninstall"})
+			a.sendMessage(Message{Type: "uninstall"})
 		}
 		delete(agents, name) // 点击卸载时才彻底删除
 	}
@@ -2606,21 +2764,23 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.GithubClientID = r.FormValue("github_client_id")
 	config.GithubClientSecret = r.FormValue("github_client_secret")
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
-    config.R2AccessKey = r.FormValue("r2_access_key")
+	config.R2AccessKey = r.FormValue("r2_access_key")
 	config.R2SecretKey = r.FormValue("r2_secret_key")
 	config.R2Endpoint = r.FormValue("r2_endpoint")
 	config.R2Bucket = r.FormValue("r2_bucket")
-	
+
 	if rd := r.FormValue("traffic_reset_day"); rd != "" {
 		d, _ := strconv.Atoi(rd)
-		if d < 0 || d > 31 { d = 0 }
+		if d < 0 || d > 31 {
+			d = 0
+		}
 		config.TrafficResetDay = d
 	} else {
 		config.TrafficResetDay = 0
 	}
 
 	saveConfigNoLock()
-	
+
 	newPanelDomain := config.PanelDomain
 	newMasterDomain := config.MasterDomain
 	newPorts := config.AgentPorts
@@ -2673,7 +2833,9 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	out, err := os.Create(DBFile)
 	if err != nil {
-		mu.Unlock() // 发生错误必须解锁
+		// 恢复数据库连接，避免面板进入 db=nil 半瘫态
+		initDB()
+		mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
@@ -2684,7 +2846,7 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 
 	// 3. 重新初始化数据库连接
 	initDB()
-	
+
 	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
 	mu.Unlock()
 
@@ -2810,7 +2972,7 @@ func handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent not found", 404)
 		return
 	}
-	json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+	agent.sendMessage(Message{Type: "upgrade"})
 	w.Write([]byte("ok"))
 }
 
@@ -2818,21 +2980,21 @@ func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
-	
+
 	mu.Lock()
 	count := 0
 	// 遍历所有节点，仅向在线节点发送更新指令
 	for _, agent := range agents {
 		if agent.IsOnline {
-			json.NewEncoder(agent.Conn).Encode(Message{Type: "upgrade"})
+			agent.sendMessage(Message{Type: "upgrade"})
 			count++
 		}
 	}
 	mu.Unlock()
-	
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true, 
+		"success": true,
 		"count":   count,
 	})
 }
@@ -2857,13 +3019,39 @@ func handleCheckUpdate(w http.ResponseWriter, r *http.Request) {
 	remoteVer := strings.TrimPrefix(data.TagName, "v")
 	currentVer := strings.TrimPrefix(AppVersion, "v")
 
-	hasUpdate := remoteVer != currentVer
+	hasUpdate := compareVersions(remoteVer, currentVer) > 0
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"has_update":     hasUpdate,
 		"latest_version": data.TagName,
 		"current":        AppVersion,
 	})
+}
+
+// compareVersions 语义化版本比较，返回 >0 表示 a 更新、<0 表示 b 更新、0 表示相等
+func compareVersions(a, b string) int {
+	pa := strings.Split(a, ".")
+	pb := strings.Split(b, ".")
+	n := len(pa)
+	if len(pb) > n {
+		n = len(pb)
+	}
+	for i := 0; i < n; i++ {
+		var x, y int
+		if i < len(pa) {
+			x, _ = strconv.Atoi(strings.SplitN(pa[i], "-", 2)[0])
+		}
+		if i < len(pb) {
+			y, _ = strconv.Atoi(strings.SplitN(pb[i], "-", 2)[0])
+		}
+		if x > y {
+			return 1
+		}
+		if x < y {
+			return -1
+		}
+	}
+	return 0
 }
 
 func doRestart() {
@@ -2897,12 +3085,20 @@ func doRestart() {
 	if err != nil {
 		argv0 = os.Args[0]
 	}
-	os.Stdin = nil
-	os.Stdout = nil
-	os.Stderr = nil
 	if runtime.GOOS == "windows" {
+		// Windows 不支持 syscall.Exec，重新拉起自身后退出
+		cmd := exec.Command(argv0, os.Args[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if e := cmd.Start(); e == nil {
+			time.Sleep(500 * time.Millisecond)
+		}
 		os.Exit(0)
 	} else {
+		os.Stdin = nil
+		os.Stdout = nil
+		os.Stderr = nil
 		syscall.Exec(argv0, os.Args, os.Environ())
 	}
 }
@@ -2914,12 +3110,16 @@ func runAgent(name, masterAddr, token string) {
 	var publicIPv4, publicIPv6 string
 	client4 := http.Client{Timeout: 3 * time.Second}
 	if resp, err := client4.Get("http://ipv4.icanhazip.com"); err == nil {
-		if b, err := io.ReadAll(resp.Body); err == nil { publicIPv4 = strings.TrimSpace(string(b)) }
+		if b, err := io.ReadAll(resp.Body); err == nil {
+			publicIPv4 = strings.TrimSpace(string(b))
+		}
 		resp.Body.Close()
 	}
 	client6 := http.Client{Timeout: 3 * time.Second}
 	if resp, err := client6.Get("http://ipv6.icanhazip.com"); err == nil {
-		if b, err := io.ReadAll(resp.Body); err == nil { publicIPv6 = strings.TrimSpace(string(b)) }
+		if b, err := io.ReadAll(resp.Body); err == nil {
+			publicIPv6 = strings.TrimSpace(string(b))
+		}
 		resp.Body.Close()
 	}
 	// ------------------------------------
@@ -2944,6 +3144,14 @@ func runAgent(name, masterAddr, token string) {
 			continue
 		}
 
+		// 串行化对主控连接的写操作，避免 ticker 与主循环并发写导致数据交错
+		var masterMu sync.Mutex
+		writeMsg := func(m Message) {
+			masterMu.Lock()
+			defer masterMu.Unlock()
+			json.NewEncoder(conn).Encode(m)
+		}
+
 		// --- 新增：开启临时测试端口，供主控测试入站连通性 ---
 		testLn, _ := net.Listen("tcp", ":0")
 		var testPort int
@@ -2953,13 +3161,15 @@ func runAgent(name, masterAddr, token string) {
 				defer ln.Close()
 				// 10 秒后自动关闭测试端口，防止端口泄露
 				ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
-				if c, err := ln.Accept(); err == nil { c.Close() }
+				if c, err := ln.Accept(); err == nil {
+					c.Close()
+				}
 			}(testLn)
 		}
 		// -------------------------------------------------
 
 		// 修改：将 IPv4、IPv6 和 测试端口 一并发送，Payload 类型改为 interface{}
-		json.NewEncoder(conn).Encode(Message{Type: "auth", Payload: map[string]interface{}{
+		writeMsg(Message{Type: "auth", Payload: map[string]interface{}{
 			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort, "version": AppVersion,
 		}})
 
@@ -2988,11 +3198,11 @@ func runAgent(name, masterAddr, token string) {
 						return true
 					})
 					if len(reps) > 0 {
-						json.NewEncoder(conn).Encode(Message{Type: "stats", Payload: reps})
+						writeMsg(Message{Type: "stats", Payload: reps})
 					}
-					json.NewEncoder(conn).Encode(Message{Type: "ping", Payload: getSysStatus()})
+					writeMsg(Message{Type: "ping", Payload: getSysStatus()})
 				case <-h.C:
-					checkTargetHealth(conn)
+					checkTargetHealth(writeMsg)
 				}
 			}
 		}()
@@ -3005,7 +3215,7 @@ func runAgent(name, masterAddr, token string) {
 				break
 			}
 			if msg.Type == "uninstall" {
-				json.NewEncoder(conn).Encode(Message{Type: "uninstalling"})
+				writeMsg(Message{Type: "uninstalling"})
 				doSelfUninstall()
 				return
 			}
@@ -3087,7 +3297,7 @@ func doPing(address string) (int64, bool) {
 	return latency, true
 }
 
-func checkTargetHealth(conn net.Conn) {
+func checkTargetHealth(send func(Message)) {
 	var results []HealthReport
 	activeTargets.Range(func(key, value interface{}) bool {
 		checkMode := "tcp"
@@ -3152,7 +3362,7 @@ func checkTargetHealth(conn net.Conn) {
 	})
 
 	if len(results) > 0 {
-		_ = json.NewEncoder(conn).Encode(Message{Type: "health", Payload: results})
+		send(Message{Type: "health", Payload: results})
 	}
 }
 
@@ -3285,6 +3495,22 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		latencies = make([]int64, len(targets))
 	}
 
+	// 目标全部为空（规则未配置 target），返回空串让调用方放弃
+	if len(valid) == 0 {
+		return ""
+	}
+	// 去除仅含空串的退化情况
+	nonEmpty := false
+	for _, t := range valid {
+		if strings.TrimSpace(t) != "" {
+			nonEmpty = true
+			break
+		}
+	}
+	if !nonEmpty {
+		return ""
+	}
+
 	if len(valid) == 1 {
 		return valid[0]
 	}
@@ -3345,6 +3571,9 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 	allTargets := strings.Split(targetStr, ",")
 	bestTarget := selectTarget(tid, allTargets, strategy)
+	if bestTarget == "" {
+		return
+	}
 
 	vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 	atomic.AddInt64(vConn.(*int64), 1)
@@ -3356,7 +3585,10 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	}
 	defer dst.Close()
 
-	v, _ := agentTraffic.Load(tid)
+	v, ok := agentTraffic.Load(tid)
+	if !ok {
+		return
+	}
 	cnt := v.(*TrafficCounter)
 	go copyCount(dst, src, &cnt.Tx, limit)
 	copyCount(src, dst, &cnt.Rx, limit)
@@ -3364,7 +3596,10 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
 	udpSessions := &sync.Map{}
-	v, _ := agentTraffic.Load(tid)
+	v, ok := agentTraffic.Load(tid)
+	if !ok {
+		return
+	}
 	cnt := v.(*TrafficCounter)
 
 	go func() {
@@ -3383,12 +3618,13 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	bufPtr := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bufPtr)
-	buf := *bufPtr
+	// 每个数据包从池中借还缓冲，避免长期独占导致池失效
 	for {
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
+			bufPool.Put(bufPtr)
 			break
 		}
 		atomic.AddInt64(&cnt.Tx, int64(n))
@@ -3398,17 +3634,21 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			s := val.(*udpSession)
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
+			bufPool.Put(bufPtr)
 		} else {
-
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
 			} else {
+				bufPool.Put(bufPtr)
 				continue
 			}
 			targets := strings.Split(currentTargetStr, ",")
-
 			bestTarget := selectTarget(tid, targets, strategy)
+			if bestTarget == "" {
+				bufPool.Put(bufPtr)
+				continue
+			}
 
 			vConn, _ := connCounters.LoadOrStore(bestTarget, new(int64))
 			atomic.AddInt64(vConn.(*int64), 1)
@@ -3417,12 +3657,14 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				atomic.AddInt64(vConn.(*int64), -1)
+				bufPool.Put(bufPtr)
 				continue
 			}
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
+			bufPool.Put(bufPtr)
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
 				bPtr := bufPool.Get().(*[]byte)
 				defer bufPool.Put(bPtr)
@@ -3465,10 +3707,18 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 			if limiter != nil {
 				_ = limiter.WaitN(ctx, nr)
 			}
-			
-			nw, _ := dst.Write(buf[0:nr])
-			if nw > 0 {
-				atomic.AddInt64(c, int64(nw))
+
+			// 必须写完整个切片：dst.Write 允许短写，未补齐会截断转发流
+			toWrite := buf[0:nr]
+			for len(toWrite) > 0 {
+				nw, werr := dst.Write(toWrite)
+				if nw > 0 {
+					atomic.AddInt64(c, int64(nw))
+					toWrite = toWrite[nw:]
+				}
+				if werr != nil {
+					return
+				}
 			}
 		}
 		if err != nil {
@@ -3526,7 +3776,7 @@ func loadConfig() {
 				config.TrafficResetDay = d
 			case "last_reset_month":
 				config.LastResetMonth = v
-            case "r2_access_key":
+			case "r2_access_key":
 				config.R2AccessKey = v
 			case "r2_secret_key":
 				config.R2SecretKey = v
@@ -3596,7 +3846,7 @@ func saveConfigNoLock() {
 	setS("github_allowed_users", conf.GithubAllowedUsers)
 	setS("traffic_reset_day", strconv.Itoa(conf.TrafficResetDay))
 	setS("last_reset_month", conf.LastResetMonth)
-    setS("r2_access_key", conf.R2AccessKey)
+	setS("r2_access_key", conf.R2AccessKey)
 	setS("r2_secret_key", conf.R2SecretKey)
 	setS("r2_endpoint", conf.R2Endpoint)
 	setS("r2_bucket", conf.R2Bucket)
@@ -3604,10 +3854,18 @@ func saveConfigNoLock() {
 	_, _ = tx.Exec("DELETE FROM rules")
 	for _, r := range lRules {
 		d, a80, a95, a100 := 0, 0, 0, 0
-		if r.Disabled { d = 1 }
-		if r.Alert80 { a80 = 1 }
-		if r.Alert95 { a95 = 1 }
-		if r.Alert100 { a100 = 1 }
+		if r.Disabled {
+			d = 1
+		}
+		if r.Alert80 {
+			a80 = 1
+		}
+		if r.Alert95 {
+			a95 = 1
+		}
+		if r.Alert100 {
+			a100 = 1
+		}
 
 		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy, a80, a95, a100)
@@ -3622,6 +3880,23 @@ func cleanOldLogs() {
 	_, err := db.Exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT ?)", MaxLogRetention)
 	if err != nil {
 		log.Printf("⚠️ 清理日志失败: %v", err)
+	}
+}
+
+// pruneOfflineAgents 清理离线且无规则引用的 Agent，避免 agents map 无界增长。
+// 仍被规则引用的离线 Agent 保留（用于面板展示"离线"状态）。
+func pruneOfflineAgents() {
+	mu.Lock()
+	defer mu.Unlock()
+	used := make(map[string]bool)
+	for _, r := range rules {
+		used[r.EntryAgent] = true
+		used[r.ExitAgent] = true
+	}
+	for name, a := range agents {
+		if !a.IsOnline && !used[name] {
+			delete(agents, name)
+		}
 	}
 }
 
@@ -6500,7 +6775,7 @@ input:focus, select:focus {
     var tempSecret = "";
     function enable2FA() { fetch('/2fa/generate').then(r=>r.json()).then(d => { tempSecret = d.secret; document.getElementById('qrImage').src = d.qr; document.getElementById('twoFAModal').style.display = 'block'; }); }
     function verify2FA() { fetch('/2fa/verify', {method:'POST', body:JSON.stringify({secret:tempSecret, code:document.getElementById('twoFACode').value})}).then(r=>r.json()).then(d => { if(d.success) { showToast("2FA 已开启", "success"); setTimeout(()=>location.reload(), 1000); } else showToast("验证码错误", "warn"); }); }
-    function disable2FA() { showConfirm("关闭 2FA", "账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable').then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
+    function disable2FA() { showConfirm("关闭 2FA", "账户安全性将降低，确定吗？", "danger", () => { fetch('/2fa/disable',{method:'POST'}).then(r=>r.json()).then(d => { if(d.success) location.reload(); }); }); }
 
     Chart.defaults.font.family = "'Inter', sans-serif";
     Chart.defaults.color = '#94a3b8';
