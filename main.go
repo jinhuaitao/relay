@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.2"
+	AppVersion      = "v3.3.3"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5905,13 +5905,15 @@ input:focus, select:focus {
                         <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px; padding: 6px 12px;"><i class="ri-download-line"></i> 导出</a>
                     </div>
                 </div>
-                <div class="log-filters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px" id="log-filters">
-                    <button class="btn log-filter-btn active" data-cat="all" onclick="filterLogs('all')">全部</button>
-                    <button class="btn log-filter-btn" data-cat="login" onclick="filterLogs('login')">登录</button>
-                    <button class="btn log-filter-btn" data-cat="node" onclick="filterLogs('node')">节点</button>
-                    <button class="btn log-filter-btn" data-cat="rule" onclick="filterLogs('rule')">规则</button>
-                    <button class="btn log-filter-btn" data-cat="config" onclick="filterLogs('config')">配置</button>
-                    <button class="btn log-filter-btn" data-cat="system" onclick="filterLogs('system')">系统</button>
+                <div class="log-filters" style="margin-bottom:16px" id="log-filters">
+                    <select onchange="filterLogs(this.value)" style="width:auto;min-width:150px;padding:8px 14px;border-radius:8px;font-size:13px">
+                        <option value="all">全部分类</option>
+                        <option value="login">登录</option>
+                        <option value="node">节点</option>
+                        <option value="rule">规则</option>
+                        <option value="config">配置</option>
+                        <option value="system">系统</option>
+                    </select>
                 </div>
                 <div class="table-container">
                     <table>
@@ -6747,9 +6749,8 @@ input:focus, select:focus {
     }
     function filterLogs(cat) {
         window.logFilter = cat;
-        document.querySelectorAll('#log-filters .log-filter-btn').forEach(function(b) {
-            b.classList.toggle('active', b.dataset.cat === cat);
-        });
+        var sel = document.querySelector('#log-filters select');
+        if(sel) sel.value = cat;
         renderLogs();
     }
     function renderLogs() {
