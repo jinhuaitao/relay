@@ -5792,6 +5792,7 @@ input:focus, select:focus {
     .dashboard-grid { grid-template-columns: 100%; }
     .stats-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 }
+</style>
 
 </head>
 <body>
