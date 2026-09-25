@@ -84,14 +84,11 @@ type LogicalRule struct {
 	Disabled     bool   `json:"disabled"`
 	SpeedLimit   int64  `json:"speed_limit"`
 	LBStrategy   string `json:"lb_strategy"`
-
 	TotalTx   int64 `json:"total_tx"`
 	TotalRx   int64 `json:"total_rx"`
 	UserCount int64 `json:"user_count"`
-
 	TargetStatus  bool  `json:"-"`
 	TargetLatency int64 `json:"-"`
-
 	Alert80       bool   `json:"alert_80"`
 	Alert95       bool   `json:"alert_95"`
 	Alert100      bool   `json:"alert_100"`
