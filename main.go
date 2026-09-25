@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.0"
+	AppVersion      = "v3.3.1"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -70,38 +70,39 @@ var bufPool = sync.Pool{
 // --- 数据结构 ---
 
 type LogicalRule struct {
-	ID           string `json:"id"`
-	Group        string `json:"group"`
-	Note         string `json:"note"`
-	EntryAgent   string `json:"entry_agent"`
-	EntryPort    string `json:"entry_port"`
-	ExitAgent    string `json:"exit_agent"`
-	TargetIP     string `json:"target_ip"`
-	TargetPort   string `json:"target_port"`
-	Protocol     string `json:"protocol"`
-	BridgePort   string `json:"bridge_port"`
-	TrafficLimit int64  `json:"traffic_limit"`
-	Disabled     bool   `json:"disabled"`
-	SpeedLimit   int64  `json:"speed_limit"`
-	LBStrategy   string `json:"lb_strategy"`
-	TotalTx   int64 `json:"total_tx"`
-	TotalRx   int64 `json:"total_rx"`
-	UserCount int64 `json:"user_count"`
-	TargetStatus  bool  `json:"-"`
-	TargetLatency int64 `json:"-"`
+	ID            string `json:"id"`
+	Group         string `json:"group"`
+	Note          string `json:"note"`
+	EntryAgent    string `json:"entry_agent"`
+	EntryPort     string `json:"entry_port"`
+	ExitAgent     string `json:"exit_agent"`
+	TargetIP      string `json:"target_ip"`
+	TargetPort    string `json:"target_port"`
+	Protocol      string `json:"protocol"`
+	BridgePort    string `json:"bridge_port"`
+	TrafficLimit  int64  `json:"traffic_limit"`
+	Disabled      bool   `json:"disabled"`
+	SpeedLimit    int64  `json:"speed_limit"`
+	LBStrategy    string `json:"lb_strategy"`
+	TotalTx       int64  `json:"total_tx"`
+	TotalRx       int64  `json:"total_rx"`
+	UserCount     int64  `json:"user_count"`
+	TargetStatus  bool   `json:"-"`
+	TargetLatency int64  `json:"-"`
 	Alert80       bool   `json:"alert_80"`
 	Alert95       bool   `json:"alert_95"`
 	Alert100      bool   `json:"alert_100"`
-	
+
 	BridgeLatency int64  `json:"-"`
 	EntryIP       string `json:"-"`
 }
 
 type OpLog struct {
-	Time   string `json:"time"`
-	IP     string `json:"ip"`
-	Action string `json:"action"`
-	Msg    string `json:"msg"`
+	Time     string `json:"time"`
+	IP       string `json:"ip"`
+	Category string `json:"category"`
+	Action   string `json:"action"`
+	Msg      string `json:"msg"`
 }
 
 type DailyStat struct {
@@ -298,6 +299,7 @@ CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     time TEXT,
     ip TEXT,
+    category TEXT DEFAULT '',
     action TEXT,
     msg TEXT
 );
@@ -330,6 +332,8 @@ func initDB() {
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_80 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_95 INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE rules ADD COLUMN alert_100 INTEGER DEFAULT 0")
+	// 日志分类字段迁移（已存在时忽略错误）
+	_, _ = db.Exec("ALTER TABLE logs ADD COLUMN category TEXT DEFAULT ''")
 }
 
 // -- 基础工具函数 --
@@ -613,18 +617,36 @@ func getClientIP(r *http.Request) string {
 	return ip
 }
 
+// categorizeLog 根据操作类型关键字自动推断日志分类，向后兼容无显式分类的调用
+func categorizeLog(action string) string {
+	switch {
+	case strings.Contains(action, "登录") || strings.Contains(action, "登出") || strings.Contains(action, "退出") || strings.Contains(action, "登陆"):
+		return "login"
+	case strings.Contains(action, "上线") || strings.Contains(action, "下线") || strings.Contains(action, "节点") || strings.Contains(action, "卸载"):
+		return "node"
+	case strings.Contains(action, "规则") || strings.Contains(action, "流量"):
+		return "rule"
+	case strings.Contains(action, "配置") || strings.Contains(action, "设置"):
+		return "config"
+	default:
+		return "system"
+	}
+}
+
 func addLog(r *http.Request, action, msg string) {
 	ip := getClientIP(r)
 	now := time.Now().Format("01-02 15:04:05")
+	category := categorizeLog(action)
 	if db != nil {
-		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+		_, _ = db.Exec("INSERT INTO logs (time, ip, category, action, msg) VALUES (?,?,?,?,?)", now, ip, category, action, msg)
 	}
 }
 
 func addSystemLog(ip, action, msg string) {
 	now := time.Now().Format("01-02 15:04:05")
+	category := categorizeLog(action)
 	if db != nil {
-		_, _ = db.Exec("INSERT INTO logs (time, ip, action, msg) VALUES (?,?,?,?)", now, ip, action, msg)
+		_, _ = db.Exec("INSERT INTO logs (time, ip, category, action, msg) VALUES (?,?,?,?,?)", now, ip, category, action, msg)
 	}
 }
 
@@ -1721,11 +1743,11 @@ func broadcastLoop() {
 
 		var logData []OpLog
 		if db != nil {
-			lRows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT 15")
+			lRows, err := db.Query("SELECT time, ip, COALESCE(category,'') AS category, action, msg FROM logs ORDER BY id DESC LIMIT 15")
 			if err == nil {
 				for lRows.Next() {
 					var l OpLog
-					lRows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+					lRows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
 					logData = append(logData, l)
 				}
 				lRows.Close()
@@ -2134,12 +2156,12 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	var displayLogs []OpLog
 	if db != nil {
-		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
+		rows, err := db.Query("SELECT time, ip, COALESCE(category,'') AS category, action, msg FROM logs ORDER BY id DESC LIMIT ?", MaxLogEntries)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var l OpLog
-				rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
 				displayLogs = append(displayLogs, l)
 			}
 		}
@@ -2219,6 +2241,34 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 				return "无限制"
 			}
 			return formatBytes(bytesPerSec) + "/s"
+		},
+		"logCatColor": func(cat string) string {
+			switch cat {
+			case "login":
+				return "background:#3b82f6;color:#fff"
+			case "node":
+				return "background:#10b981;color:#fff"
+			case "rule":
+				return "background:#a855f7;color:#fff"
+			case "config":
+				return "background:#f59e0b;color:#fff"
+			default:
+				return "background:#64748b;color:#fff"
+			}
+		},
+		"logCatLabel": func(cat string) string {
+			switch cat {
+			case "login":
+				return "登录"
+			case "node":
+				return "节点"
+			case "rule":
+				return "规则"
+			case "config":
+				return "配置"
+			default:
+				return "系统"
+			}
 		},
 	})
 	t, _ = t.Parse(dashboardHtml)
@@ -2383,6 +2433,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if !passMatch {
 		recordLoginFail(ip)
+		addSystemLog(ip, "登录失败", "账号或密码错误")
 		http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
 		return
 	}
@@ -2390,6 +2441,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if twoFAEnabled {
 		if !totp.Validate(r.FormValue("code"), twoFASecret) {
 			recordLoginFail(ip)
+			addSystemLog(ip, "登录失败", "2FA 动态码错误")
 			http.Redirect(w, r, "/login?err=2", http.StatusSeeOther)
 			return
 		}
@@ -2414,6 +2466,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
 	mu.Unlock()
 
+	// 登录成功，写入系统日志
+	addLog(r, "登录成功", "账号密码登录")
+
 	// 智能判断是否开启安全 Cookie
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
@@ -2421,6 +2476,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	addLog(r, "退出登录", "用户主动登出")
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -2507,6 +2563,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	if !isAllowed || userData.Login == "" {
 		ip := getClientIP(r)
 		recordLoginFail(ip)
+		addSystemLog(ip, "登录失败", fmt.Sprintf("GitHub 账号 %s 不在允许列表", userData.Login))
 		http.Redirect(w, r, "/login?err=4", http.StatusSeeOther)
 		return
 	}
@@ -2519,7 +2576,7 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
 	mu.Unlock()
 
-	addLog(r, "系统登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
+	addLog(r, "GitHub 登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -2594,6 +2651,7 @@ func handleAddRule(w http.ResponseWriter, r *http.Request) {
 	})
 	saveConfigNoLock()
 	mu.Unlock()
+	addLog(r, "新增规则", fmt.Sprintf("备注: %s, 入口 %s:%s → 出口 %s:%s", r.FormValue("note"), r.FormValue("entry_agent"), r.FormValue("entry_port"), r.FormValue("exit_agent"), r.FormValue("target_port")))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
@@ -2630,21 +2688,29 @@ func handleEditRule(w http.ResponseWriter, r *http.Request) {
 	}
 	saveConfigNoLock()
 	mu.Unlock()
+	addLog(r, "编辑规则", fmt.Sprintf("规则 ID: %s", id))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
 
 func handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	var nowDisabled bool
 	mu.Lock()
 	for i := range rules {
 		if rules[i].ID == id {
 			rules[i].Disabled = !rules[i].Disabled
+			nowDisabled = rules[i].Disabled
 			break
 		}
 	}
 	saveConfigNoLock()
 	mu.Unlock()
+	status := "已启用"
+	if nowDisabled {
+		status = "已禁用"
+	}
+	addLog(r, "启停规则", fmt.Sprintf("规则 ID: %s, 当前状态: %s", id, status))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
@@ -2661,6 +2727,7 @@ func handleResetTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	saveConfigNoLock()
 	mu.Unlock()
+	addLog(r, "重置流量", fmt.Sprintf("规则 ID: %s", id))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
@@ -2677,6 +2744,7 @@ func handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	rules = nr
 	saveConfigNoLock()
 	mu.Unlock()
+	addLog(r, "删除规则", fmt.Sprintf("规则 ID: %s", id))
 	go pushConfigToAll()
 	http.Redirect(w, r, "/#rules", http.StatusSeeOther)
 }
@@ -2723,6 +2791,10 @@ func handleBatchRule(w http.ResponseWriter, r *http.Request) {
 	saveConfigNoLock()
 	mu.Unlock()
 
+	batchLabels := map[string]string{"delete": "批量删除", "enable": "批量启用", "disable": "批量禁用", "reset": "批量重置流量"}
+	if label, ok := batchLabels[action]; ok {
+		addLog(r, "批量规则", fmt.Sprintf("%s %d 条规则", label, len(idMap)))
+	}
 	go pushConfigToAll()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -2737,6 +2809,7 @@ func handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		delete(agents, name) // 点击卸载时才彻底删除
 	}
 	mu.Unlock()
+	addLog(r, "卸载节点", fmt.Sprintf("节点: %s", name))
 	http.Redirect(w, r, "/#dashboard", http.StatusSeeOther)
 }
 
@@ -2785,6 +2858,8 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	needRestart := (oldPanelDomain != newPanelDomain) || (oldMasterDomain != newMasterDomain) || (oldPorts != newPorts)
+
+	addLog(r, "修改配置", "更新了系统全局配置")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2866,12 +2941,12 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
 	if db != nil {
-		rows, err := db.Query("SELECT time, ip, action, msg FROM logs ORDER BY id DESC")
+		rows, err := db.Query("SELECT time, ip, COALESCE(category,'') AS category, action, msg FROM logs ORDER BY id DESC")
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var l OpLog
-				rows.Scan(&l.Time, &l.IP, &l.Action, &l.Msg)
+				rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
 				logs = append(logs, l)
 			}
 		}
@@ -2942,6 +3017,7 @@ func handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
+	addLog(r, "重启服务", "管理员触发了系统重启")
 	w.Write([]byte("ok"))
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -2957,6 +3033,7 @@ func handleUpdateSystem(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
+	addLog(r, "系统更新", "面板版本更新成功，即将重启")
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 	go func() { time.Sleep(1 * time.Second); doRestart() }()
 }
@@ -5386,6 +5463,8 @@ input:focus, select:focus {
     box-shadow: 0 2px 8px var(--glow-primary);
 }
 .settings-tab i { font-size: 16px; }
+.log-filter-btn { font-size:13px; padding:6px 14px; border-radius:8px; color: var(--text-sub); }
+.log-filter-btn.active { background: var(--primary); color:#fff; border-color: transparent; box-shadow: 0 2px 8px var(--glow-primary); }
 .settings-content { display: none; gap: 24px; grid-template-columns: 1fr; animation: pageIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
 .settings-content.active { display: grid; }
 
@@ -5826,14 +5905,23 @@ input:focus, select:focus {
                         <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px; padding: 6px 12px;"><i class="ri-download-line"></i> 导出</a>
                     </div>
                 </div>
+                <div class="log-filters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px" id="log-filters">
+                    <button class="btn log-filter-btn active" data-cat="all" onclick="filterLogs('all')">全部</button>
+                    <button class="btn log-filter-btn" data-cat="login" onclick="filterLogs('login')">登录</button>
+                    <button class="btn log-filter-btn" data-cat="node" onclick="filterLogs('node')">节点</button>
+                    <button class="btn log-filter-btn" data-cat="rule" onclick="filterLogs('rule')">规则</button>
+                    <button class="btn log-filter-btn" data-cat="config" onclick="filterLogs('config')">配置</button>
+                    <button class="btn log-filter-btn" data-cat="system" onclick="filterLogs('system')">系统</button>
+                </div>
                 <div class="table-container">
                     <table>
-                        <thead><tr><th>时间</th><th>IP 来源</th><th>操作类型</th><th>详情内容</th></tr></thead>
+                        <thead><tr><th>时间</th><th>IP 来源</th><th>分类</th><th>操作类型</th><th>详情内容</th></tr></thead>
                         <tbody id="log-table-body">
                         {{range .Logs}}
                         <tr>
                             <td style="font-family:var(--font-mono);color:var(--text-sub)">{{.Time}}</td>
                             <td>{{.IP}}</td>
+                            <td><span class="badge" style="{{logCatColor .Category}}">{{logCatLabel .Category}}</span></td>
                             <td><span class="badge" style="background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)">{{.Action}}</span></td>
                             <td style="color:var(--text-sub)">{{.Msg}}</td>
                         </tr>
@@ -6635,6 +6723,54 @@ input:focus, select:focus {
     function delRule(id) { showConfirm("删除规则", "端口将停止服务，确定删除吗？", "danger", () => location.href="/delete?id="+id); }
     function toggleRule(id) { location.href="/toggle?id="+id; }
     function resetTraffic(id) { showConfirm("重置流量", "确定要清零统计数据吗？", "warning", () => location.href="/reset_traffic?id="+id); }
+
+    // === 系统日志分类筛选 ===
+    window.allLogs = window.allLogs || [];
+    window.logFilter = window.logFilter || 'all';
+    function logCategoryStyle(cat) {
+        switch(cat) {
+            case 'login': return 'background:#3b82f6;color:#fff';
+            case 'node': return 'background:#10b981;color:#fff';
+            case 'rule': return 'background:#a855f7;color:#fff';
+            case 'config': return 'background:#f59e0b;color:#fff';
+            default: return 'background:#64748b;color:#fff';
+        }
+    }
+    function logCategoryLabel(cat) {
+        switch(cat) {
+            case 'login': return '登录';
+            case 'node': return '节点';
+            case 'rule': return '规则';
+            case 'config': return '配置';
+            default: return '系统';
+        }
+    }
+    function filterLogs(cat) {
+        window.logFilter = cat;
+        document.querySelectorAll('#log-filters .log-filter-btn').forEach(function(b) {
+            b.classList.toggle('active', b.dataset.cat === cat);
+        });
+        renderLogs();
+    }
+    function renderLogs() {
+        const tbody = document.getElementById('log-table-body');
+        if(!tbody) return;
+        const filter = window.logFilter || 'all';
+        const logs = window.allLogs || [];
+        let html = '';
+        logs.forEach(function(l) {
+            const cat = l.category || 'system';
+            if(filter !== 'all' && cat !== filter) return;
+            html += '<tr><td style=\"font-family:var(--font-mono);color:var(--text-sub)\">'+l.time+'</td>' +
+                    '<td>'+l.ip+'</td>' +
+                    '<td><span class=\"badge\" style=\"'+logCategoryStyle(cat)+'\">'+logCategoryLabel(cat)+'</span></td>' +
+                    '<td><span class=\"badge\" style=\"background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)\">'+l.action+'</span></td>' +
+                    '<td style=\"color:var(--text-sub)\">'+l.msg+'</td></tr>';
+        });
+        if(html === '') html = '<tr><td colspan=\"5\" style=\"text-align:center;color:var(--text-sub);padding:24px\">该分类下暂无日志</td></tr>';
+        tbody.innerHTML = html;
+    }
+
 	function clearLogs() {
         showConfirm("清空日志", "确定要清空所有系统操作日志吗？此操作不可逆！", "danger", () => {
             fetch('/clear_logs', {method: 'POST'})
@@ -7121,16 +7257,11 @@ input:focus, select:focus {
                         }
                     });
 
-                    if(d.logs && document.getElementById('logs').classList.contains('active')) {
-                        const tbody = document.getElementById('log-table-body');
-                        let html = '';
-                        d.logs.forEach(l => {
-                            html += '<tr><td style="font-family:var(--font-mono);color:var(--text-sub)">'+l.time+'</td>' +
-                                    '<td>'+l.ip+'</td>' +
-                                    '<td><span class=\"badge\" style=\"background:var(--input-bg);color:var(--text-main);border:1px solid var(--border)\">'+l.action+'</span></td>' +
-                                    '<td style=\"color:var(--text-sub)\">'+l.msg+'</td></tr>';
-                        });
-                        tbody.innerHTML = html;
+                    if(d.logs) {
+                        window.allLogs = d.logs;
+                        if (document.getElementById('logs').classList.contains('active')) {
+                            renderLogs();
+                        }
                     }
                 }
             } catch(err) { console.log(err); }
