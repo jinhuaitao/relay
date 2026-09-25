@@ -48,7 +48,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.1"
+	AppVersion      = "v3.3.2"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -5463,8 +5463,9 @@ input:focus, select:focus {
     box-shadow: 0 2px 8px var(--glow-primary);
 }
 .settings-tab i { font-size: 16px; }
-.log-filter-btn { font-size:13px; padding:6px 14px; border-radius:8px; color: var(--text-sub); }
-.log-filter-btn.active { background: var(--primary); color:#fff; border-color: transparent; box-shadow: 0 2px 8px var(--glow-primary); }
+.log-filter-select { width:auto; min-width:120px; padding:8px 32px 8px 14px; border-radius:8px; border:1px solid var(--border); background:var(--input-bg); color:var(--text-main); font-size:13px; font-family:inherit; cursor:pointer; appearance:none; -webkit-appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--text-sub) 50%),linear-gradient(135deg,var(--text-sub) 50%,transparent 50%); background-position:calc(100% - 16px) center,calc(100% - 11px) center; background-size:5px 5px,5px 5px; background-repeat:no-repeat; transition:all 0.2s ease; }
+.log-filter-select:hover { border-color:var(--primary); }
+.log-filter-select:focus { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-light); outline:none; }
 .settings-content { display: none; gap: 24px; grid-template-columns: 1fr; animation: pageIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
 .settings-content.active { display: grid; }
 
@@ -5905,13 +5906,16 @@ input:focus, select:focus {
                         <a href="/export_logs" class="btn secondary" style="text-decoration:none;font-size:13px; padding: 6px 12px;"><i class="ri-download-line"></i> 导出</a>
                     </div>
                 </div>
-                <div class="log-filters" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px" id="log-filters">
-                    <button class="btn log-filter-btn active" data-cat="all" onclick="filterLogs('all')">全部</button>
-                    <button class="btn log-filter-btn" data-cat="login" onclick="filterLogs('login')">登录</button>
-                    <button class="btn log-filter-btn" data-cat="node" onclick="filterLogs('node')">节点</button>
-                    <button class="btn log-filter-btn" data-cat="rule" onclick="filterLogs('rule')">规则</button>
-                    <button class="btn log-filter-btn" data-cat="config" onclick="filterLogs('config')">配置</button>
-                    <button class="btn log-filter-btn" data-cat="system" onclick="filterLogs('system')">系统</button>
+                <div class="log-filters" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px" id="log-filters">
+                    <span style="font-size:13px;color:var(--text-sub);display:inline-flex;align-items:center;gap:4px"><i class="ri-filter-3-line"></i> 分类</span>
+                    <select id="log-filter-select" class="log-filter-select" onchange="filterLogs(this.value)">
+                        <option value="all">全部</option>
+                        <option value="login">登录</option>
+                        <option value="node">节点</option>
+                        <option value="rule">规则</option>
+                        <option value="config">配置</option>
+                        <option value="system">系统</option>
+                    </select>
                 </div>
                 <div class="table-container">
                     <table>
@@ -6746,10 +6750,7 @@ input:focus, select:focus {
         }
     }
     function filterLogs(cat) {
-        window.logFilter = cat;
-        document.querySelectorAll('#log-filters .log-filter-btn').forEach(function(b) {
-            b.classList.toggle('active', b.dataset.cat === cat);
-        });
+        window.logFilter = cat || 'all';
         renderLogs();
     }
     function renderLogs() {
