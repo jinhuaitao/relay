@@ -21,6 +21,7 @@ import (
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/time/rate"
+	"html"
 	"html/template"
 	"image/png"
 	"io"
@@ -48,7 +49,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.4"
+	AppVersion      = "v3.3.5"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -265,6 +266,9 @@ var (
 	// 每日流量统计缓冲（提升数据库性能）
 	dailyTxBuf int64
 	dailyRxBuf int64
+
+	// TG 周备份的幂等键（持久化于 settings 表，键名 last_backup_date）
+	lastTgBackupDate string
 )
 
 // --- 数据库初始化与优化 ---
@@ -746,36 +750,185 @@ func doSelfUninstall() {
 
 // ================= TG BOT INTERACTIVE =================
 
-func tgRequest(method string, payload interface{}) {
+// tgToken 在锁保护下读取当前 Bot Token
+func tgToken() string {
 	mu.Lock()
-	token := config.TgBotToken
-	mu.Unlock()
+	defer mu.Unlock()
+	return strings.TrimSpace(config.TgBotToken)
+}
+
+// tgResponse 是 Telegram API 的统一响应信封，用于判断 ok / error_code
+type tgResponse struct {
+	OK          bool   `json:"ok"`
+	ErrorCode   int    `json:"error_code"`
+	Description string `json:"description"`
+}
+
+// tgRequest 异步调用 Telegram API。
+// 与旧实现的区别：会读取响应体并检查 ok 字段，任何非 ok 结果都会写入日志，
+// 避免"消息发不出去但毫无痕迹"的静默失败。
+func tgRequest(method string, payload interface{}) {
+	token := tgToken()
 	if token == "" {
 		return
 	}
 
 	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[TG] %s 载荷序列化失败: %v", method, err)
+		return
+	}
+
 	go func() {
-		req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		req, err := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		if err != nil {
+			log.Printf("[TG] %s 请求构造失败: %v", method, err)
+			return
+		}
 		req.Header.Set("Content-Type", "application/json")
+
 		client := &http.Client{Timeout: 10 * time.Second}
-		client.Do(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[TG] %s 请求失败(网络不可达/超时): %v", method, err)
+			return
+		}
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+
+		var r tgResponse
+		if json.Unmarshal(body, &r) == nil && r.OK {
+			return
+		}
+
+		// editMessageText 在内容未变化时必然返回该错误，属于预期行为，静默忽略
+		if r.ErrorCode == 400 && strings.Contains(r.Description, "message is not modified") {
+			return
+		}
+
+		log.Printf("[TG] %s 调用失败 status=%d code=%d desc=%s body=%s",
+			method, resp.StatusCode, r.ErrorCode, r.Description, strings.TrimSpace(string(body)))
 	}()
+}
+
+// deleteTgWebhook 清除 Bot 上可能残留的 webhook。
+// 若 webhook 处于激活状态，getUpdates 会永久返回 409 Conflict，导致机器人完全无响应。
+func deleteTgWebhook(token string) {
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/deleteWebhook?drop_pending_updates=false", token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(urlStr)
+	if err != nil {
+		log.Printf("[TG] deleteWebhook 请求失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+
+	var r tgResponse
+	if json.Unmarshal(body, &r) == nil && r.OK {
+		log.Printf("[TG] deleteWebhook 成功，长轮询通道已就绪")
+		return
+	}
+	log.Printf("[TG] deleteWebhook 返回异常: %s", strings.TrimSpace(string(body)))
+}
+
+// tgTextLimit 是 Telegram 单条消息正文的硬上限（官方 4096，留出安全余量）
+const tgTextLimit = 4000
+
+// tgChunks 按行边界把长文本切分为多个不超过 limit 的片段，
+// 保证不会在 HTML 标签中间截断，也不会切断多字节字符。
+func tgChunks(text string, limit int) []string {
+	if len([]rune(text)) <= limit {
+		return []string{text}
+	}
+
+	lines := strings.Split(text, "\n")
+	var chunks []string
+	var cur strings.Builder
+	curLen := 0
+
+	flush := func() {
+		if curLen > 0 {
+			chunks = append(chunks, cur.String())
+			cur.Reset()
+			curLen = 0
+		}
+	}
+
+	for _, ln := range lines {
+		rl := []rune(ln)
+		// 极端情况：单行本身超限，按 rune 硬切，避免死循环
+		if len(rl) > limit {
+			flush()
+			for i := 0; i < len(rl); i += limit {
+				end := i + limit
+				if end > len(rl) {
+					end = len(rl)
+				}
+				chunks = append(chunks, string(rl[i:end]))
+			}
+			continue
+		}
+		if curLen+len(rl)+1 > limit {
+			flush()
+		}
+		cur.WriteString(ln)
+		cur.WriteString("\n")
+		curLen += len(rl) + 1
+	}
+	flush()
+
+	if len(chunks) == 0 {
+		return []string{""}
+	}
+	return chunks
+}
+
+// tgSendOrEdit 统一的"发送或编辑"出口。
+// - action 为 editMessageText 且 msgID 有效时，首片走编辑，其余分片发新消息；
+// - 超长文本自动分片，最后一片才挂载 reply_markup，避免键盘重复出现；
+// - sendMessage 不再携带无意义的 message_id 字段。
+func tgSendOrEdit(action, chatID string, msgID int64, text string, markup map[string]interface{}) {
+	chunks := tgChunks(text, tgTextLimit)
+	for i, ch := range chunks {
+		payload := map[string]interface{}{
+			"chat_id":    chatID,
+			"text":       ch,
+			"parse_mode": "HTML",
+		}
+
+		if i == 0 && action == "editMessageText" && msgID != 0 {
+			payload["message_id"] = msgID
+			if len(chunks) == 1 && markup != nil {
+				payload["reply_markup"] = markup
+			}
+			tgRequest("editMessageText", payload)
+			continue
+		}
+
+		if i == len(chunks)-1 && markup != nil {
+			payload["reply_markup"] = markup
+		}
+		tgRequest("sendMessage", payload)
+	}
+}
+
+// tgEscape 转义将被嵌入 HTML parse_mode 的动态内容。
+// 未转义的 & / < / > 会让 Telegram 返回 400 can't parse entities，导致整条消息丢失。
+func tgEscape(s string) string {
+	return html.EscapeString(s)
 }
 
 func sendTelegram(text string) {
 	mu.Lock()
-	chatID := config.TgChatID
+	chatID := strings.TrimSpace(config.TgChatID)
 	mu.Unlock()
-	if chatID == "" {
+	if chatID == "" || tgToken() == "" {
 		return
 	}
-	tgRequest("sendMessage", map[string]interface{}{
-		"chat_id":    chatID,
-		"text":       text,
-		"parse_mode": "HTML",
-	})
+	tgSendOrEdit("sendMessage", chatID, 0, text, nil)
 }
 
 // --- TG 交互增强工具 ---
@@ -808,9 +961,7 @@ func makeAestheticBar(percent float64, fillChar, emptyChar string) string {
 
 // 向 Telegram 自动注册原生快捷菜单 (Menu Button)
 func setupTgBotCommands() {
-	mu.Lock()
-	token := config.TgBotToken
-	mu.Unlock()
+	token := tgToken()
 	if token == "" {
 		return
 	}
@@ -825,18 +976,35 @@ func setupTgBotCommands() {
 	b, _ := json.Marshal(map[string]interface{}{"commands": commands})
 
 	go func() {
-		req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		req, err := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+		if err != nil {
+			log.Printf("[TG] setMyCommands 请求构造失败: %v", err)
+			return
+		}
 		req.Header.Set("Content-Type", "application/json")
 		client := &http.Client{Timeout: 10 * time.Second}
-		client.Do(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[TG] setMyCommands 请求失败: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+
+		var r tgResponse
+		if json.Unmarshal(body, &r) == nil && r.OK {
+			log.Printf("[TG] 命令菜单注册成功")
+			return
+		}
+		log.Printf("[TG] setMyCommands 返回异常: %s", strings.TrimSpace(string(body)))
 	}()
 }
 
 // --- TG 云备份功能核心 ---
 func sendTelegramDocument(filePath string, caption string) {
 	mu.Lock()
-	token := config.TgBotToken
-	chatID := config.TgChatID
+	token := strings.TrimSpace(config.TgBotToken)
+	chatID := strings.TrimSpace(config.TgChatID)
 	mu.Unlock()
 	if token == "" || chatID == "" {
 		return
@@ -848,6 +1016,7 @@ func sendTelegramDocument(filePath string, caption string) {
 
 	file, err := os.Open(filePath)
 	if err != nil {
+		log.Printf("[TG] 备份文件打开失败: %v", err)
 		return
 	}
 	defer file.Close()
@@ -866,11 +1035,27 @@ func sendTelegramDocument(filePath string, caption string) {
 	writer.Close()
 
 	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token)
-	req, _ := http.NewRequest("POST", urlStr, body)
+	req, err := http.NewRequest("POST", urlStr, body)
+	if err != nil {
+		log.Printf("[TG] sendDocument 请求构造失败: %v", err)
+		return
+	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[TG] sendDocument 请求失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+
+	var r tgResponse
+	if json.Unmarshal(respBody, &r) == nil && r.OK {
+		return
+	}
+	log.Printf("[TG] sendDocument 返回异常 status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 }
 
 func uploadToR2(filePath string) error {
@@ -916,9 +1101,9 @@ func uploadToR2(filePath string) error {
 }
 
 func autoBackupLoop() {
-	var lastBackupWeek int = -1
+	// 以持久化的"已备份日期"作为幂等键，避免进程重启导致重复备份
 	for {
-		time.Sleep(1 * time.Hour)
+		time.Sleep(10 * time.Minute)
 		now := time.Now()
 
 		mu.Lock()
@@ -930,10 +1115,15 @@ func autoBackupLoop() {
 			continue
 		}
 
-		_, week := now.ISOWeek()
-
-		if now.Weekday() == time.Monday && now.Hour() == 2 && lastBackupWeek != week {
-			lastBackupWeek = week
+		today := now.Format("2006-01-02")
+		// 周一 02:00 之后触发，并以"已备份日期"持久化去重。
+		// 原实现要求 now.Hour()==2 精确命中，轮询锚定在进程启动时刻上，
+		// 一旦漂移就会整周漏发且无任何补发逻辑。
+		if now.Weekday() == time.Monday && now.Hour() >= 2 && lastTgBackupDate != today {
+			lastTgBackupDate = today
+			if db != nil {
+				db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_date', ?)", today)
+			}
 			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
 
 			// === 触发 R2 备份 ===
@@ -949,6 +1139,41 @@ func autoBackupLoop() {
 type InlineButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
+}
+
+// --- Telegram Update 结构的具名定义 ---
+// 原实现使用逐字复刻的匿名结构体，任何字段/tag 微调都会导致难以排查的编译错误。
+type TgChat struct {
+	ID int64 `json:"id"`
+}
+
+type TgMessage struct {
+	MessageID int64  `json:"message_id"`
+	Chat      TgChat `json:"chat"`
+}
+
+type TgCallbackQuery struct {
+	ID      string     `json:"id"`
+	Data    string     `json:"data"`
+	Message *TgMessage `json:"message"`
+}
+
+type TgIncomingMessage struct {
+	Chat TgChat `json:"chat"`
+	Text string `json:"text"`
+}
+
+type TgUpdate struct {
+	UpdateID      int64              `json:"update_id"`
+	Message       *TgIncomingMessage `json:"message"`
+	CallbackQuery *TgCallbackQuery   `json:"callback_query"`
+}
+
+type tgUpdatesResponse struct {
+	OK          bool       `json:"ok"`
+	ErrorCode   int        `json:"error_code"`
+	Description string     `json:"description"`
+	Result      []TgUpdate `json:"result"`
 }
 
 func sendTgMenu(chatID string) {
@@ -1024,11 +1249,22 @@ func buildRulesMenuMarkup(page int) map[string]interface{} {
 }
 
 func startTgBotLoop() {
+	// 顶层兜底：任何未预期的 panic 都不应终止整个 Master 进程
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[TG] 轮询协程发生 panic: %v，5 秒后自动重启轮询", r)
+			time.Sleep(5 * time.Second)
+			go startTgBotLoop()
+		}
+	}()
+
 	var offset int64 = 0
+	lastToken := ""
+
 	for {
 		mu.Lock()
-		token := config.TgBotToken
-		allowedChat := config.TgChatID
+		token := strings.TrimSpace(config.TgBotToken)
+		allowedChat := strings.TrimSpace(config.TgChatID)
 		mu.Unlock()
 
 		if token == "" || allowedChat == "" {
@@ -1036,42 +1272,42 @@ func startTgBotLoop() {
 			continue
 		}
 
+		// Token 变更时：重置 offset（update_id 跨 Bot 不通用）、
+		// 清理残留 webhook、重新注册命令菜单
+		if token != lastToken {
+			lastToken = token
+			offset = 0
+			deleteTgWebhook(token)
+			setupTgBotCommands()
+			log.Printf("[TG] Bot Token 已加载，长轮询启动")
+		}
+
 		client := http.Client{Timeout: 65 * time.Second}
 		urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=60", token, offset)
 		resp, err := client.Get(urlStr)
 		if err != nil {
+			log.Printf("[TG] getUpdates 网络错误: %v", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		var res struct {
-			Result []struct {
-				UpdateID int64 `json:"update_id"`
-				Message  *struct {
-					Chat struct {
-						ID int64 `json:"id"`
-					} `json:"chat"`
-					Text string `json:"text"`
-				} `json:"message"`
-				CallbackQuery *struct {
-					ID      string `json:"id"`
-					Data    string `json:"data"`
-					Message *struct {
-						MessageID int64 `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-					} `json:"message"`
-				} `json:"callback_query"`
-			} `json:"result"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			resp.Body.Close()
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		var res tgUpdatesResponse
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&res)
 		resp.Body.Close()
+		if decodeErr != nil {
+			log.Printf("[TG] getUpdates 响应解析失败: %v", decodeErr)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// 关键：Telegram 用 HTTP 200 + ok=false 表达错误（典型如 409 Conflict），
+		// 旧实现直接忽略该字段，导致机器人静默失效且不留任何痕迹。
+		if !res.OK {
+			log.Printf("[TG] getUpdates 被拒绝 code=%d desc=%s（若为 409 请确认没有 webhook 或其他实例占用同一 Token）",
+				res.ErrorCode, res.Description)
+			time.Sleep(10 * time.Second)
+			continue
+		}
 
 		for _, update := range res.Result {
 			offset = update.UpdateID + 1
@@ -1083,51 +1319,41 @@ func startTgBotLoop() {
 					continue
 				}
 				text := strings.TrimSpace(update.Message.Text)
-				if text == "/start" || text == "/menu" || text == "/help" {
+				// 兼容群组场景下的 /menu@YourBot 形式
+				if strings.HasPrefix(text, "/") {
+					if at := strings.Index(text, "@"); at > 0 {
+						text = text[:at]
+					}
+				}
+				switch text {
+				case "/start", "/menu", "/help":
 					sendTgMenu(chatIdStr)
-				} else if text == "/status" {
-					// 模拟触发状态按钮
-					update.CallbackQuery = &struct {
-						ID      string `json:"id"`
-						Data    string `json:"data"`
-						Message *struct {
-							MessageID int64 `json:"message_id"`
-							Chat      struct {
-								ID int64 `json:"id"`
-							} `json:"chat"`
-						} `json:"message"`
-					}{ID: "", Data: "cmd:status", Message: &struct {
-						MessageID int64 `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-					}{MessageID: 0, Chat: struct {
-						ID int64 `json:"id"`
-					}{ID: update.Message.Chat.ID}}}
-				} else if text == "/rules" {
-					// 模拟触发规则按钮
-					update.CallbackQuery = &struct {
-						ID      string `json:"id"`
-						Data    string `json:"data"`
-						Message *struct {
-							MessageID int64 `json:"message_id"`
-							Chat      struct {
-								ID int64 `json:"id"`
-							} `json:"chat"`
-						} `json:"message"`
-					}{ID: "", Data: "cmd:rules", Message: &struct {
-						MessageID int64 `json:"message_id"`
-						Chat      struct {
-							ID int64 `json:"id"`
-						} `json:"chat"`
-					}{MessageID: 0, Chat: struct {
-						ID int64 `json:"id"`
-					}{ID: update.Message.Chat.ID}}}
+				case "/status":
+					// 复用内联回调分支，构造一个"无消息上下文"的伪回调
+					update.CallbackQuery = &TgCallbackQuery{
+						Data:    "cmd:status",
+						Message: &TgMessage{Chat: TgChat{ID: update.Message.Chat.ID}},
+					}
+				case "/rules":
+					update.CallbackQuery = &TgCallbackQuery{
+						Data:    "cmd:rules",
+						Message: &TgMessage{Chat: TgChat{ID: update.Message.Chat.ID}},
+					}
 				}
 			}
 
 			// 处理内联键盘回调
 			if update.CallbackQuery != nil {
+				// message 在官方定义中是可选项（inline 消息或原消息已被删除时缺失），
+				// 旧实现直接解引用，一旦为 nil 就会 panic 并终止整个进程
+				if update.CallbackQuery.Message == nil {
+					if update.CallbackQuery.ID != "" {
+						tgRequest("answerCallbackQuery", map[string]interface{}{"callback_query_id": update.CallbackQuery.ID})
+					}
+					log.Printf("[TG] 回调缺少 message 上下文，已忽略: data=%s", update.CallbackQuery.Data)
+					continue
+				}
+
 				chatIdStr := fmt.Sprintf("%d", update.CallbackQuery.Message.Chat.ID)
 				if chatIdStr != allowedChat {
 					continue
@@ -1151,17 +1377,8 @@ func startTgBotLoop() {
 							{{Text: "🔄 远程重启面板", CallbackData: "cmd:restart"}},
 						},
 					}
-					tgAction := "editMessageText"
-					if msgID == 0 {
-						tgAction = "sendMessage"
-					}
-					tgRequest(tgAction, map[string]interface{}{
-						"chat_id":      chatIdStr,
-						"message_id":   msgID,
-						"text":         "🤖 <b>GoRelay Pro 智能中控台</b>\n\n请点击下方按钮执行快捷操作：",
-						"parse_mode":   "HTML",
-						"reply_markup": markup,
-					})
+					tgSendOrEdit("editMessageText", chatIdStr, msgID,
+						"🤖 <b>GoRelay Pro 智能中控台</b>\n\n请点击下方按钮执行快捷操作：", markup)
 				} else if data == "cmd:status" {
 					mu.Lock()
 					var tx, rx int64
@@ -1189,7 +1406,7 @@ func startTgBotLoop() {
 					for _, a := range sortedAgents {
 						// === 新增：如果是离线节点，直接显示离线状态并跳过资源渲染 ===
 						if !a.IsOnline {
-							reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🔴 离线)\n\n", a.Name, a.RemoteIP)
+							reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🔴 离线)\n\n", tgEscape(a.Name), tgEscape(a.RemoteIP))
 							continue
 						}
 						// =======================================================
@@ -1211,7 +1428,7 @@ func startTgBotLoop() {
 								}
 							}
 						}
-						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🟢 在线)\n", a.Name, a.RemoteIP)
+						reply += fmt.Sprintf("💻 <b>%s</b> <code>[%s]</code> (🟢 在线)\n", tgEscape(a.Name), tgEscape(a.RemoteIP))
 						reply += fmt.Sprintf(" ├ 🟢 <code>CPU: %5.1f%% [%s]</code>\n", cpu, makeAestheticBar(cpu, "━", "─"))
 						reply += fmt.Sprintf(" ├ 🔵 <code>MEM: %5.1f%% [%s]</code>\n", mem, makeAestheticBar(mem, "━", "─"))
 						reply += fmt.Sprintf(" └ 🟡 <code>DSK: %5.1f%% [%s]</code>\n\n", dsk, makeAestheticBar(dsk, "━", "─"))
@@ -1264,17 +1481,7 @@ func startTgBotLoop() {
 					markup := map[string]interface{}{
 						"inline_keyboard": [][]InlineButton{{{Text: "🔙 返回主菜单", CallbackData: "cmd:menu"}, {Text: "🔄 刷新状态", CallbackData: "cmd:status"}}},
 					}
-					tgAction := "editMessageText"
-					if msgID == 0 {
-						tgAction = "sendMessage"
-					}
-					tgRequest(tgAction, map[string]interface{}{
-						"chat_id":      chatIdStr,
-						"message_id":   msgID,
-						"text":         reply,
-						"parse_mode":   "HTML",
-						"reply_markup": markup,
-					})
+					tgSendOrEdit("editMessageText", chatIdStr, msgID, reply, markup)
 				} else if data == "cmd:rules" || strings.HasPrefix(data, "page:") {
 					page := 1
 					if strings.HasPrefix(data, "page:") {
@@ -1283,17 +1490,9 @@ func startTgBotLoop() {
 							page = p
 						}
 					}
-					tgAction := "editMessageText"
-					if msgID == 0 {
-						tgAction = "sendMessage"
-					}
-					tgRequest(tgAction, map[string]interface{}{
-						"chat_id":      chatIdStr,
-						"message_id":   msgID,
-						"text":         "📜 <b>转发规则管理</b>\n\n点击下方按钮可一键切换 启动/暂停 状态：",
-						"parse_mode":   "HTML",
-						"reply_markup": buildRulesMenuMarkup(page),
-					})
+					tgSendOrEdit("editMessageText", chatIdStr, msgID,
+						"📜 <b>转发规则管理</b>\n\n点击下方按钮可一键切换 启动/暂停 状态：",
+						buildRulesMenuMarkup(page))
 				} else if data == "cmd:backup" {
 					go func() {
 						// 1. 先发送到 Telegram
@@ -1328,13 +1527,9 @@ func startTgBotLoop() {
 						mu.Unlock()
 						go pushConfigToAll()
 
-						tgRequest("editMessageText", map[string]interface{}{
-							"chat_id":      chatIdStr,
-							"message_id":   msgID,
-							"text":         "📜 <b>转发规则管理</b>\n\n状态已更新！点击下方按钮可继续切换：",
-							"parse_mode":   "HTML",
-							"reply_markup": buildRulesMenuMarkup(page),
-						})
+						tgSendOrEdit("editMessageText", chatIdStr, msgID,
+							"📜 <b>转发规则管理</b>\n\n状态已更新！点击下方按钮可继续切换：",
+							buildRulesMenuMarkup(page))
 					}
 				} else if data == "cmd:restart" {
 					// 增加二级确认防护
@@ -1344,19 +1539,12 @@ func startTgBotLoop() {
 							{{Text: "❌ 取消操作", CallbackData: "cmd:menu"}},
 						},
 					}
-					tgRequest("editMessageText", map[string]interface{}{
-						"chat_id":      chatIdStr,
-						"message_id":   msgID,
-						"text":         "⚠️ <b>危险操作确认</b>\n\n您正在尝试远程重启整个中控系统，这会导致所有网络连接短暂中断。确定要继续吗？",
-						"parse_mode":   "HTML",
-						"reply_markup": markup,
-					})
+					tgSendOrEdit("editMessageText", chatIdStr, msgID,
+						"⚠️ <b>危险操作确认</b>\n\n您正在尝试远程重启整个中控系统，这会导致所有网络连接短暂中断。确定要继续吗？",
+						markup)
 				} else if data == "action:confirm_restart" {
-					tgRequest("editMessageText", map[string]interface{}{
-						"chat_id":    chatIdStr,
-						"message_id": msgID,
-						"text":       "🔄 接收到安全指令，系统正在执行重启...",
-					})
+					tgSendOrEdit("editMessageText", chatIdStr, msgID,
+						"🔄 接收到安全指令，系统正在执行重启...", nil)
 					go func() {
 						time.Sleep(2 * time.Second)
 						doRestart()
@@ -1419,11 +1607,13 @@ func dailyTrafficReportLoop() {
 		time.Sleep(1 * time.Minute)
 		now := time.Now()
 
-		// 日报在当日 23:59 尝试发送；若该时刻掉线，次日 00:00-00:05 补发昨日报告
+		// 日报主窗口放宽到 23:55–23:59，并在次日 00:00–00:14 保留补发窗口。
+		// 原实现要求精确命中 23:59 这一分钟，而循环周期是 1 分钟 + 执行耗时，
+		// 长期运行必然漂移，存在整日漏发风险。
 		var reportDay string
-		if now.Hour() == 23 && now.Minute() == 59 {
+		if now.Hour() == 23 && now.Minute() >= 55 {
 			reportDay = now.Format("2006-01-02")
-		} else if now.Hour() == 0 && now.Minute() < 5 {
+		} else if now.Hour() == 0 && now.Minute() < 15 {
 			reportDay = now.AddDate(0, 0, -1).Format("2006-01-02")
 		}
 		if reportDay == "" || lastReportDate == reportDay {
@@ -1909,7 +2099,7 @@ func handleAgentConn(conn net.Conn) {
 	}(remoteIP, name)
 	log.Printf("Agent上线: %s", name)
 	addSystemLog(remoteIP, "Agent 上线", fmt.Sprintf("节点 %s 已连接", name))
-	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s", name))
+	sendTelegram(fmt.Sprintf("🟢 节点上线通知\n名称: %s", tgEscape(name)))
 	pushConfigToAll()
 
 	for {
@@ -1937,7 +2127,7 @@ func handleAgentConn(conn net.Conn) {
 	if curr, ok := agents[name]; ok && curr.Conn == conn {
 		curr.IsOnline = false // <--- 修改这里：不删除，仅标记离线
 		mu.Unlock()
-		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", name))
+		sendTelegram(fmt.Sprintf("🔴 节点下线通知\n名称: %s", tgEscape(name)))
 		// === 新增：将节点下线事件写入系统日志 ===
 		addSystemLog(remoteIP, "Agent 下线", fmt.Sprintf("节点 %s 已断开连接", name))
 	} else {
@@ -1979,16 +2169,17 @@ func handleStatsReport(payload interface{}) {
 				total := rules[i].TotalTx + rules[i].TotalRx
 				if limit > 0 {
 					pct := float64(total) / float64(limit)
+					note := tgEscape(rules[i].Note)
 					if pct >= 1.0 && !rules[i].Alert100 {
 						rules[i].Alert100 = true
-						alertMsgs = append(alertMsgs, fmt.Sprintf("🚨 <b>流量耗尽熔断</b>\n\n规则：【%s】\n状态：已切断连接\n说明：流量达到 100%%，该端口已自动熔断！", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("🚨 <b>流量耗尽熔断</b>\n\n规则：【%s】\n状态：已切断连接\n说明：流量达到 100%%，该端口已自动熔断！", note))
 						limitTriggered = true
 					} else if pct >= 0.95 && pct < 1.0 && !rules[i].Alert95 {
 						rules[i].Alert95 = true
-						alertMsgs = append(alertMsgs, fmt.Sprintf("⚠️ <b>流量极高预警</b>\n\n规则：【%s】\n状态：即将熔断\n说明：流量已使用超过 95%%！", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("⚠️ <b>流量极高预警</b>\n\n规则：【%s】\n状态：即将熔断\n说明：流量已使用超过 95%%！", note))
 					} else if pct >= 0.80 && pct < 0.95 && !rules[i].Alert80 {
 						rules[i].Alert80 = true
-						alertMsgs = append(alertMsgs, fmt.Sprintf("🔔 <b>流量使用预警</b>\n\n规则：【%s】\n状态：运行中\n说明：流量已使用超过 80%%。", rules[i].Note))
+						alertMsgs = append(alertMsgs, fmt.Sprintf("🔔 <b>流量使用预警</b>\n\n规则：【%s】\n状态：运行中\n说明：流量已使用超过 80%%。", note))
 					}
 				}
 				// --- 智能预警机制结束 ---
@@ -2830,8 +3021,10 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	config.AgentPorts = r.FormValue("agent_ports")
 	config.MasterDomain = r.FormValue("master_domain")
 	config.PanelDomain = r.FormValue("panel_domain")
-	config.TgBotToken = r.FormValue("tg_bot_token")
-	config.TgChatID = r.FormValue("tg_chat_id")
+	// TG 凭证必须清洗首尾空白：带空格的 Chat ID 会导致所有身份校验恒不相等，
+	// 表现为机器人"完全不响应"
+	config.TgBotToken = strings.TrimSpace(r.FormValue("tg_bot_token"))
+	config.TgChatID = strings.TrimSpace(r.FormValue("tg_chat_id"))
 	config.GithubClientID = r.FormValue("github_client_id")
 	config.GithubClientSecret = r.FormValue("github_client_secret")
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
@@ -3833,9 +4026,9 @@ func loadConfig() {
 			case "is_setup":
 				config.IsSetup = (v == "true")
 			case "tg_bot_token":
-				config.TgBotToken = v
+				config.TgBotToken = strings.TrimSpace(v)
 			case "tg_chat_id":
-				config.TgChatID = v
+				config.TgChatID = strings.TrimSpace(v)
 			case "two_fa_enabled":
 				config.TwoFAEnabled = (v == "true")
 			case "two_fa_secret":
@@ -3865,6 +4058,12 @@ func loadConfig() {
 
 	if config.AgentTokens == nil {
 		config.AgentTokens = make(map[string]string)
+	}
+
+	// 恢复 TG 周备份幂等键，保证进程重启后不会在同一周重复备份
+	lastTgBackupDate = ""
+	if err := db.QueryRow("SELECT value FROM settings WHERE key = 'last_backup_date'").Scan(&lastTgBackupDate); err != nil {
+		lastTgBackupDate = ""
 	}
 
 	rules = []LogicalRule{}
