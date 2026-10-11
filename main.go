@@ -49,7 +49,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.5"
+	AppVersion      = "v3.3.6"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1526,8 +1526,6 @@ func startTgBotLoop() {
 					if db != nil {
 						dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
 						if err == nil {
-							defer dsRows.Close()
-
 							for dsRows.Next() {
 								var d string
 								var dTx, dRx int64
@@ -1543,6 +1541,9 @@ func startTgBotLoop() {
 									historyLines = append(historyLines, fmt.Sprintf("📅 %s ⬆️%s ⬇️%s", shortDate, formatBytes(dTx), formatBytes(dRx)))
 								}
 							}
+							// 显式关闭：本函数（startTgBotLoop）永不返回，
+							// 若用 defer 会在每次查看状态时向 defer 链追加一条永不释放的记录。
+							dsRows.Close()
 						}
 					}
 
