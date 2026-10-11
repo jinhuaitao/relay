@@ -901,33 +901,86 @@ func tgChunks(text string, limit int) []string {
 	return chunks
 }
 
+// tgCall 同步调用 Telegram API 并返回结果。
+// 与 tgRequest 的区别：会阻塞等待响应，因此可以据此实现"失败降级"。
+// 第二个返回值非空即表示失败，内容为可直接定位问题的详情。
+func tgCall(method string, payload interface{}, timeout time.Duration) (*tgResponse, string) {
+	token := tgToken()
+	if token == "" {
+		return nil, "未配置 Bot Token"
+	}
+
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "载荷序列化失败: " + err.Error()
+	}
+
+	req, err := http.NewRequest("POST", urlStr, bytes.NewBuffer(b))
+	if err != nil {
+		return nil, "请求构造失败: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "网络错误: " + err.Error()
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+
+	var r tgResponse
+	if json.Unmarshal(body, &r) == nil && r.OK {
+		return &r, ""
+	}
+	return &r, fmt.Sprintf("status=%d code=%d desc=%s body=%s",
+		resp.StatusCode, r.ErrorCode, r.Description, strings.TrimSpace(string(body)))
+}
+
 // tgSendOrEdit 统一的"发送或编辑"出口。
-// - action 为 editMessageText 且 msgID 有效时，首片走编辑，其余分片发新消息；
-// - 超长文本自动分片，最后一片才挂载 reply_markup，避免键盘重复出现；
-// - sendMessage 不再携带无意义的 message_id 字段。
+//   - action 为 editMessageText 且 msgID 有效时优先编辑；
+//     **编辑失败会自动降级为 sendMessage 重发**，保证用户一定能看到反馈，
+//     并把失败原因写入日志（这是定位"点按钮没反应"的关键）；
+//   - 超长文本自动分片，最后一片才挂载 reply_markup，避免键盘重复出现；
+//   - sendMessage 不再携带无意义的 message_id 字段。
 func tgSendOrEdit(action, chatID string, msgID int64, text string, markup map[string]interface{}) {
 	chunks := tgChunks(text, tgTextLimit)
-	for i, ch := range chunks {
-		payload := map[string]interface{}{
-			"chat_id":    chatID,
-			"text":       ch,
-			"parse_mode": "HTML",
-		}
-
-		if i == 0 && action == "editMessageText" && msgID != 0 {
-			payload["message_id"] = msgID
-			if len(chunks) == 1 && markup != nil {
+	go func() {
+		for i, ch := range chunks {
+			payload := map[string]interface{}{
+				"chat_id":    chatID,
+				"text":       ch,
+				"parse_mode": "HTML",
+			}
+			if i == len(chunks)-1 && markup != nil {
 				payload["reply_markup"] = markup
 			}
-			tgRequest("editMessageText", payload)
-			continue
-		}
 
-		if i == len(chunks)-1 && markup != nil {
-			payload["reply_markup"] = markup
+			if i == 0 && action == "editMessageText" && msgID != 0 {
+				payload["message_id"] = msgID
+				r, detail := tgCall("editMessageText", payload, 12*time.Second)
+				if r != nil && r.OK {
+					continue
+				}
+				// 内容未发生变化属于正常情况，静默跳过，不降级重发
+				if r != nil && r.ErrorCode == 400 && strings.Contains(r.Description, "message is not modified") {
+					continue
+				}
+				log.Printf("[TG] editMessageText 失败，降级为发送新消息 | %s", detail)
+				delete(payload, "message_id")
+				if _, d2 := tgCall("sendMessage", payload, 12*time.Second); d2 != "" {
+					log.Printf("[TG] 降级 sendMessage 亦失败 | %s", d2)
+				}
+				continue
+			}
+
+			if _, detail := tgCall("sendMessage", payload, 12*time.Second); detail != "" {
+				log.Printf("[TG] sendMessage 失败 | %s", detail)
+			}
 		}
-		tgRequest("sendMessage", payload)
-	}
+	}()
 }
 
 // tgEscape 转义将被嵌入 HTML parse_mode 的动态内容。
@@ -1381,6 +1434,11 @@ func startTgBotLoop() {
 
 				data := update.CallbackQuery.Data
 				msgID := update.CallbackQuery.Message.MessageID
+
+				// 记录每一次成功接收到的按钮回调。
+				// 若点击按钮后日志里没有这一行，说明回调根本没送达（通道被抢/webhook 占用）；
+				// 若这一行出现了但界面无变化，则问题出在 editMessageText，下方会自动降级重发。
+				log.Printf("[TG] 收到按钮回调 | data=%s msgID=%d chat=%s", data, msgID, chatIdStr)
 
 				if data == "noop" {
 					continue
