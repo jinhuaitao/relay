@@ -49,7 +49,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.5"
+	AppVersion      = "v3.3.6"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -834,6 +834,36 @@ func deleteTgWebhook(token string) {
 	log.Printf("[TG] deleteWebhook 返回异常: %s", strings.TrimSpace(string(body)))
 }
 
+// tgLogBotIdentity 在启动时打印 Bot 身份与授权 Chat ID。
+// 用于快速确认"面板里填的 Token 与 Chat ID 是否配对"——
+// 若 Token 与菜单消息所属的 Bot 不一致，按钮回调将永远无人应答。
+func tgLogBotIdentity(token, allowedChat string) {
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(urlStr)
+	if err != nil {
+		log.Printf("[TG] getMe 请求失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+
+	var r struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			ID        int64  `json:"id"`
+			Username  string `json:"username"`
+			FirstName string `json:"first_name"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(body, &r) != nil || !r.OK {
+		log.Printf("[TG] getMe 返回异常，Token 可能已失效: %s", strings.TrimSpace(string(body)))
+		return
+	}
+	log.Printf("[TG] 当前 Bot: @%s (%s, id=%d)", r.Result.Username, r.Result.FirstName, r.Result.ID)
+	log.Printf("[TG] 授权 Chat ID: %s（请确认与该 Bot 对话窗口的 Chat ID 一致）", allowedChat)
+}
+
 // tgTextLimit 是 Telegram 单条消息正文的硬上限（官方 4096，留出安全余量）
 const tgTextLimit = 4000
 
@@ -1262,6 +1292,7 @@ func startTgBotLoop() {
 		if token != lastToken {
 			lastToken = token
 			offset = 0
+			tgLogBotIdentity(token, allowedChat)
 			deleteTgWebhook(token)
 			setupTgBotCommands()
 			log.Printf("[TG] Bot Token 已加载，长轮询启动")
