@@ -131,6 +131,8 @@ install_relay() {
     
     if [ -f /etc/alpine-release ]; then
         # Alpine OpenRC
+        # 注意：command_background=true 时若不指定 output_log/error_log，
+        # OpenRC 会把 stdout/stderr 丢进 /dev/null，导致 /var/log/relay.log 永不生成。
         cat > /etc/init.d/$SERVICE_NAME <<EOF
 #!/sbin/openrc-run
 name="relay"
@@ -138,16 +140,19 @@ command="$BIN_PATH"
 command_args="-mode master"
 command_background=true
 pidfile="/run/${SERVICE_NAME}.pid"
+output_log="/var/log/relay.log"
+error_log="/var/log/relay.log"
 
 depend() {
     need net
     after firewall
 }
 EOF
+        touch /var/log/relay.log
         chmod +x /etc/init.d/$SERVICE_NAME
         rc-update add $SERVICE_NAME default >/dev/null 2>&1
         service $SERVICE_NAME restart >/dev/null 2>&1
-        log_success "Alpine OpenRC 服务配置完成"
+        log_success "Alpine OpenRC 服务配置完成（日志: /var/log/relay.log）"
 
     elif command -v systemctl >/dev/null; then
         # Debian Systemd
