@@ -837,48 +837,33 @@ func deleteTgWebhook(token string) {
 // tgTextLimit 是 Telegram 单条消息正文的硬上限（官方 4096，留出安全余量）
 const tgTextLimit = 4000
 
-// tgChunks 按行边界把长文本切分为多个不超过 limit 的片段，
-// 保证不会在 HTML 标签中间截断，也不会切断多字节字符。
+// tgChunks 按行边界把长文本切分为多个不超过 limit 的片段。
+// 直接对 rune 切片做区间切割，拼接结果与原文本严格相等；
+// 优先在换行处断开，避免把 HTML 标签截成两半。
 func tgChunks(text string, limit int) []string {
-	if len([]rune(text)) <= limit {
+	runes := []rune(text)
+	if len(runes) <= limit {
 		return []string{text}
 	}
 
-	lines := strings.Split(text, "\n")
 	var chunks []string
-	var cur strings.Builder
-	curLen := 0
-
-	flush := func() {
-		if curLen > 0 {
-			chunks = append(chunks, cur.String())
-			cur.Reset()
-			curLen = 0
-		}
-	}
-
-	for _, ln := range lines {
-		rl := []rune(ln)
-		// 极端情况：单行本身超限，按 rune 硬切，避免死循环
-		if len(rl) > limit {
-			flush()
-			for i := 0; i < len(rl); i += limit {
-				end := i + limit
-				if end > len(rl) {
-					end = len(rl)
+	start := 0
+	for start < len(runes) {
+		end := start + limit
+		if end >= len(runes) {
+			end = len(runes)
+		} else {
+			// 向前回溯到最近的换行符（含换行本身）
+			for i := end - 1; i > start; i-- {
+				if runes[i] == '\n' {
+					end = i + 1
+					break
 				}
-				chunks = append(chunks, string(rl[i:end]))
 			}
-			continue
 		}
-		if curLen+len(rl)+1 > limit {
-			flush()
-		}
-		cur.WriteString(ln)
-		cur.WriteString("\n")
-		curLen += len(rl) + 1
+		chunks = append(chunks, string(runes[start:end]))
+		start = end
 	}
-	flush()
 
 	if len(chunks) == 0 {
 		return []string{""}
