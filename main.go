@@ -49,7 +49,7 @@ import (
 // --- 配置与常量 ---
 
 const (
-	AppVersion      = "v3.3.6"
+	AppVersion      = "v3.3.5"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
@@ -1435,10 +1435,16 @@ func startTgBotLoop() {
 				data := update.CallbackQuery.Data
 				msgID := update.CallbackQuery.Message.MessageID
 
-				// 记录每一次成功接收到的按钮回调。
-				// 若点击按钮后日志里没有这一行，说明回调根本没送达（通道被抢/webhook 占用）；
-				// 若这一行出现了但界面无变化，则问题出在 editMessageText，下方会自动降级重发。
-				log.Printf("[TG] 收到按钮回调 | data=%s msgID=%d chat=%s", data, msgID, chatIdStr)
+				// 区分回调来源，避免误判：
+				// - 真实按钮点击必然带非空 callback_query.id，且 message_id 恒 >= 1
+				// - /status、/rules 等文本命令走的是内部伪造回调（id 为空、msgID 恒为 0）
+				// 因此：点击按钮后若日志里没有"来源=按钮点击"的行，说明回调根本没送达。
+				cbSrc := "按钮点击"
+				if update.CallbackQuery.ID == "" {
+					cbSrc = "文本命令"
+				}
+				log.Printf("[TG] 收到回调 | 来源=%s cbid=%s data=%s msgID=%d chat=%s",
+					cbSrc, update.CallbackQuery.ID, data, msgID, chatIdStr)
 
 				if data == "noop" {
 					continue
