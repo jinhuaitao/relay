@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>初始化 · GoRelay Pro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d9f7a">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+<script>
+    (function () {
+        try {
+            var t = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            var c = localStorage.getItem('colorTheme') || 'emerald';
+            document.documentElement.setAttribute('data-theme', t);
+            document.documentElement.setAttribute('data-color', c);
+        } catch (e) { }
+    })();
+</script>
+<style>
+:root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+    --bg: #f4f6fa;
+    --surface: #ffffff;
+    --surface-2: #f5f7fa;
+    --line: #e6eaf1;
+    --line-2: #d5dbe5;
+    --text: #0c1322;
+    --text-2: #59637a;
+    --text-3: #8b95a8;
+
+    --brand: #0d9f7a;
+    --brand-2: #0a8666;
+    --brand-strong: #0a7a5e;
+    --brand-soft: rgba(13, 159, 122, 0.10);
+    --brand-line: rgba(13, 159, 122, 0.22);
+    --brand-glow: rgba(13, 159, 122, 0.22);
+    --accent: #0aa2c4;
+
+    --sh-1: 0 1px 2px rgba(12, 19, 34, 0.05);
+}
+[data-theme="dark"] {
+    --bg: #070a10;
+    --surface: #0f1520;
+    --surface-2: #151c28;
+    --line: rgba(255, 255, 255, 0.075);
+    --line-2: rgba(255, 255, 255, 0.13);
+    --text: #e9eef7;
+    --text-2: #98a4b8;
+    --text-3: #6b7789;
+    --brand: #2ed3a4;
+    --brand-2: #1fbd90;
+    --brand-strong: #6ff0c8;
+    --brand-soft: rgba(46, 211, 164, 0.13);
+    --brand-line: rgba(46, 211, 164, 0.26);
+    --brand-glow: rgba(46, 211, 164, 0.26);
+    --accent: #37c8e8;
+    --sh-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+[data-color="violet"] {
+    --brand: #6b5cf6; --brand-2: #5a4ae0; --brand-strong: #5443d6;
+    --brand-soft: rgba(107, 92, 246, 0.10); --brand-line: rgba(107, 92, 246, 0.22); --brand-glow: rgba(107, 92, 246, 0.22);
+    --accent: #a855f7;
+}
+[data-color="violet"][data-theme="dark"] {
+    --brand: #9b8dff; --brand-2: #7c6bf5; --brand-strong: #c6bdff;
+    --brand-soft: rgba(155, 141, 255, 0.14); --brand-line: rgba(155, 141, 255, 0.28); --brand-glow: rgba(155, 141, 255, 0.26);
+    --accent: #c084fc;
+}
+[data-color="rose"] {
+    --brand: #e8485f; --brand-2: #d13750; --brand-strong: #bd2a42;
+    --brand-soft: rgba(232, 72, 95, 0.10); --brand-line: rgba(232, 72, 95, 0.22); --brand-glow: rgba(232, 72, 95, 0.22);
+    --accent: #f97316;
+}
+[data-color="rose"][data-theme="dark"] {
+    --brand: #ff7d92; --brand-2: #f2607a; --brand-strong: #ffb3c0;
+    --brand-soft: rgba(255, 125, 146, 0.14); --brand-line: rgba(255, 125, 146, 0.28); --brand-glow: rgba(255, 125, 146, 0.26);
+    --accent: #fb923c;
+}
+[data-color="amber"] {
+    --brand: #d98a0b; --brand-2: #c07806; --brand-strong: #a2640a;
+    --brand-soft: rgba(217, 138, 11, 0.12); --brand-line: rgba(217, 138, 11, 0.24); --brand-glow: rgba(217, 138, 11, 0.24);
+    --accent: #65a30d;
+}
+[data-color="amber"][data-theme="dark"] {
+    --brand: #f2b544; --brand-2: #dfa02c; --brand-strong: #ffd489;
+    --brand-soft: rgba(242, 181, 68, 0.14); --brand-line: rgba(242, 181, 68, 0.28); --brand-glow: rgba(242, 181, 68, 0.26);
+    --accent: #a3e635;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+    margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
+    background: var(--bg); color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    transition: background 0.3s ease, color 0.3s ease;
+}
+h1, h2, h3, p { margin: 0; }
+a { color: inherit; text-decoration: none; }
+button, input { font: inherit; color: inherit; }
+::selection { background: var(--brand-soft); }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 8px; }
+
+.auth { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); min-height: 100vh; }
+
+.showcase {
+    position: relative; overflow: hidden; isolation: isolate;
+    display: flex; flex-direction: column; padding: 44px 48px;
+    background: #070b12; color: #e8eef7;
+}
+.showcase::before {
+    content: ''; position: absolute; inset: -20%; z-index: -2;
+    background:
+        radial-gradient(38% 32% at 22% 12%, var(--brand-glow), transparent 62%),
+        radial-gradient(34% 30% at 88% 88%, rgba(14, 165, 198, 0.20), transparent 66%);
+    filter: blur(30px);
+}
+.showcase::after {
+    content: ''; position: absolute; inset: 0; z-index: -1; opacity: 0.55;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-size: 54px 54px;
+    -webkit-mask-image: radial-gradient(70% 60% at 30% 20%, #000 0%, transparent 100%);
+    mask-image: radial-gradient(70% 60% at 30% 20%, #000 0%, transparent 100%);
+}
+.brand-row { display: flex; align-items: center; gap: 11px; }
+.brand-mark {
+    width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: 20px; color: #fff;
+    background: linear-gradient(140deg, var(--brand), var(--accent));
+    box-shadow: 0 10px 24px -10px var(--brand-glow), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.brand-name { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+.brand-tag { font-size: 10.5px; color: #7d8ba0; font-family: var(--font-mono); letter-spacing: 0.04em; }
+
+.showcase-body { margin: auto 0; padding: 40px 0; max-width: 460px; }
+.showcase-body h1 { font-size: 34px; line-height: 1.24; font-weight: 700; letter-spacing: -0.035em; margin-bottom: 14px; }
+.showcase-body h1 em {
+    font-style: normal;
+    background: linear-gradient(100deg, var(--brand), var(--accent));
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.showcase-body > p { font-size: 13.5px; color: #93a1b5; line-height: 1.7; max-width: 380px; }
+
+.steps { list-style: none; margin: 30px 0 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
+.steps li { display: flex; gap: 14px; position: relative; padding-bottom: 22px; }
+.steps li:last-child { padding-bottom: 0; }
+.steps li::before {
+    content: ''; position: absolute; left: 13px; top: 30px; bottom: 2px; width: 1px;
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.02));
+}
+.steps li:last-child::before { display: none; }
+.step-no {
+    width: 27px; height: 27px; flex: 0 0 auto; border-radius: 9px;
+    display: grid; place-items: center; font-family: var(--font-mono); font-size: 11.5px; font-weight: 600;
+    background: rgba(255, 255, 255, 0.055); border: 1px solid rgba(255, 255, 255, 0.09); color: var(--brand);
+}
+.step-txt strong { display: block; font-size: 13px; font-weight: 600; color: #dbe4ef; }
+.step-txt span { font-size: 12px; color: #8494a8; }
+
+.showcase-foot { font-size: 11.5px; color: #5f6b7d; display: flex; align-items: center; gap: 8px; }
+.showcase-foot .dot-live { width: 6px; height: 6px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 3px rgba(46, 211, 164, 0.16); }
+
+.pane {
+    position: relative; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 40px 24px;
+}
+.pane::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(46% 34% at 72% -6%, var(--brand-soft), transparent 70%);
+}
+.pane > * { position: relative; z-index: 1; }
+.pane-top { position: absolute; top: 20px; right: 22px; z-index: 2; }
+.icon-btn {
+    width: 36px; height: 36px; display: grid; place-items: center;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--surface);
+    color: var(--text-2); font-size: 17px; cursor: pointer;
+    transition: transform 0.16s ease, color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--line-2); transform: translateY(-1px); box-shadow: var(--sh-1); }
+
+.auth-card { width: 100%; max-width: 372px; }
+.card-head { margin-bottom: 24px; }
+.card-logo {
+    width: 46px; height: 46px; border-radius: 14px; display: none;
+    place-items: center; color: #fff; font-size: 23px; margin-bottom: 18px;
+    background: linear-gradient(140deg, var(--brand), var(--accent));
+    box-shadow: 0 12px 28px -12px var(--brand-glow);
+}
+.badge-new {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 22px; padding: 0 9px; margin-bottom: 12px; border-radius: 99px;
+    background: var(--brand-soft); border: 1px solid var(--brand-line);
+    color: var(--brand-strong); font-size: 11px; font-weight: 600;
+}
+.card-head h2 { font-size: 23px; font-weight: 700; letter-spacing: -0.03em; }
+.card-head p { font-size: 13px; color: var(--text-3); margin-top: 6px; }
+
+.field { margin-bottom: 14px; }
+.field > label { display: block; font-size: 12px; font-weight: 550; color: var(--text-2); margin-bottom: 7px; }
+.field .hint { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+.input-box { position: relative; }
+.input-box > i {
+    position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+    font-size: 16px; color: var(--text-3); pointer-events: none; transition: color 0.16s ease;
+}
+input {
+    width: 100%; height: 44px; padding: 0 14px 0 40px;
+    border: 1px solid var(--line); border-radius: 11px;
+    background: var(--surface-2); color: var(--text); font-size: 14px;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+    outline: none;
+}
+input::placeholder { color: var(--text-3); }
+input:hover { border-color: var(--line-2); }
+input:focus { border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--brand-soft); }
+.input-box:focus-within > i { color: var(--brand); }
+
+.submit-btn {
+    width: 100%; height: 46px; margin-top: 10px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    border: none; border-radius: 11px; cursor: pointer;
+    background: var(--brand); color: #fff; font-size: 14px; font-weight: 600;
+    box-shadow: 0 2px 4px rgba(12, 19, 34, 0.14);
+    transition: background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+.submit-btn i { font-size: 16px; }
+.submit-btn:hover { background: var(--brand-2); transform: translateY(-1px); box-shadow: 0 10px 24px -12px var(--brand-glow); }
+.submit-btn:active { transform: none; }
+
+.pane-foot { margin-top: 26px; font-size: 11.5px; color: var(--text-3); text-align: center; line-height: 1.7; }
+
+@media (max-width: 900px) {
+    .auth { grid-template-columns: 1fr; }
+    .showcase { display: none; }
+    .pane { padding: 72px 22px 40px; justify-content: flex-start; min-height: 100vh; }
+    .card-logo { display: grid; }
+    .pane-top { top: 16px; right: 16px; }
+    .auth-card { max-width: 400px; margin: 0 auto; }
+    .card-head h2 { font-size: 21px; }
+}
+@media (max-width: 420px) {
+    input { height: 46px; font-size: 16px; }
+    .submit-btn { height: 48px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
+}
+</style>
+</head>
+<body>
+
+<div class="auth">
+
+    <aside class="showcase">
+        <div class="brand-row">
+            <div class="brand-mark"><i class="ri-rocket-2-fill"></i></div>
+            <div>
+                <div class="brand-name">GoRelay Pro</div>
+                <div class="brand-tag">DISTRIBUTED RELAY CONSOLE</div>
+            </div>
+        </div>
+
+        <div class="showcase-body">
+            <h1>三步完成<br>你的<em>中继网络</em></h1>
+            <p>先创建管理员账户，随后在面板中配置域名与节点，即可开始转发流量。</p>
+
+            <ul class="steps">
+                <li>
+                    <div class="step-no">01</div>
+                    <div class="step-txt"><strong>创建管理员账户</strong><span>设置面板登录账号与密码</span></div>
+                </li>
+                <li>
+                    <div class="step-no">02</div>
+                    <div class="step-txt"><strong>配置域名与证书</strong><span>面板域名可套 CDN，节点域名需直连</span></div>
+                </li>
+                <li>
+                    <div class="step-no">03</div>
+                    <div class="step-txt"><strong>接入 Agent 节点</strong><span>一键生成安装命令，TLS 隧道自动建立</span></div>
+                </li>
+            </ul>
+        </div>
+
+        <div class="showcase-foot"><span class="dot-live"></span> 首次启动 · 等待初始化</div>
+    </aside>
+
+    <main class="pane">
+        <div class="pane-top">
+            <button class="icon-btn" onclick="toggleTheme()" title="切换明暗主题"><i class="ri-moon-line" id="theme-icon"></i></button>
+        </div>
+
+        <form class="auth-card" method="POST">
+            <div class="card-head">
+                <div class="card-logo"><i class="ri-rocket-2-fill"></i></div>
+                <div class="badge-new"><i class="ri-sparkling-2-line"></i> 首次初始化</div>
+                <h2>创建管理员账户</h2>
+                <p>该账户用于登录控制台，请妥善保管</p>
+            </div>
+
+            <div class="field">
+                <label>管理员用户名</label>
+                <div class="input-box">
+                    <i class="ri-user-line"></i>
+                    <input name="username" placeholder="请输入用户名" autocomplete="username" required>
+                </div>
+            </div>
+
+            <div class="field">
+                <label>登录密码</label>
+                <div class="input-box">
+                    <i class="ri-lock-password-line"></i>
+                    <input type="password" name="password" placeholder="请设置密码" autocomplete="new-password" required>
+                </div>
+                <div class="hint">建议使用 12 位以上、包含大小写与符号的强密码</div>
+            </div>
+
+            <button class="submit-btn" type="submit"><i class="ri-check-line"></i> 完成初始化</button>
+
+            <div class="pane-foot">GoRelay Pro · 安全内网穿透中继系统</div>
+        </form>
+    </main>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var t = document.documentElement.getAttribute('data-theme');
+        var el = document.getElementById('theme-icon');
+        if (el) el.className = t === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    });
+    function toggleTheme() {
+        var html = document.documentElement;
+        var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        html.setAttribute('data-theme', next);
+        try { localStorage.setItem('theme', next); } catch (e) { }
+        var el = document.getElementById('theme-icon');
+        if (el) el.className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    }
+</script>
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js'); }); }</script>
+</body>
+</html>

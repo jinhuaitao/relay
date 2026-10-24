@@ -5,7 +5,11 @@ on:
     branches:
       - main
     paths:
-      - 'main.go' # 仅当 main.go 被修改时才自动触发编译
+      - '**.go' # 任一 Go 源码文件被修改即自动触发编译
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
   workflow_dispatch: # 允许手动触发
 
 permissions:
@@ -34,7 +38,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.21'
+          go-version: '1.25'
 
       - name: Download dependencies
         run: go mod download
@@ -45,7 +49,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0 
         run: |
-          go build -ldflags "-s -w" -o ${{ matrix.filename }} main.go
+          go build -ldflags "-s -w" -o ${{ matrix.filename }} .
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -73,11 +77,11 @@ jobs:
           path: ./artifacts
 
       # 1. 自动生成版本号
-      - name: Extract version from main.go
+      - name: Extract version from Go sources
         id: tag_version
         run: |
           # 使用 grep 提取 AppVersion 后的字符串
-          VERSION=$(grep -oP 'AppVersion\s+=\s+"\K[^"]+' main.go)
+          VERSION=$(grep -rhoP 'AppVersion\s+=\s+"\K[^"]+' --include='*.go' .)
           echo "提取到的版本号是: $VERSION"
           echo "new_tag=$VERSION" >> $GITHUB_OUTPUT
 

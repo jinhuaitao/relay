@@ -118,6 +118,26 @@
 | **Master** | Relay Server | Server with public IP, used to deploy the control panel |
 | **Agent** | Node Server | Server(s) used for actual traffic forwarding (one or multiple) |
 
+### 📁 Project Layout
+
+```
+relay/
+├── main.go              # Entry point (just calls app.Main)
+├── Dockerfile           # Multi-stage build
+├── relay.sh             # One-click installer
+├── docs/STRUCTURE.md    # Detailed architecture notes
+└── internal/app/        # All implementation (package app)
+    ├── core_*.go        # Constants / types / global state / DB / config / utils
+    ├── master_core.go   # Master: listeners, agent connections, stats, WS broadcast
+    ├── node_*.go        # Node: agent connection, TCP/UDP forwarding engine
+    ├── ops_*.go         # Ops: service install, self-update, traffic schedulers
+    ├── tg_*.go          # Telegram: API, interactive bot, cloud backup
+    ├── web_*.go         # Web: auth, pages, rule/settings APIs, PWA
+    └── web/             # go:embed frontend assets (HTML/JSON/JS)
+```
+
+> See [docs/STRUCTURE.md](docs/STRUCTURE.md) for layers, call flows and verification records.
+
 ---
 
 ## 📚 Quick Start
@@ -147,7 +167,7 @@ git clone https://github.com/jinhuaitao/relay.git
 cd relay
 
 # 2. Build for Linux 64-bit
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay .
 
 # 3. Make executable
 chmod +x relay

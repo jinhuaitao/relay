@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>登录 · GoRelay Pro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d9f7a">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+<script>
+    (function () {
+        try {
+            var t = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+            var c = localStorage.getItem('colorTheme') || 'emerald';
+            document.documentElement.setAttribute('data-theme', t);
+            document.documentElement.setAttribute('data-color', c);
+        } catch (e) { }
+    })();
+</script>
+<style>
+:root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+
+    --bg: #f4f6fa;
+    --surface: #ffffff;
+    --surface-2: #f5f7fa;
+    --line: #e6eaf1;
+    --line-2: #d5dbe5;
+    --text: #0c1322;
+    --text-2: #59637a;
+    --text-3: #8b95a8;
+
+    --brand: #0d9f7a;
+    --brand-2: #0a8666;
+    --brand-strong: #0a7a5e;
+    --brand-soft: rgba(13, 159, 122, 0.10);
+    --brand-line: rgba(13, 159, 122, 0.22);
+    --brand-glow: rgba(13, 159, 122, 0.22);
+    --accent: #0aa2c4;
+
+    --danger-text: #bd2233;
+    --danger-bg: rgba(224, 56, 74, 0.09);
+    --danger-line: rgba(224, 56, 74, 0.20);
+
+    --sh-1: 0 1px 2px rgba(12, 19, 34, 0.05);
+    --sh-3: 0 30px 70px -30px rgba(12, 19, 34, 0.35);
+}
+[data-theme="dark"] {
+    --bg: #070a10;
+    --surface: #0f1520;
+    --surface-2: #151c28;
+    --line: rgba(255, 255, 255, 0.075);
+    --line-2: rgba(255, 255, 255, 0.13);
+    --text: #e9eef7;
+    --text-2: #98a4b8;
+    --text-3: #6b7789;
+    --brand: #2ed3a4;
+    --brand-2: #1fbd90;
+    --brand-strong: #6ff0c8;
+    --brand-soft: rgba(46, 211, 164, 0.13);
+    --brand-line: rgba(46, 211, 164, 0.26);
+    --brand-glow: rgba(46, 211, 164, 0.26);
+    --accent: #37c8e8;
+    --danger-text: #ff8593;
+    --danger-bg: rgba(255, 110, 128, 0.13);
+    --danger-line: rgba(255, 110, 128, 0.24);
+    --sh-1: 0 1px 2px rgba(0, 0, 0, 0.45);
+    --sh-3: 0 30px 70px -24px rgba(0, 0, 0, 0.85);
+}
+[data-color="violet"] {
+    --brand: #6b5cf6; --brand-2: #5a4ae0; --brand-strong: #5443d6;
+    --brand-soft: rgba(107, 92, 246, 0.10); --brand-line: rgba(107, 92, 246, 0.22); --brand-glow: rgba(107, 92, 246, 0.22);
+    --accent: #a855f7;
+}
+[data-color="violet"][data-theme="dark"] {
+    --brand: #9b8dff; --brand-2: #7c6bf5; --brand-strong: #c6bdff;
+    --brand-soft: rgba(155, 141, 255, 0.14); --brand-line: rgba(155, 141, 255, 0.28); --brand-glow: rgba(155, 141, 255, 0.26);
+    --accent: #c084fc;
+}
+[data-color="rose"] {
+    --brand: #e8485f; --brand-2: #d13750; --brand-strong: #bd2a42;
+    --brand-soft: rgba(232, 72, 95, 0.10); --brand-line: rgba(232, 72, 95, 0.22); --brand-glow: rgba(232, 72, 95, 0.22);
+    --accent: #f97316;
+}
+[data-color="rose"][data-theme="dark"] {
+    --brand: #ff7d92; --brand-2: #f2607a; --brand-strong: #ffb3c0;
+    --brand-soft: rgba(255, 125, 146, 0.14); --brand-line: rgba(255, 125, 146, 0.28); --brand-glow: rgba(255, 125, 146, 0.26);
+    --accent: #fb923c;
+}
+[data-color="amber"] {
+    --brand: #d98a0b; --brand-2: #c07806; --brand-strong: #a2640a;
+    --brand-soft: rgba(217, 138, 11, 0.12); --brand-line: rgba(217, 138, 11, 0.24); --brand-glow: rgba(217, 138, 11, 0.24);
+    --accent: #65a30d;
+}
+[data-color="amber"][data-theme="dark"] {
+    --brand: #f2b544; --brand-2: #dfa02c; --brand-strong: #ffd489;
+    --brand-soft: rgba(242, 181, 68, 0.14); --brand-line: rgba(242, 181, 68, 0.28); --brand-glow: rgba(242, 181, 68, 0.26);
+    --accent: #a3e635;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+    margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
+    background: var(--bg); color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    transition: background 0.3s ease, color 0.3s ease;
+}
+h1, h2, h3, p { margin: 0; }
+a { color: inherit; text-decoration: none; }
+button, input { font: inherit; color: inherit; }
+::selection { background: var(--brand-soft); }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 8px; }
+
+/* ---------- 布局 ---------- */
+.auth { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); min-height: 100vh; }
+
+/* ---------- 左侧品牌区 ---------- */
+.showcase {
+    position: relative; overflow: hidden;
+    display: flex; flex-direction: column;
+    padding: 44px 48px;
+    background: #070b12; color: #e8eef7;
+    isolation: isolate;
+}
+.showcase::before {
+    content: ''; position: absolute; inset: -20%; z-index: -2;
+    background:
+        radial-gradient(38% 32% at 22% 12%, var(--brand-glow), transparent 62%),
+        radial-gradient(34% 30% at 88% 88%, rgba(14, 165, 198, 0.20), transparent 66%);
+    filter: blur(30px);
+}
+.showcase::after {
+    content: ''; position: absolute; inset: 0; z-index: -1; opacity: 0.55;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+    background-size: 54px 54px;
+    -webkit-mask-image: radial-gradient(70% 60% at 30% 20%, #000 0%, transparent 100%);
+    mask-image: radial-gradient(70% 60% at 30% 20%, #000 0%, transparent 100%);
+}
+.brand-row { display: flex; align-items: center; gap: 11px; }
+.brand-mark {
+    width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: 20px; color: #fff;
+    background: linear-gradient(140deg, var(--brand), var(--accent));
+    box-shadow: 0 10px 24px -10px var(--brand-glow), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.brand-name { font-size: 15px; font-weight: 700; letter-spacing: -0.02em; }
+.brand-tag { font-size: 10.5px; color: #7d8ba0; font-family: var(--font-mono); letter-spacing: 0.04em; }
+
+.showcase-body { margin: auto 0; padding: 40px 0; max-width: 460px; }
+.showcase-body h1 {
+    font-size: 34px; line-height: 1.24; font-weight: 700; letter-spacing: -0.035em;
+    margin-bottom: 14px;
+}
+.showcase-body h1 em {
+    font-style: normal;
+    background: linear-gradient(100deg, var(--brand), var(--accent));
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.showcase-body > p { font-size: 13.5px; color: #93a1b5; line-height: 1.7; max-width: 380px; }
+
+.feat { list-style: none; margin: 28px 0 0; padding: 0; display: flex; flex-direction: column; gap: 13px; }
+.feat li { display: flex; align-items: center; gap: 11px; font-size: 13px; color: #b6c3d4; }
+.feat li i {
+    width: 28px; height: 28px; flex: 0 0 auto; border-radius: 9px;
+    display: grid; place-items: center; font-size: 15px;
+    background: rgba(255, 255, 255, 0.055); border: 1px solid rgba(255, 255, 255, 0.09);
+    color: var(--brand);
+}
+
+.net { margin-top: 34px; width: 100%; max-width: 420px; height: auto; }
+.net .link { stroke: rgba(255, 255, 255, 0.30); stroke-width: 1; fill: none; stroke-dasharray: 4 5; animation: dash 3s linear infinite; }
+.net .node { fill: #0d1520; stroke: var(--brand); stroke-width: 1.6; }
+.net .core { fill: url(#coreGrad); stroke: none; }
+.net .pulse { fill: var(--brand); opacity: 0.55; }
+@keyframes dash { to { stroke-dashoffset: -36; } }
+
+.showcase-foot { font-size: 11.5px; color: #5f6b7d; display: flex; align-items: center; gap: 8px; }
+[data-theme="dark"] .showcase { border-right: 1px solid rgba(255, 255, 255, 0.07); }
+.showcase-foot .dot-live {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--brand);
+    box-shadow: 0 0 0 3px rgba(46, 211, 164, 0.16);
+}
+
+/* ---------- 右侧表单区 ---------- */
+.pane {
+    position: relative; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 40px 24px;
+}
+.pane::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(46% 34% at 72% -6%, var(--brand-soft), transparent 70%);
+}
+.pane > * { position: relative; z-index: 1; }
+.pane-top { position: absolute; top: 20px; right: 22px; display: flex; gap: 8px; z-index: 2; }
+.icon-btn {
+    width: 36px; height: 36px; display: grid; place-items: center;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--surface);
+    color: var(--text-2); font-size: 17px; cursor: pointer;
+    transition: transform 0.16s ease, color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.icon-btn:hover { color: var(--text); border-color: var(--line-2); transform: translateY(-1px); box-shadow: var(--sh-1); }
+
+.auth-card { width: 100%; max-width: 372px; }
+.card-head { margin-bottom: 26px; }
+.card-logo {
+    width: 46px; height: 46px; border-radius: 14px; display: none;
+    place-items: center; color: #fff; font-size: 23px; margin-bottom: 18px;
+    background: linear-gradient(140deg, var(--brand), var(--accent));
+    box-shadow: 0 12px 28px -12px var(--brand-glow);
+}
+.card-head h2 { font-size: 23px; font-weight: 700; letter-spacing: -0.03em; }
+.card-head p { font-size: 13px; color: var(--text-3); margin-top: 6px; }
+
+.error-msg {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 13px; margin-bottom: 18px; border-radius: 10px;
+    background: var(--danger-bg); border: 1px solid var(--danger-line);
+    color: var(--danger-text); font-size: 12.5px; font-weight: 500;
+    animation: shake 0.42s ease-in-out;
+}
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-5px); }
+    40%, 80% { transform: translateX(5px); }
+}
+
+.field { margin-bottom: 14px; }
+.field > label { display: block; font-size: 12px; font-weight: 550; color: var(--text-2); margin-bottom: 7px; }
+.input-box { position: relative; }
+.input-box > i {
+    position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+    font-size: 16px; color: var(--text-3); pointer-events: none; transition: color 0.16s ease;
+}
+input {
+    width: 100%; height: 44px; padding: 0 14px 0 40px;
+    border: 1px solid var(--line); border-radius: 11px;
+    background: var(--surface-2); color: var(--text); font-size: 14px;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+    outline: none;
+}
+input::placeholder { color: var(--text-3); }
+input:hover { border-color: var(--line-2); }
+input:focus { border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--brand-soft); }
+.input-box:focus-within > i { color: var(--brand); }
+
+.submit-btn {
+    width: 100%; height: 46px; margin-top: 8px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    border: none; border-radius: 11px; cursor: pointer;
+    background: var(--brand); color: #fff; font-size: 14px; font-weight: 600;
+    box-shadow: 0 2px 4px rgba(12, 19, 34, 0.14);
+    transition: background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+.submit-btn i { font-size: 16px; }
+.submit-btn:hover { background: var(--brand-2); transform: translateY(-1px); box-shadow: 0 10px 24px -12px var(--brand-glow); }
+.submit-btn:active { transform: none; }
+
+.divider {
+    display: flex; align-items: center; gap: 12px;
+    margin: 20px 0; color: var(--text-3); font-size: 11.5px;
+}
+.divider::before, .divider::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+}
+
+.github-btn {
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--line); box-shadow: var(--sh-1);
+}
+.github-btn:hover { background: var(--surface-2); border-color: var(--line-2); box-shadow: var(--sh-1); }
+
+.pane-foot { margin-top: 28px; font-size: 11.5px; color: var(--text-3); text-align: center; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 900px) {
+    .auth { grid-template-columns: 1fr; }
+    .showcase { display: none; }
+    .pane { padding: 72px 22px 40px; justify-content: flex-start; min-height: 100vh; }
+    .card-logo { display: grid; }
+    .pane-top { top: 16px; right: 16px; }
+    .auth-card { max-width: 400px; margin: 0 auto; }
+    .card-head h2 { font-size: 21px; }
+}
+@media (max-width: 420px) {
+    input { height: 46px; font-size: 16px; }
+    .submit-btn { height: 48px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
+}
+</style>
+</head>
+<body>
+
+<div class="auth">
+
+    <aside class="showcase">
+        <div class="brand-row">
+            <div class="brand-mark"><i class="ri-rocket-2-fill"></i></div>
+            <div>
+                <div class="brand-name">GoRelay Pro</div>
+                <div class="brand-tag">DISTRIBUTED RELAY CONSOLE</div>
+            </div>
+        </div>
+
+        <div class="showcase-body">
+            <h1>让内网服务<br>像公网一样<em>可达</em></h1>
+            <p>基于 Master–Agent 架构的分布式内网穿透控制台。单文件二进制部署，全自动 TLS 证书，毫秒级流量可视化。</p>
+
+            <ul class="feat">
+                <li><i class="ri-shield-check-line"></i> Let's Encrypt 证书自动签发与续期</li>
+                <li><i class="ri-route-line"></i> TCP / UDP 双栈转发与四种负载均衡</li>
+                <li><i class="ri-line-chart-line"></i> 实时速率监控、限额熔断与阶梯告警</li>
+            </ul>
+
+            <svg class="net" viewBox="0 0 420 160" fill="none" aria-hidden="true">
+                <defs>
+                    <linearGradient id="coreGrad" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stop-color="#2ed3a4"/>
+                        <stop offset="100%" stop-color="#37c8e8"/>
+                    </linearGradient>
+                </defs>
+                <path class="link" d="M60 40 L210 80"/>
+                <path class="link" d="M60 120 L210 80"/>
+                <path class="link" d="M360 32 L210 80"/>
+                <path class="link" d="M360 128 L210 80"/>
+                <path class="link" d="M60 40 L360 32"/>
+                <circle class="node" cx="60" cy="40" r="10"/>
+                <circle class="node" cx="60" cy="120" r="10"/>
+                <circle class="node" cx="360" cy="32" r="10"/>
+                <circle class="node" cx="360" cy="128" r="10"/>
+                <circle class="core" cx="210" cy="80" r="22"/>
+                <circle class="pulse" cx="210" cy="80" r="34" opacity="0.12"/>
+                <circle cx="210" cy="80" r="6" fill="#ffffff" opacity="0.92"/>
+            </svg>
+        </div>
+
+        <div class="showcase-foot"><span class="dot-live"></span> 中继服务运行中 · 全链路加密</div>
+    </aside>
+
+    <main class="pane">
+        <div class="pane-top">
+            <button class="icon-btn" onclick="toggleTheme()" title="切换明暗主题"><i class="ri-moon-line" id="theme-icon"></i></button>
+        </div>
+
+        <form class="auth-card" method="POST">
+            <div class="card-head">
+                <div class="card-logo"><i class="ri-rocket-2-fill"></i></div>
+                <h2>登录控制台</h2>
+                <p>使用管理员账户继续</p>
+            </div>
+
+            {{if .Error}}
+            <div class="error-msg"><i class="ri-error-warning-fill"></i> {{.Error}}</div>
+            {{end}}
+
+            <div class="field">
+                <label>管理员账号</label>
+                <div class="input-box">
+                    <i class="ri-user-3-line"></i>
+                    <input name="username" placeholder="请输入账号" autocomplete="username" required>
+                </div>
+            </div>
+
+            <div class="field">
+                <label>登录密码</label>
+                <div class="input-box">
+                    <i class="ri-lock-2-line"></i>
+                    <input type="password" name="password" placeholder="请输入密码" autocomplete="current-password" required>
+                </div>
+            </div>
+
+            {{if .TwoFA}}
+            <div class="field">
+                <label>动态验证码</label>
+                <div class="input-box">
+                    <i class="ri-shield-keyhole-line"></i>
+                    <input name="code" placeholder="6 位验证码" pattern="[0-9]{6}" maxlength="6" inputmode="numeric" autocomplete="one-time-code" style="letter-spacing:5px;font-family:var(--font-mono);font-weight:600">
+                </div>
+            </div>
+            {{end}}
+
+            <button class="submit-btn" type="submit"><i class="ri-login-box-line"></i> 登录</button>
+
+            {{if .GithubEnabled}}
+            <div class="divider">或</div>
+            <a href="/oauth/github/login" class="submit-btn github-btn">
+                <i class="ri-github-fill"></i> 使用 GitHub 登录
+            </a>
+            {{end}}
+
+            <div class="pane-foot">GoRelay Pro · 安全内网穿透中继系统</div>
+        </form>
+    </main>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var t = document.documentElement.getAttribute('data-theme');
+        var el = document.getElementById('theme-icon');
+        if (el) el.className = t === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    });
+    function toggleTheme() {
+        var html = document.documentElement;
+        var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        html.setAttribute('data-theme', next);
+        try { localStorage.setItem('theme', next); } catch (e) { }
+        var el = document.getElementById('theme-icon');
+        if (el) el.className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    }
+</script>
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js'); }); }</script>
+</body>
+</html>

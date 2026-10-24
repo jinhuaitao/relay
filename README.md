@@ -119,6 +119,26 @@
 | **Master** | 中转机 | 拥有公网 IP 的服务器，用于部署控制面板 |
 | **Agent** | 节点机 | 用于实际转发流量的服务器（一台或多台） |
 
+### 📁 项目结构
+
+```
+relay/
+├── main.go              # 入口（仅调用 app.Main）
+├── Dockerfile           # 多阶段构建
+├── relay.sh             # 一键安装脚本
+├── docs/STRUCTURE.md    # 详细结构说明
+└── internal/app/        # 全部实现（package app）
+    ├── core_*.go        # 常量/类型/全局状态/DB/配置/工具
+    ├── master_core.go   # 主控：监听、Agent 长连接、统计、WS 广播
+    ├── node_*.go        # 节点：Agent 连接、TCP/UDP 转发内核
+    ├── ops_*.go         # 运维：服务安装、自更新、流量定时任务
+    ├── tg_*.go          # Telegram：API、交互 Bot、云备份
+    ├── web_*.go         # Web：认证、页面、规则/设置接口、PWA
+    └── web/             # go:embed 前端资源（HTML/JSON/JS）
+```
+
+> 详细分层、调用链路与校验记录见 [docs/STRUCTURE.md](docs/STRUCTURE.md)
+
 ---
 
 ## 📚 快速开始
@@ -148,7 +168,7 @@ git clone https://github.com/jinhuaitao/relay.git
 cd relay
 
 # 2. 编译为 Linux 64位可执行文件
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay .
 
 # 3. 赋予执行权限
 chmod +x relay

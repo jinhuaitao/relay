@@ -13,21 +13,21 @@ WORKDIR /src
 # 安装必要的构建依赖 
 RUN apk add --no-cache git
 
+# 复制依赖清单（利用 Docker 层缓存，源码变更时无需重新下载依赖）
+COPY go.mod go.sum ./
+
 # 设置 GOPROXY 代理
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制源代码
-COPY main.go main.go
+# 预下载 Go Module 依赖
+RUN go mod download
 
-# 初始化 Go Module 并下载依赖
-RUN go mod init gorelay && \
-    go get modernc.org/sqlite@v1.33.1 && \
-    go get golang.org/x/crypto/acme/autocert@v0.55.0 && \
-    go get golang.org/x/time/rate@v0.15.0 && \
-    go mod tidy
+# 复制源码：根目录入口 + internal 实现包（含 go:embed 的前端资源）
+COPY main.go ./
+COPY internal ./internal
 
 # 编译二进制文件 (使用宿主机的全速编译器，输出 TARGETARCH 指定的格式)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -o app main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -ldflags="-s -w" -o app .
 
 # ============================
 # 第二阶段：运行 (Runner)
