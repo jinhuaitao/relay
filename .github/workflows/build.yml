@@ -5,11 +5,7 @@ on:
     branches:
       - main
     paths:
-      - '**.go' # 任一 Go 源码文件被修改即自动触发编译
-      - 'internal/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Dockerfile'
+      - 'internal/app/core_consts.go'
   workflow_dispatch: # 允许手动触发
 
 permissions:
