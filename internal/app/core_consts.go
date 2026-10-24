@@ -1,8 +1,3 @@
-// consts.go — 全局常量与共享内存池
-//
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
-
 package app
 
 import (
@@ -11,7 +6,7 @@ import (
 )
 
 const (
-	AppVersion      = "v3.3.6"
+	AppVersion      = "v3.3.7"
 	DBFile          = "data.db"
 	WebPort         = ":8888"
 	DownloadURL     = "https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
