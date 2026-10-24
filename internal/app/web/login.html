@@ -257,8 +257,12 @@ button, input { font: inherit; color: inherit; }
 .net .link { stroke: rgba(255, 255, 255, 0.30); stroke-width: 1; fill: none; stroke-dasharray: 4 5; animation: dash 3s linear infinite; }
 .net .node { fill: #0d1520; stroke: var(--brand); stroke-width: 1.6; }
 .net .core { fill: url(#coreGrad); stroke: none; }
-.net .pulse { fill: var(--brand); opacity: 0.55; }
+.net .pulse { fill: var(--brand); animation: netPulse 3.4s ease-in-out infinite; }
 @keyframes dash { to { stroke-dashoffset: -36; } }
+@keyframes netPulse {
+    0%, 100% { opacity: 0.10; }
+    50% { opacity: 0.45; }
+}
 
 .showcase-foot { font-size: 11.5px; color: #5f6b7d; display: flex; align-items: center; gap: 8px; }
 [data-theme="dark"] .showcase { border-right: 1px solid rgba(255, 255, 255, 0.07); }
@@ -329,6 +333,24 @@ input::placeholder { color: var(--text-3); }
 input:hover { border-color: var(--line-2); }
 input:focus { border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--brand-glow); }
 .input-box:focus-within > i { color: var(--brand); }
+
+/* 密码可见性切换按钮 */
+input[type="password"], input[type="text"] { padding-right: 44px; }
+.pw-toggle {
+    position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+    width: 32px; height: 32px; display: grid; place-items: center;
+    border: none; background: transparent; color: var(--text-3);
+    border-radius: 9px; cursor: pointer; font-size: 16px;
+    transition: color 0.16s ease, background 0.16s ease;
+}
+.pw-toggle:hover { color: var(--text); background: var(--surface-3); }
+
+/* 表单卡片入场动画 */
+@keyframes cardIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+}
+.auth-card { animation: cardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
 
 .submit-btn {
     width: 100%; height: 46px; margin-top: 8px;
@@ -459,6 +481,7 @@ input:focus { border-color: var(--brand); background: var(--surface); box-shadow
                 <div class="input-box">
                     <i class="ri-lock-2-line"></i>
                     <input type="password" name="password" placeholder="请输入密码" autocomplete="current-password" required>
+                    <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="显示密码"><i class="ri-eye-off-line"></i></button>
                 </div>
             </div>
 
@@ -491,6 +514,9 @@ input:focus { border-color: var(--brand); background: var(--surface); box-shadow
         var t = document.documentElement.getAttribute('data-theme');
         var el = document.getElementById('theme-icon');
         if (el) el.className = t === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+        /* 若已开启 2FA，自动聚焦验证码输入框 */
+        var code = document.querySelector('input[name="code"]');
+        if (code) setTimeout(function () { code.focus(); }, 160);
     });
     function toggleTheme() {
         var html = document.documentElement;
@@ -499,6 +525,14 @@ input:focus { border-color: var(--brand); background: var(--surface); box-shadow
         try { localStorage.setItem('theme', next); } catch (e) { }
         var el = document.getElementById('theme-icon');
         if (el) el.className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
+    }
+    function togglePw(btn) {
+        var input = btn.parentElement.querySelector('input');
+        if (!input) return;
+        var show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        btn.innerHTML = show ? '<i class="ri-eye-line"></i>' : '<i class="ri-eye-off-line"></i>';
+        btn.setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
     }
 </script>
 <script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js'); }); }</script>
