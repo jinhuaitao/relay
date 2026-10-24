@@ -257,12 +257,8 @@ button, input { font: inherit; color: inherit; }
 .net .link { stroke: rgba(255, 255, 255, 0.30); stroke-width: 1; fill: none; stroke-dasharray: 4 5; animation: dash 3s linear infinite; }
 .net .node { fill: #0d1520; stroke: var(--brand); stroke-width: 1.6; }
 .net .core { fill: url(#coreGrad); stroke: none; }
-.net .pulse { fill: var(--brand); animation: netPulse 3.4s ease-in-out infinite; }
+.net .pulse { fill: var(--brand); opacity: 0.55; }
 @keyframes dash { to { stroke-dashoffset: -36; } }
-@keyframes netPulse {
-    0%, 100% { opacity: 0.10; }
-    50% { opacity: 0.45; }
-}
 
 .showcase-foot { font-size: 11.5px; color: #5f6b7d; display: flex; align-items: center; gap: 8px; }
 [data-theme="dark"] .showcase { border-right: 1px solid rgba(255, 255, 255, 0.07); }
@@ -334,24 +330,6 @@ input:hover { border-color: var(--line-2); }
 input:focus { border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--brand-glow); }
 .input-box:focus-within > i { color: var(--brand); }
 
-/* 密码可见性切换按钮 */
-input[type="password"], input[type="text"] { padding-right: 44px; }
-.pw-toggle {
-    position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
-    width: 32px; height: 32px; display: grid; place-items: center;
-    border: none; background: transparent; color: var(--text-3);
-    border-radius: 9px; cursor: pointer; font-size: 16px;
-    transition: color 0.16s ease, background 0.16s ease;
-}
-.pw-toggle:hover { color: var(--text); background: var(--surface-3); }
-
-/* 表单卡片入场动画 */
-@keyframes cardIn {
-    from { opacity: 0; transform: translateY(12px); }
-    to { opacity: 1; transform: none; }
-}
-.auth-card { animation: cardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
-
 .submit-btn {
     width: 100%; height: 46px; margin-top: 8px;
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -379,20 +357,51 @@ input[type="password"], input[type="text"] { padding-right: 44px; }
 }
 .github-btn:hover { background: var(--surface-2); border-color: var(--line-2); box-shadow: var(--sh-1); }
 
-.pane-foot { margin-top: 28px; font-size: 11.5px; color: var(--text-3); text-align: center; }
+.pane-foot { margin-top: 22px; font-size: 11.5px; color: var(--text-3); text-align: center; }
+
+/* ---------- 视觉精修 ---------- */
+.auth { grid-template-columns: minmax(460px, 1.08fr) minmax(420px, .92fr); }
+.showcase { padding: clamp(36px, 4.5vw, 64px); }
+.showcase-body { max-width: 500px; }
+.showcase-body h1 { font-size: clamp(34px, 3.2vw, 48px); line-height: 1.16; }
+.showcase-body > p { max-width: 430px; font-size: 14px; }
+.pane {
+    background-image:
+        linear-gradient(var(--grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 48px 48px;
+}
+.auth-card {
+    max-width: 424px; padding: 30px;
+    background: var(--surface-glass); border: 1px solid var(--line); border-radius: 18px;
+    box-shadow: var(--sh-3), inset 0 1px 0 var(--card-hi);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+}
+.card-head { margin-bottom: 24px; }
+.card-head h2 { font-size: 25px; }
+.field { margin-bottom: 16px; }
+input { height: 46px; background: var(--surface); }
+.submit-btn { height: 46px; }
+.security-note {
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    margin-top: 18px; color: var(--text-3); font-size: 11.5px;
+}
+.security-note i { color: var(--ok-text); font-size: 14px; }
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 900px) {
     .auth { grid-template-columns: 1fr; }
     .showcase { display: none; }
-    .pane { padding: 72px 22px 40px; justify-content: flex-start; min-height: 100vh; }
+    .pane { padding: 72px 18px 32px; justify-content: flex-start; min-height: 100vh; }
     .card-logo { display: grid; }
     .pane-top { top: 16px; right: 16px; }
-    .auth-card { max-width: 400px; margin: 0 auto; }
-    .card-head h2 { font-size: 21px; }
+    .auth-card { max-width: 424px; margin: 0 auto; padding: 28px; }
+    .card-head h2 { font-size: 23px; }
 }
 @media (max-width: 420px) {
-    input { height: 46px; font-size: 16px; }
+    .pane { padding: 68px 12px 24px; }
+    .auth-card { padding: 24px 20px; border-radius: 16px; }
+    input { height: 48px; font-size: 16px; }
     .submit-btn { height: 48px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -481,7 +490,6 @@ input[type="password"], input[type="text"] { padding-right: 44px; }
                 <div class="input-box">
                     <i class="ri-lock-2-line"></i>
                     <input type="password" name="password" placeholder="请输入密码" autocomplete="current-password" required>
-                    <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="显示密码"><i class="ri-eye-off-line"></i></button>
                 </div>
             </div>
 
@@ -504,6 +512,7 @@ input[type="password"], input[type="text"] { padding-right: 44px; }
             </a>
             {{end}}
 
+            <div class="security-note"><i class="ri-shield-check-line"></i> 登录受会话校验与防爆破机制保护</div>
             <div class="pane-foot">GoRelay Pro · 安全内网穿透中继系统</div>
         </form>
     </main>
@@ -514,9 +523,6 @@ input[type="password"], input[type="text"] { padding-right: 44px; }
         var t = document.documentElement.getAttribute('data-theme');
         var el = document.getElementById('theme-icon');
         if (el) el.className = t === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
-        /* 若已开启 2FA，自动聚焦验证码输入框 */
-        var code = document.querySelector('input[name="code"]');
-        if (code) setTimeout(function () { code.focus(); }, 160);
     });
     function toggleTheme() {
         var html = document.documentElement;
@@ -525,14 +531,6 @@ input[type="password"], input[type="text"] { padding-right: 44px; }
         try { localStorage.setItem('theme', next); } catch (e) { }
         var el = document.getElementById('theme-icon');
         if (el) el.className = next === 'dark' ? 'ri-moon-line' : 'ri-sun-line';
-    }
-    function togglePw(btn) {
-        var input = btn.parentElement.querySelector('input');
-        if (!input) return;
-        var show = input.type === 'password';
-        input.type = show ? 'text' : 'password';
-        btn.innerHTML = show ? '<i class="ri-eye-line"></i>' : '<i class="ri-eye-off-line"></i>';
-        btn.setAttribute('aria-label', show ? '隐藏密码' : '显示密码');
     }
 </script>
 <script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js'); }); }</script>
