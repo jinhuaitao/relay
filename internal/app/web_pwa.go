@@ -37,8 +37,9 @@ var iconMIME = map[string]string{
 
 func handleManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	// manifest 变更后需尽快生效，但不希望每次导航都重新拉取
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	// manifest 是「图标的入口」，缓存住会导致改版后仍指向旧图标；
+	// 体积仅 1KB，每次都回源校验代价可忽略
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write([]byte(manifestJSON))
 }
 
