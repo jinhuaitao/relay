@@ -157,7 +157,11 @@ func runMaster() {
 
 	http.HandleFunc("/manifest.json", handleManifest)
 	http.HandleFunc("/sw.js", handleServiceWorker)
-	http.HandleFunc("/icon.svg", handleIcon)
+	http.HandleFunc("/icons/", handleIcons)
+	http.HandleFunc("/icon.svg", handleIcon) // 旧入口，保留兼容
+	http.HandleFunc("/favicon.ico", handleFavicon)
+	http.HandleFunc("/apple-touch-icon.png", handleAppleTouchIcon)
+	http.HandleFunc("/apple-touch-icon-precomposed.png", handleAppleTouchIcon)
 
 	webHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

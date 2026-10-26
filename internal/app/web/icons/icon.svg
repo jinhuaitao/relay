@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="GoRelay Pro">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3A0"/>
+      <stop offset="0.52" stop-color="#0D9F76"/>
+      <stop offset="1" stop-color="#045E45"/>
+    </linearGradient>
+    <radialGradient id="h" cx="0.42" cy="0.34" r="0.72">
+      <stop offset="0" stop-color="#6FF7D2" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#6FF7D2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#g)"/>
+  <rect width="512" height="512" rx="115" fill="url(#h)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="42.0" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M111.6 165.9H364.1 M322.6 110.6L400.4 165.9L322.6 221.2"/>
+    <path d="M400.4 346.1H147.9 M189.4 290.8L111.6 346.1L189.4 401.4"/>
+  </g>
+</svg>

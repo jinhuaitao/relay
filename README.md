@@ -135,6 +135,7 @@ relay/
     ├── tg_*.go          # Telegram：API、交互 Bot、云备份
     ├── web_*.go         # Web：认证、页面、规则/设置接口、PWA
     └── web/             # go:embed 前端资源（HTML/JSON/JS）
+        └── icons/       # PWA / favicon 图标（PNG/SVG/ICO）
 ```
 
 > 详细分层、调用链路与校验记录见 [docs/STRUCTURE.md](docs/STRUCTURE.md)

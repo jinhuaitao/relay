@@ -134,6 +134,7 @@ relay/
     ├── tg_*.go          # Telegram: API, interactive bot, cloud backup
     ├── web_*.go         # Web: auth, pages, rule/settings APIs, PWA
     └── web/             # go:embed frontend assets (HTML/JSON/JS)
+        └── icons/       # PWA / favicon icons (PNG/SVG/ICO)
 ```
 
 > See [docs/STRUCTURE.md](docs/STRUCTURE.md) for layers, call flows and verification records.

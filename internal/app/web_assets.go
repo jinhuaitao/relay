@@ -5,7 +5,7 @@
 
 package app
 
-import _ "embed"
+import "embed"
 
 //go:embed web/setup.html
 var setupHtml string
@@ -21,3 +21,9 @@ var manifestJSON string
 
 //go:embed web/sw.js
 var serviceWorkerJS string
+
+// 图标资源整目录内嵌（PNG / ICO / SVG），由 web_pwa.go 统一对外提供。
+// 新增图标时直接放进 web/icons/ 即可，重新编译后生效。
+//
+//go:embed web/icons
+var iconsFS embed.FS
