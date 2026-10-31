@@ -310,7 +310,7 @@ tail -n 50 /var/log/relay.log
 ## 🖥️ 界面预览
 
 <a href="https://gorelay.888021.xyz">
-  <img width="900" alt="GoRelay Pro 在线展示页" src="./docs/showcase.png">
+  <img width="880" alt="GoRelay Pro 在线展示页 · 滚动演示" src="./docs/preview.gif">
 </a>
 
 > 👉 点击图片或访问 **[gorelay.888021.xyz](https://gorelay.888021.xyz)**，查看完整在线展示页：架构拓扑、转发链路、源码地图与部署指南。

@@ -309,7 +309,7 @@ Please keep the `data.db` database file and node credentials generated in the ba
 ## 🖥️ Interface Preview
 
 <a href="https://gorelay.888021.xyz">
-  <img width="900" alt="GoRelay Pro live showcase" src="./docs/showcase.png">
+  <img width="880" alt="GoRelay Pro live showcase · scroll demo" src="./docs/preview.gif">
 </a>
 
 > 👉 Click the image or visit **[gorelay.888021.xyz](https://gorelay.888021.xyz)** for the full showcase — architecture, data flow, source map and deployment guide.
