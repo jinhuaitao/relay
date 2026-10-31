@@ -309,7 +309,11 @@ tail -n 50 /var/log/relay.log
 
 ## 🖥️ 界面预览
 
-<img width="800" height="592" alt="mmexport1778420608453" src="https://github.com/user-attachments/assets/d09da35a-dfb0-491b-8f93-7174dac3b916" />
+<a href="https://gorelay.888021.xyz">
+  <img width="900" alt="GoRelay Pro 在线展示页" src="./docs/showcase.png">
+</a>
+
+> 👉 点击图片或访问 **[gorelay.888021.xyz](https://gorelay.888021.xyz)**，查看完整在线展示页：架构拓扑、转发链路、源码地图与部署指南。
 
 
 ---
