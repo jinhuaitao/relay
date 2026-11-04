@@ -58,13 +58,18 @@ func runAgent(name, masterAddr, token string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+		// 与主控侧对称：开启 keepalive，主控失联时内核能主动探测到
+		enableKeepAlive(conn)
 
 		// 串行化对主控连接的写操作，避免 ticker 与主循环并发写导致数据交错
 		var masterMu sync.Mutex
 		writeMsg := func(m Message) {
 			masterMu.Lock()
 			defer masterMu.Unlock()
-			json.NewEncoder(conn).Encode(m)
+			// 主控侧网络黑洞时写操作会永久阻塞并卡住心跳协程，
+			// 加超时让 Encode 尽快失败，由 decode 分支触发重连
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = json.NewEncoder(conn).Encode(m)
 		}
 
 		// --- 新增：开启临时测试端口，供主控测试入站连通性 ---

@@ -7,9 +7,11 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -80,9 +82,75 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// snapshotDB 生成一份内容一致、可直接打开的数据库快照。
+//
+// 数据库跑在 WAL 模式下，最近的提交可能还停留在 data.db-wal 里，
+// 直接 ServeFile 主文件会导出一份"少数据"甚至"撕裂页"的备份——恢复时轻则丢配置、
+// 重则打不开。这里优先用 SQLite 的 VACUUM INTO 做一致性快照（内部开启读事务并压实文件），
+// 失败时退回"先 checkpoint 再整体拷贝"。
+func snapshotDB() (string, error) {
+	mu.Lock()
+	d := db
+	mu.Unlock()
+	if d == nil {
+		return "", fmt.Errorf("数据库尚未初始化")
+	}
+
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("gorelay_snapshot_%d.db", time.Now().UnixNano()))
+	_ = os.Remove(tmp)
+
+	if _, err := d.Exec("VACUUM INTO ?", tmp); err == nil {
+		if fi, serr := os.Stat(tmp); serr == nil && fi.Size() > 0 {
+			return tmp, nil
+		}
+		_ = os.Remove(tmp)
+	}
+
+	// 回退路径：先把 WAL 合并回主文件，再整体拷贝
+	_, _ = d.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	if err := copyFile(DBFile, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Disposition", "attachment; filename=data.db")
-	http.ServeFile(w, r, DBFile)
+	tmp, err := snapshotDB()
+	if err != nil {
+		addLog(r, "导出配置", "生成数据库快照失败: "+err.Error())
+		http.Error(w, "生成备份失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tmp)
+
+	name := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
+	w.Header().Set("Content-Disposition", "attachment; filename="+name)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, tmp)
+	addLog(r, "导出配置", "已导出数据库一致性快照")
 }
 
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {

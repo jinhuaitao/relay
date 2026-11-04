@@ -8,6 +8,7 @@ package app
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -119,9 +120,18 @@ func equalHost(a, b string) bool {
 	return strings.EqualFold(ha, hb)
 }
 
+// tokenMatches 常数时间比较初始化令牌，避免按字节比较带来的时序侧信道。
+func tokenMatches(got, want string) bool {
+	if want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 func handleSetup(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	alreadySetup := config.IsSetup
+	tk := setupToken
 	mu.Unlock()
 
 	if alreadySetup {
@@ -129,7 +139,19 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 本机访问免令牌（便于通过 SSH 隧道或控制台直接初始化）；
+	// 远程访问必须携带启动日志里打印的一次性令牌，否则任何人都能在
+	// 部署窗口期抢先注册管理员——而面板权限等同于全网节点的 root 执行权。
+	needToken := !isLoopbackRequest(r)
+
 	if r.Method == "POST" {
+		if needToken && !tokenMatches(r.FormValue("setup_token"), tk) {
+			addSystemLog(getClientIP(r), "初始化失败", "初始化令牌错误")
+			t, _ := template.New("s").Parse(setupHtml)
+			t.Execute(w, map[string]interface{}{"NeedToken": true, "Error": "初始化令牌不正确，请查看服务端启动日志"})
+			return
+		}
+
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
 		salt := generateSalt()
@@ -140,13 +162,14 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 			config.AgentTokens = make(map[string]string)
 		}
 		config.IsSetup = true
+		setupToken = "" // 初始化完成后令牌立即作废
 		saveConfigNoLock()
 		mu.Unlock()
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	t, _ := template.New("s").Parse(setupHtml)
-	t.Execute(w, nil)
+	t.Execute(w, map[string]interface{}{"NeedToken": needToken, "Error": ""})
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {

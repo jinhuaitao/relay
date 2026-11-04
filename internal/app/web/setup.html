@@ -457,6 +457,21 @@ input { height: 46px; background: var(--surface); }
                 <div class="hint">建议使用 12 位以上、包含大小写与符号的强密码</div>
             </div>
 
+            {{if .NeedToken}}
+            <div class="field">
+                <label>初始化令牌</label>
+                <div class="input-box">
+                    <i class="ri-key-2-line"></i>
+                    <input name="setup_token" placeholder="请输入服务端日志中的 16 位令牌" autocomplete="off" required>
+                </div>
+                <div class="hint">远程初始化必须提供令牌，防止公网扫描器抢先注册管理员</div>
+            </div>
+            {{end}}
+
+            {{if .Error}}
+            <div class="hint" style="color:#e5484d;font-weight:500">{{.Error}}</div>
+            {{end}}
+
             <button class="submit-btn" type="submit"><i class="ri-check-line"></i> 完成初始化</button>
 
             <div class="security-note"><i class="ri-shield-check-line"></i> 管理员凭据将加盐哈希后保存</div>

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -250,23 +251,125 @@ func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(tk))
 }
 
+// --- WebSocket 推送：每连接独立发送队列 ---
+//
+// 旧实现直接在全局 wsMu 锁内对所有客户端同步 WriteMessage。一旦某个客户端
+// 处于网络黑洞（笔记本合盖、切后台、拔网线），底层 TCP 发送窗口被填满，
+// WriteMessage 会无限期阻塞，进而把广播循环和 wsMu 一起挂住，
+// 表现为"所有面板同时停止刷新"且无法自愈。
+//
+// 现在改为：广播侧只做非阻塞入队，写操作交给每连接独立的 writePump，
+// 并配合写超时与 ping/pong 心跳回收死连接。
+const (
+	wsSendQueue  = 8                // 单连接最多积压的帧数
+	wsWriteWait  = 10 * time.Second // 单次写入超时
+	wsPongWait   = 90 * time.Second // 多久收不到 pong 判定连接已死
+	wsPingPeriod = 30 * time.Second // 心跳间隔
+	wsMaxPayload = 4096             // 面板不向服务端发消息，限制入站体积
+
+	// Agent 侧：认证帧必须在 15 秒内到达，之后每个心跳帧间隔不得超过 90 秒。
+	// Agent 每秒发一次 ping，90 秒的容忍度足以覆盖 GC 抖动与短暂丢包，
+	// 同时把"机器断电/NAT 表项过期"的发现时间从内核默认的十几分钟压到 1.5 分钟。
+	agentAuthTimeout = 15 * time.Second
+	agentReadTimeout = 90 * time.Second
+)
+
+type wsClient struct {
+	conn *websocket.Conn
+	send chan []byte
+	done chan struct{}
+	once sync.Once
+}
+
+// close 幂等地关闭 done 以通知 writePump 退出。
+// send 通道刻意不关闭——广播侧可能正持有引用，关闭会触发 panic。
+func (c *wsClient) close() {
+	c.once.Do(func() { close(c.done) })
+}
+
+// writePump 是单连接的唯一写入方，串行化写入并施加超时。
+func (c *wsClient) writePump() {
+	ticker := time.NewTicker(wsPingPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case msg := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				removeWSClient(c)
+				return
+			}
+		case <-ticker.C:
+			if err := c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				removeWSClient(c)
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// removeWSClient 从注册表摘除并关闭连接，可被多个协程并发调用。
+func removeWSClient(c *wsClient) {
+	wsMu.Lock()
+	_, exists := wsClients[c]
+	if exists {
+		delete(wsClients, c)
+	}
+	wsMu.Unlock()
+	if !exists {
+		return
+	}
+	c.close()
+	c.conn.Close()
+}
+
 func handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
+
+	c := &wsClient{
+		conn: conn,
+		send: make(chan []byte, wsSendQueue),
+		done: make(chan struct{}),
+	}
+
 	wsMu.Lock()
-	wsClients[conn] = true
+	wsClients[c] = true
 	wsMu.Unlock()
+
+	go c.writePump()
+
+	// 读循环只用于感知客户端断开。必须设读超时并要求客户端回 pong，
+	// 否则浏览器被系统挂起后 ReadMessage 会永远阻塞，连接变成僵尸。
+	conn.SetReadLimit(wsMaxPayload)
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
-			wsMu.Lock()
-			delete(wsClients, conn)
-			wsMu.Unlock()
-			conn.Close()
 			break
 		}
 	}
+	removeWSClient(c)
+}
+
+// broadcastToClients 把一帧已序列化的数据分发给所有面板连接。
+// 入队是非阻塞的：队列满说明该客户端消费不过来，直接丢弃本帧。
+// 这里绝不能同步写网络——否则一个卡死的浏览器会冻结所有面板。
+func broadcastToClients(msg []byte) {
+	wsMu.Lock()
+	for c := range wsClients {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+	wsMu.Unlock()
 }
 
 func broadcastLoop() {
@@ -343,13 +446,7 @@ func broadcastLoop() {
 		lastTotalTx = currentTx
 		lastTotalRx = currentRx
 
-		wsMu.Lock()
-		if len(wsClients) == 0 {
-			wsMu.Unlock()
-			continue
-		}
-
-		// 1. 先构建好需要发送的消息对象 (这就是编译器之前找不到的 msg)
+		// 1. 先在锁外构建并序列化一次，所有客户端复用同一份字节
 		msg := WSMessage{
 			Type: "stats",
 			Data: WSDashboardData{
@@ -361,28 +458,25 @@ func broadcastLoop() {
 				Logs:         logData,
 			},
 		}
-
-		// 2. 在锁内，循环外部完成且仅完成一次 JSON 序列化
 		msgBytes, err := json.Marshal(msg)
 		if err != nil {
-			wsMu.Unlock()
 			continue
 		}
 
-		// 3. 遍历客户端发送原生 Byte 数据，极大节省 CPU 和内存分配
-		for client := range wsClients {
-			if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-				client.Close()
-				delete(wsClients, client)
-			}
-		}
-		wsMu.Unlock()
+		// 2. 非阻塞分发给所有客户端，单帧序列化结果复用
+		broadcastToClients(msgBytes)
 	}
 }
 
 func handleAgentConn(conn net.Conn) {
 	defer conn.Close()
+	// 开启 TCP keepalive：节点断电或链路黑洞时，内核能主动探测并关闭连接，
+	// 不必等到默认的十几分钟重传超时（TCPKeepAlive 常量此前定义了却从未使用）。
+	enableKeepAlive(conn)
+
 	dec := json.NewDecoder(conn)
+	// 认证帧限时：防止未认证的空连接长期占用 goroutine 与文件句柄
+	_ = conn.SetReadDeadline(time.Now().Add(agentAuthTimeout))
 	var msg Message
 	if err := dec.Decode(&msg); err != nil || msg.Type != "auth" {
 		return
@@ -487,6 +581,10 @@ func handleAgentConn(conn net.Conn) {
 	pushConfigToAll()
 
 	for {
+		// 每次读取前刷新超时：Agent 每秒发一次 ping，超过 agentReadTimeout
+		// 没收到任何帧即视为连接已死，走下面的下线流程（标记离线 + 告警），
+		// 避免节点实际已断流、面板却长期显示"在线"。
+		_ = conn.SetReadDeadline(time.Now().Add(agentReadTimeout))
 		var m Message
 		if dec.Decode(&m) != nil {
 			break

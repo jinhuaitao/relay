@@ -81,6 +81,15 @@ func loadConfig() {
 		lastTgBackupDate = ""
 	}
 
+	// 首次初始化令牌：仅在尚未完成 setup 时生成。
+	// 远程访问 /setup 必须携带它，避免部署窗口期被端口扫描器抢先设置管理员。
+	if !config.IsSetup && setupToken == "" {
+		setupToken = generateSalt()[:16]
+		log.Printf("🔐 初始化令牌: %s", setupToken)
+		log.Printf("   首次部署请用本机访问 http://127.0.0.1%s/setup 直接初始化；", WebPort)
+		log.Printf("   从远程访问 /setup 时必须填写上面这串令牌（重启会重新生成）")
+	}
+
 	rules = []LogicalRule{}
 	rRows, err := db.Query("SELECT id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100 FROM rules")
 	if err == nil {

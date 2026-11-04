@@ -9,6 +9,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -57,6 +58,44 @@ func getClientIP(r *http.Request) string {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return ip
+}
+
+// isLoopbackRequest 判断请求是否来自本机（127.0.0.0/8 或 ::1）。
+// 注意：这里必须只看 TCP 层的 RemoteAddr，不能信任 X-Forwarded-For /
+// CF-Connecting-IP —— 那些头可被伪造，用它做"本机"判定等于没有校验。
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// enableKeepAlive 在底层 TCP 连接上开启 keepalive 探测。
+// 没有它，节点断电或链路黑洞时内核要等默认的十几分钟重传超时才会报错，
+// 期间面板会一直把死节点显示为"在线"。
+func enableKeepAlive(c net.Conn) {
+	if c == nil {
+		return
+	}
+	var tcp *net.TCPConn
+	switch v := c.(type) {
+	case *net.TCPConn:
+		tcp = v
+	case *tls.Conn:
+		if tc, ok := v.NetConn().(*net.TCPConn); ok {
+			tcp = tc
+		}
+	}
+	if tcp == nil {
+		return
+	}
+	_ = tcp.SetKeepAlive(true)
+	_ = tcp.SetKeepAlivePeriod(TCPKeepAlive)
 }
 
 // categorizeLog 根据操作类型关键字自动推断日志分类，向后兼容无显式分类的调用

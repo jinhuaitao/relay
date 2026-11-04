@@ -34,7 +34,7 @@ var (
 	blockUntil    = sync.Map{}
 
 	wsUpgrader = websocket.Upgrader{}
-	wsClients  = make(map[*websocket.Conn]bool)
+	wsClients  = make(map[*wsClient]bool)
 	wsMu       sync.Mutex
 
 	isMasterTLS bool = false
@@ -50,4 +50,8 @@ var (
 
 	// TG 周备份的幂等键（持久化于 settings 表，键名 last_backup_date）
 	lastTgBackupDate string
+
+	// setupToken 是首次初始化的一次性令牌：仅在 IsSetup 为 false 时生成并打印到日志。
+	// 远程访问 /setup 必须携带该令牌，防止公网端口扫描器在部署窗口期抢先注册管理员。
+	setupToken string
 )
