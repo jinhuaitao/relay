@@ -19,9 +19,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="msapplication-TileColor" content="#0d9f76">
 <meta name="msapplication-TileImage" content="/icons/icon-192.png?v=2">
-<!-- 前端依赖全部本地内嵌，运行时不请求任何外部 CDN；字体自动回退系统字体栈 -->
-<link href="/vendor/remixicon.css" rel="stylesheet">
-<script src="/vendor/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
     (function () {
         try {
@@ -1642,7 +1644,7 @@ tbody tr { transition: background .16s ease; }
                                     </div>
                                     <div class="field">
                                         <label>Client Secret</label>
-                                        <input type="password" name="github_client_secret" value="" autocomplete="new-password" placeholder="已保存，留空保持不变；输入 __CLEAR__ 可清除">
+                                        <input type="password" name="github_client_secret" value="{{.Config.GithubClientSecret}}" placeholder="输入 Secret">
                                     </div>
                                     <div class="field span-2">
                                         <label>允许登录的 GitHub 用户名</label>
@@ -1684,7 +1686,7 @@ tbody tr { transition: background .16s ease; }
                                 <div class="form-grid">
                                     <div class="field">
                                         <label>Bot Token</label>
-                                        <input type="password" name="tg_bot_token" value="" autocomplete="new-password" placeholder="已保存，留空保持不变；输入 __CLEAR__ 可清除">
+                                        <input name="tg_bot_token" value="{{.Config.TgBotToken}}" placeholder="123456:ABC-DEF…">
                                     </div>
                                     <div class="field">
                                         <label>Chat ID</label>
@@ -1698,7 +1700,7 @@ tbody tr { transition: background .16s ease; }
                                             </select>
                                             <i class="ri-arrow-down-s-line"></i>
                                         </div>
-                                        <div class="hint">到达该日 0 点将自动清零全部流量统计，并同时激活 80% / 95% / 100% 阶梯预警。每周一 02:00 后自动执行脱敏加密备份。</div>
+                                        <div class="hint">到达该日 0 点将自动清零全部流量统计，并同时激活 80% / 95% / 100% 阶梯预警。系统每周一凌晨自动备份数据库到 TG。</div>
                                     </div>
                                 </div>
                                 <script>
@@ -1735,36 +1737,14 @@ tbody tr { transition: background .16s ease; }
                                     </div>
                                     <div class="field">
                                         <label>Access Key ID</label>
-                                        <input type="password" name="r2_access_key" value="" autocomplete="new-password" placeholder="已保存，留空保持不变">
+                                        <input name="r2_access_key" value="{{.Config.R2AccessKey}}">
                                     </div>
                                     <div class="field span-2">
                                         <label>Secret Access Key</label>
-                                        <input type="password" name="r2_secret_key" value="" autocomplete="new-password" placeholder="已保存，留空保持不变；输入 __CLEAR__ 可清除">
+                                        <input type="password" name="r2_secret_key" value="{{.Config.R2SecretKey}}">
                                     </div>
                                 </div>
                                 <div class="hint" style="margin-top:10px">不需要此功能请全部留空。</div>
-                            </div>
-
-                            <div class="setting-block">
-                                <div class="sb-head">
-                                    <i class="ri-lock-2-line"></i>
-                                    <div>
-                                        <h4>备份加密与可信代理</h4>
-                                        <p>云备份强制加密；仅在可信代理之后才解析客户端 IP 头</p>
-                                    </div>
-                                </div>
-                                <div class="form-grid">
-                                    <div class="field span-2">
-                                        <label>云备份口令</label>
-                                        <input type="password" name="backup_passphrase" value="" autocomplete="new-password" placeholder="设置后 TG / R2 备份将用该口令加密；留空保持不变">
-                                        <div class="hint">未设置口令时自动备份会被跳过，系统不会外发明文数据库。备份会先剥离全部凭据，再用 AES-256-GCM 加密。解密：<span class="mono">GORELAY_BACKUP_PASSPHRASE=口令 relay -decrypt-backup=备份.db.enc</span></div>
-                                    </div>
-                                    <div class="field span-2">
-                                        <label>可信代理 IP / CIDR</label>
-                                        <input name="trusted_proxies" value="{{.Config.TrustedProxies}}" placeholder="例如 127.0.0.1, 10.0.0.0/8（直连部署请留空）">
-                                        <div class="hint">仅当请求的 TCP 对端位于此白名单时，才读取 X-Forwarded-For / CF-Connecting-IP。留空可防止伪造 IP 绕过登录限速或污染日志。套 Cloudflare 时请填写其回源网段。</div>
-                                    </div>
-                                </div>
                             </div>
                         </div>
 
@@ -2373,11 +2353,11 @@ tbody tr { transition: background .16s ease; }
         var ip = el.dataset.ip || '';
         var agent = el.dataset.agent || '';
         if (showIp) {
-            el.innerHTML = '<i class="ri-server-line"></i><span>' + esc(agent) + '</span>';
+            el.innerHTML = '<i class="ri-server-line"></i><span>' + agent + '</span>';
             el.classList.remove('is-ip');
             el.dataset.showIp = 'false';
         } else {
-            el.innerHTML = '<i class="ri-links-line"></i><span>' + esc(ip) + '</span>';
+            el.innerHTML = '<i class="ri-links-line"></i><span>' + ip + '</span>';
             el.classList.add('is-ip');
             el.dataset.showIp = 'true';
             copyText(ip);
@@ -2588,7 +2568,7 @@ tbody tr { transition: background .16s ease; }
     }
 
     function updateAgent(name) {
-        showConfirm('更新节点', '确定要远程更新节点 <b>' + esc(name) + '</b> 吗？', 'warning', function () {
+        showConfirm('更新节点', '确定要远程更新节点 <b>' + name + '</b> 吗？', 'warning', function () {
             fetch('/update_agent?name=' + name, { method: 'POST' }).then(function (r) {
                 if (r.ok) showToast('更新指令已发送', 'success'); else showToast('发送失败', 'warn');
             });
@@ -2722,13 +2702,6 @@ tbody tr { transition: background .16s ease; }
             default: return '系统';
         }
     }
-    /* 所有进入 innerHTML 的动态内容必须先转义。
-       日志 IP、规则备注、节点名都可能来自外部输入，曾构成存储型 XSS 链路。 */
-    function esc(s) {
-        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-        });
-    }
     function filterLogs(cat) {
         window.logFilter = cat;
         document.querySelectorAll('.log-filter-btn').forEach(function (b) {
@@ -2745,11 +2718,11 @@ tbody tr { transition: background .16s ease; }
         logs.forEach(function (l) {
             var cat = l.category || 'system';
             if (filter !== 'all' && cat !== filter) return;
-            html += '<tr><td class="mono" style="color:var(--text-3);font-size:11.5px">' + esc(l.time) + '</td>' +
-                '<td class="mono" style="font-size:12px">' + esc(l.ip) + '</td>' +
-                '<td><span class="badge cat-' + esc(cat) + '">' + esc(logCategoryLabel(cat)) + '</span></td>' +
-                '<td><span class="badge neutral">' + esc(l.action) + '</span></td>' +
-                '<td style="color:var(--text-2)">' + esc(l.msg) + '</td></tr>';
+            html += '<tr><td class="mono" style="color:var(--text-3);font-size:11.5px">' + l.time + '</td>' +
+                '<td class="mono" style="font-size:12px">' + l.ip + '</td>' +
+                '<td><span class="badge cat-' + cat + '">' + logCategoryLabel(cat) + '</span></td>' +
+                '<td><span class="badge neutral">' + l.action + '</span></td>' +
+                '<td style="color:var(--text-2)">' + l.msg + '</td></tr>';
         });
         if (html === '') html = '<tr><td colspan="5" style="text-align:center;color:var(--text-3);padding:28px">该分类下暂无日志</td></tr>';
         tbody.innerHTML = html;
@@ -3091,15 +3064,14 @@ tbody tr { transition: background .16s ease; }
                                 row.id = 'rule-row-mon-' + r.id;
                                 row.className = 'rule-row';
                                 row.setAttribute('data-group', r.group || '');
-                                var rid = esc(r.id || '');
                                 row.innerHTML =
-                                    '<td><div class="rule-name">' + esc(r.name || '未命名') + '</div>' +
-                                    '<div class="rule-id">' + esc(String(r.id || '').substring(0, 8)) + '…</div></td>' +
-                                    '<td><div class="spark-cell"><div class="mini-chart-container"><canvas id="chart-tx-' + rid + '"></canvas></div>' +
-                                    '<span class="speed-text" style="color:var(--brand-strong)" id="text-tx-' + rid + '">0 B/s</span></div></td>' +
-                                    '<td><div class="spark-cell"><div class="mini-chart-container"><canvas id="chart-rx-' + rid + '"></canvas></div>' +
-                                    '<span class="speed-text" style="color:var(--accent-strong)" id="text-rx-' + rid + '">0 B/s</span></div></td>' +
-                                    '<td class="mono" style="font-weight:600" id="text-total-' + rid + '">' + formatBytes(r.total) + '</td>';
+                                    '<td><div class="rule-name">' + (r.name || '未命名') + '</div>' +
+                                    '<div class="rule-id">' + r.id.substring(0, 8) + '…</div></td>' +
+                                    '<td><div class="spark-cell"><div class="mini-chart-container"><canvas id="chart-tx-' + r.id + '"></canvas></div>' +
+                                    '<span class="speed-text" style="color:var(--brand-strong)" id="text-tx-' + r.id + '">0 B/s</span></div></td>' +
+                                    '<td><div class="spark-cell"><div class="mini-chart-container"><canvas id="chart-rx-' + r.id + '"></canvas></div>' +
+                                    '<span class="speed-text" style="color:var(--accent-strong)" id="text-rx-' + r.id + '">0 B/s</span></div></td>' +
+                                    '<td class="mono" style="font-weight:600" id="text-total-' + r.id + '">' + formatBytes(r.total) + '</td>';
                             } else {
                                 var tTx = document.getElementById('text-tx-' + r.id);
                                 if (tTx) tTx.innerText = formatSpeed(stx);
@@ -3154,7 +3126,7 @@ tbody tr { transition: background .16s ease; }
                         if (lat) {
                             if (r.status) {
                                 var latColor = r.latency > 150 ? 'var(--warn-text)' : 'var(--ok-text)';
-                                lat.innerHTML = '<i class="ri-pulse-line"></i> <span style="color:' + esc(latColor) + ';font-weight:600">' + esc(r.latency) + ' ms</span>';
+                                lat.innerHTML = '<i class="ri-pulse-line"></i> <span style="color:' + latColor + ';font-weight:600">' + r.latency + ' ms</span>';
                             } else {
                                 lat.innerHTML = '<i class="ri-alert-line"></i> <span style="color:var(--danger-text)">检测失败</span>';
                             }
@@ -3165,10 +3137,10 @@ tbody tr { transition: background .16s ease; }
                             var parent = dot.parentElement;
                             if (r.status) {
                                 parent.className = 'badge success';
-                                parent.innerHTML = '<span class="status-dot pulse" id="rule-status-dot-' + esc(r.id) + '"></span> 运行中';
+                                parent.innerHTML = '<span class="status-dot pulse" id="rule-status-dot-' + r.id + '"></span> 运行中';
                             } else {
                                 parent.className = 'badge danger';
-                                parent.innerHTML = '<span class="status-dot" id="rule-status-dot-' + esc(r.id) + '"></span> 异常';
+                                parent.innerHTML = '<span class="status-dot" id="rule-status-dot-' + r.id + '"></span> 异常';
                             }
                         }
 

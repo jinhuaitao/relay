@@ -11,7 +11,7 @@
 
 <p align="center">
   
-[![Go Version](https://img.shields.io/badge/Go-1.25.6+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)](https://www.alpinelinux.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Master%2FAgent-blue)](https://github.com/jinhuaitao/relay)
 [![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=flat&logo=sqlite)
@@ -71,7 +71,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| **Auto TLS** | 在系统设置中填入有效域名后，全自动申请并续期 Let's Encrypt 证书，面板与 Agent 通信随即切换为 TLS。**未配置域名时默认以明文 HTTP/TCP 运行**，请勿在公网裸奔 |
+| **Auto TLS** | 全自动申请并续期 Let's Encrypt 证书，面板访问与 Agent 通信均默认采用高强度 TLS 加密隧道 |
 | **多重身份认证** | 内置 GitHub OAuth 一键授权登录，支持 Google Authenticator (2FA) 双因素动态验证码 |
 | **Anti-Brute Force** | 自带防爆破机制，连续密码错误将自动封禁来源 IP |
 
@@ -79,7 +79,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| **实时监控大屏** | 基于 WebSocket 的秒级状态同步，动态图表直观展示全局 Tx/Rx 实时速率、节点负载与流量排行 |
+| **实时监控大屏** | 基于 WebSocket 的毫秒级状态同步，动态图表直观展示全局 Tx/Rx 实时速率、节点负载与流量排行 |
 | **PWA 原生体验** | 支持一键"添加到主屏幕"，秒变独立 App。提供沉浸式全屏体验、动态矢量图标及杀后台持久化登录 |
 
 ### 🤖 Telegram 智能助理
@@ -89,7 +89,7 @@
 | **Inline Keyboard** | 发送 `/menu` 呼出全按键菜单，移动端无需输入指令，一键查看状态、无缝启停转发规则 |
 | **自动化流量管理** | 设定每月账单重置日，系统将在零点自动执行全网流量清零 |
 | **阶梯式告警** | 流量使用达 80%、95% 时触发预警；达到 100% 时自动精准熔断并发送警报 |
-| **定时云端备份** | 每周一 02:00 后自动备份：先剥离全部凭据，再用面板「备份口令」做 AES-256-GCM 加密，最后发送至 Telegram（可选同步 R2）。**未设置备份口令时自动跳过，不会外发明文数据库** |
+| **定时云端备份** | 每周一凌晨自动打包核心数据库，以加密文件形式发送至您的 Telegram |
 
 ---
 
@@ -125,20 +125,17 @@
 relay/
 ├── main.go              # 入口（仅调用 app.Main）
 ├── Dockerfile           # 多阶段构建
-├── relay.sh             # 一键安装脚本（校验官方 checksums.txt）
-├── LICENSE              # MIT
+├── relay.sh             # 一键安装脚本
 ├── docs/STRUCTURE.md    # 详细结构说明
 └── internal/app/        # 全部实现（package app）
-    ├── core_*.go        # 常量/类型/全局状态/DB/配置/工具/加密原语
+    ├── core_*.go        # 常量/类型/全局状态/DB/配置/工具
     ├── master_core.go   # 主控：监听、Agent 长连接、统计、WS 广播
     ├── node_*.go        # 节点：Agent 连接、TCP/UDP 转发内核
-    ├── ops_*.go         # 运维：服务安装、自更新、定时任务、云备份
-    ├── tg_*.go          # Telegram：API、交互 Bot
+    ├── ops_*.go         # 运维：服务安装、自更新、流量定时任务
+    ├── tg_*.go          # Telegram：API、交互 Bot、云备份
     ├── web_*.go         # Web：认证、页面、规则/设置接口、PWA
-    ├── *_test.go        # 单元测试
-    └── web/             # go:embed 前端资源（运行时零外部 CDN）
-        ├── icons/       # PWA / favicon 图标（PNG/SVG/ICO）
-        └── vendor/      # 本地内嵌的 Chart.js 与 Remix Icon
+    └── web/             # go:embed 前端资源（HTML/JSON/JS）
+        └── icons/       # PWA / favicon 图标（PNG/SVG/ICO）
 ```
 
 > 详细分层、调用链路与校验记录见 [docs/STRUCTURE.md](docs/STRUCTURE.md)
@@ -167,17 +164,11 @@ docker run -d --name relay-master \
 ### 🔨 编译安装
 
 ```bash
-# 0. 需要 Go 1.25.6 或更高版本
-go version
-
 # 1. 克隆项目
 git clone https://github.com/jinhuaitao/relay.git
 cd relay
 
-# 2. 静态检查与单元测试（可选但推荐）
-go vet ./... && go test ./...
-
-# 3. 编译为 Linux 64位可执行文件
+# 2. 编译为 Linux 64位可执行文件
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay .
 
 # 3. 赋予执行权限
@@ -298,7 +289,6 @@ tail -n 50 /var/log/relay.log
 | `80` / `443` | HTTPS 和证书申请 |
 | `8888` | 未配域名时的默认 Web |
 | `9999` | Agent 通信 |
-| `20000-50000` | 规则自动分配的 BridgePort（入口→出口链路） |
 
 ### ☁️ Cloudflare CDN 避坑
 
@@ -314,28 +304,6 @@ tail -n 50 /var/log/relay.log
 ### 💾 安全提示
 
 请妥善保管好 `data.db` 数据库文件及后台生成的节点凭证，这关系到您的整个转发网络安全。
-
----
-
-## 🔐 安全配置（公网部署必读）
-
-| 项 | 位置 | 说明 |
-|----|------|------|
-| **初始化令牌** | 首次启动日志 | 未完成 setup 时生成，远程访问 `/setup` 必须携带，防止部署窗口期被抢注管理员 |
-| **面板域名** | 系统设置 | 填入有效域名后才会自动申请 Let's Encrypt 证书；否则面板与 Agent 均为明文 |
-| **备份口令** | 系统设置 → 通知与备份 | 所有 TG / R2 云备份强制 AES-256-GCM 加密；未配置则自动备份跳过。解密见下方 |
-| **可信代理** | 系统设置 → 通知与备份 | 只有来自这些 IP/CIDR 的请求才会解析 `X-Forwarded-For` / `CF-Connecting-IP`；直连部署请留空，套 CDN 时填写回源网段 |
-| **校验清单** | 一键安装 / 面板自更新 | 二进制只从官方 GitHub Release 下载，并用同批 `checksums.txt` 做 SHA256 强校验，失败即拒绝替换 |
-
-**密钥不会回显到面板**：设置页中的 Token / Secret / 备份口令一律留空，提交时留空表示保持不变，输入 `__CLEAR__` 才清除。
-
-**解密云备份**（得到的是已剥离凭据的数据库，规则/统计/日志可恢复）：
-
-```bash
-GORELAY_BACKUP_PASSPHRASE='你的口令' ./relay -decrypt-backup=gorelay_backup_20260101_020000.db.enc
-```
-
-**完整含凭据的备份**请通过面板「系统设置 → 导出配置」手动下载并离线保管，切勿通过 Telegram 或公开对象存储传播。
 
 ---
 

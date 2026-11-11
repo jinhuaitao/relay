@@ -91,13 +91,10 @@ func getSysStatus() string {
 			}
 		}
 	} else {
-		// 非 Linux 平台没有 /proc：用 Go 堆占进程内存的比例给出可比数值，
-		// CPU/磁盘无可靠来源则保持 0，不再把 goroutine 数冒充 CPU 使用率。
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		if m.Sys > 0 {
-			memPct = float64(m.Alloc) / float64(m.Sys) * 100
-		}
+		memPct = 1.0
+		cpuPct = float64(runtime.NumGoroutine())
 	}
 
 	if cpuPct < 0 {

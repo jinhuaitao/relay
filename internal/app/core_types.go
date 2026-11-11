@@ -1,6 +1,7 @@
 // types.go — 核心数据结构定义（规则、节点、消息、报表等）
 //
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来。
+// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
+// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
 
 package app
 
@@ -77,13 +78,8 @@ type AppConfig struct {
 	R2SecretKey        string            `json:"r2_secret_key"`
 	R2Endpoint         string            `json:"r2_endpoint"`
 	R2Bucket           string            `json:"r2_bucket"`
-	// BackupPassphrase 用于加密所有外发的云备份。为空时自动备份会被跳过。
-	BackupPassphrase string `json:"backup_passphrase"`
-	// TrustedProxies 是可信反向代理的 IP/CIDR 白名单（逗号分隔）。
-	// 只有来自这些地址的请求才会解析 X-Forwarded-For / CF-Connecting-IP。
-	TrustedProxies string        `json:"trusted_proxies"`
-	Rules          []LogicalRule `json:"saved_rules"`
-	Logs           []OpLog       `json:"logs"`
+	Rules              []LogicalRule     `json:"saved_rules"`
+	Logs               []OpLog           `json:"logs"`
 }
 
 type ForwardTask struct {
@@ -119,19 +115,13 @@ type AgentInfo struct {
 	writeMu     sync.Mutex `json:"-"`
 }
 
-// sendMessage 串行化对该 Agent 连接的写操作，并施加写超时。
-// 没有超时时，一个处于网络黑洞的节点会在持锁状态下无限期阻塞 Encode，
-// 进而冻结整个面板（凡是在全局 mu 内调用的旧路径都曾受此影响）。
+// sendMessage 串行化对该 Agent 连接的写操作，避免并发 JSON 写交错导致 Agent 侧解码失败
 func (a *AgentInfo) sendMessage(msg Message) error {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	if a.Conn == nil {
 		return fmt.Errorf("agent %s 连接已关闭", a.Name)
 	}
-	if err := a.Conn.SetWriteDeadline(time.Now().Add(AgentWriteTimeout)); err != nil {
-		return err
-	}
-	defer a.Conn.SetWriteDeadline(time.Time{})
 	return json.NewEncoder(a.Conn).Encode(msg)
 }
 

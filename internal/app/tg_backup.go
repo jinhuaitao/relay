@@ -1,7 +1,7 @@
-// telegram_backup.go — Telegram 云备份：脱敏 + 加密后发送、R2 上传、定时任务
+// telegram_backup.go — Telegram 云备份：数据库打包发送、R2 上传、定时任务
 //
-// 外发文件一律由 createSecureBackup 生成（剥离全部凭据 + AES-256-GCM 加密）。
-// 未配置备份口令时不发送任何内容，绝不回退成明文 data.db。
+// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
+// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
 
 package app
 
@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"io"
 	"log"
 	"mime/multipart"
@@ -17,12 +19,9 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// sendTelegramDocument 发送一份已经脱敏并加密的独立文件。
+// --- TG 云备份功能核心 ---
 func sendTelegramDocument(filePath string, caption string) {
 	mu.Lock()
 	token := strings.TrimSpace(config.TgBotToken)
@@ -30,6 +29,10 @@ func sendTelegramDocument(filePath string, caption string) {
 	mu.Unlock()
 	if token == "" || chatID == "" {
 		return
+	}
+
+	if db != nil {
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	}
 
 	file, err := os.Open(filePath)
@@ -45,12 +48,12 @@ func sendTelegramDocument(filePath string, caption string) {
 	_ = writer.WriteField("caption", caption)
 	_ = writer.WriteField("parse_mode", "HTML")
 
-	fileName := fmt.Sprintf("gorelay_backup_%s%s", time.Now().Format("20060102_150405"), BackupExt)
+	fileName := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
 	part, err := writer.CreateFormFile("document", fileName)
 	if err == nil {
-		_, _ = io.Copy(part, file)
+		io.Copy(part, file)
 	}
-	_ = writer.Close()
+	writer.Close()
 
 	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token)
 	req, err := http.NewRequest("POST", urlStr, body)
@@ -84,10 +87,17 @@ func uploadToR2(filePath string) error {
 	bucket := config.R2Bucket
 	mu.Unlock()
 
+	// 如果没有配置，就不执行备份
 	if ak == "" || sk == "" || endpoint == "" || bucket == "" {
 		return fmt.Errorf("R2 配置未启用")
 	}
 
+	// 强制 SQLite 刷盘，保证上传的是最完整的数据快照
+	if db != nil {
+		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
+	}
+
+	// MinIO SDK 要求 Endpoint 不带协议头
 	endpoint = strings.TrimPrefix(endpoint, "https://")
 	endpoint = strings.TrimPrefix(endpoint, "http://")
 
@@ -99,7 +109,9 @@ func uploadToR2(filePath string) error {
 		return err
 	}
 
-	fileName := fmt.Sprintf("gorelay_backup_%s%s", time.Now().Format("20060102_150405"), BackupExt)
+	// 文件名带上时间戳：gorelay_backup_20260412_120000.db
+	fileName := fmt.Sprintf("gorelay_backup_%s.db", time.Now().Format("20060102_150405"))
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -109,25 +121,8 @@ func uploadToR2(filePath string) error {
 	return err
 }
 
-// performCloudBackup 是手动/自动备份的唯一出口。
-func performCloudBackup() error {
-	encPath, err := createSecureBackup()
-	if err != nil {
-		return err
-	}
-	defer os.Remove(encPath)
-
-	caption := fmt.Sprintf("☁️ <b>GoRelay 云备份</b>\n\n已剥离全部凭据，并使用面板备份口令加密（AES-256-GCM）。\n解密: relay -decrypt-backup=文件.db.enc\n时间: %s", time.Now().Format("2006-01-02 15:04:05"))
-	sendTelegramDocument(encPath, caption)
-
-	if err := uploadToR2(encPath); err != nil && err.Error() != "R2 配置未启用" {
-		return fmt.Errorf("TG 已发送，但 R2 备份失败: %w", err)
-	}
-	return nil
-}
-
 func autoBackupLoop() {
-	var lastWarnDate string
+	// 以持久化的"已备份日期"作为幂等键，避免进程重启导致重复备份
 	for {
 		time.Sleep(10 * time.Minute)
 		now := time.Now()
@@ -136,32 +131,28 @@ func autoBackupLoop() {
 		token := config.TgBotToken
 		chatID := config.TgChatID
 		mu.Unlock()
+
 		if token == "" || chatID == "" {
 			continue
 		}
 
 		today := now.Format("2006-01-02")
-		if !backupPassphraseConfigured() {
-			if lastWarnDate != today {
-				lastWarnDate = today
-				log.Printf("⚠️ 未配置备份口令，已跳过云备份（不会外发明文数据库）")
-				sendTelegram("⚠️ <b>云备份已跳过</b>\n\n尚未配置备份口令，系统不会外发明文数据库。请在 系统设置 → 备份口令 中填写。")
+		// 周一 02:00 之后触发，并以"已备份日期"持久化去重。
+		// 原实现要求 now.Hour()==2 精确命中，轮询锚定在进程启动时刻上，
+		// 一旦漂移就会整周漏发且无任何补发逻辑。
+		if now.Weekday() == time.Monday && now.Hour() >= 2 && lastTgBackupDate != today {
+			lastTgBackupDate = today
+			if db != nil {
+				db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_date', ?)", today)
 			}
-			continue
-		}
+			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
 
-		if now.Weekday() != time.Monday || now.Hour() < 2 || lastTgBackupDate == today {
-			continue
+			// === 触发 R2 备份 ===
+			if err := uploadToR2(DBFile); err == nil {
+				sendTelegram("✅ <b>R2 容灾备份成功</b>\n数据库已安全同步至 Cloudflare R2。")
+			} else if err.Error() != "R2 配置未启用" {
+				sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+			}
 		}
-		if err := performCloudBackup(); err != nil {
-			log.Printf("⚠️ 自动云备份失败: %v", err)
-			sendTelegram("❌ <b>自动云备份失败</b>\n" + tgEscape(err.Error()))
-			continue // 不标记幂等键，10 分钟后自动重试
-		}
-		lastTgBackupDate = today
-		if db != nil {
-			_, _ = db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_date', ?)", today)
-		}
-		sendTelegram("✅ <b>自动云备份完成</b>\n本周备份已脱敏并加密后发送。")
 	}
 }

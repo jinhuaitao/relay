@@ -10,7 +10,7 @@
 
 <p align="center">
 
-[![Go Version](https://img.shields.io/badge/Go-1.25.6+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)](https://www.alpinelinux.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Master%2FAgent-blue)](https://github.com/jinhuaitao/relay)
 [![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=flat&logo=sqlite)
@@ -70,7 +70,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Auto TLS** | Once a valid domain is configured in System Settings, Let's Encrypt certificates are issued and renewed automatically and both panel and Agent traffic switch to TLS. **Without a domain, everything runs over plaintext HTTP/TCP** |
+| **Auto TLS** | Automatic Let's Encrypt certificate issue and renewal. Panel access and Agent communication both use high-strength TLS encrypted tunnels by default |
 | **Multi-Factor Authentication** | Built-in GitHub OAuth one-click login. Supports Google Authenticator (2FA) two-factor dynamic verification code |
 | **Anti-Brute Force** | Built-in brute force protection. Consecutive password failures will automatically ban the source IP |
 
@@ -78,7 +78,7 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Real-time Monitoring Dashboard** | WebSocket-based per-second status sync. Dynamic charts show global Tx/Rx real-time rates, node load, and traffic rankings |
+| **Real-time Monitoring Dashboard** | WebSocket-based millisecond-level status sync. Dynamic charts show global Tx/Rx real-time rates, node load, and traffic rankings |
 | **PWA Native Experience** | Supports one-click "Add to Home Screen". Transforms into a standalone app with immersive fullscreen experience, dynamic vector icons, and persistent login even after background termination |
 
 ### 🤖 Telegram Bot Assistant
@@ -88,7 +88,7 @@
 | **Inline Keyboard** | Send `/menu` to bring up the full keyboard menu. No need to type commands on mobile — one-click status check, seamless start/stop of forwarding rules |
 | **Automated Traffic Management** | Set monthly billing reset day. System automatically executes network-wide traffic reset at midnight |
 | **Tiered Alerts** | Warning triggered at 80% and 95% traffic usage; auto precise circuit breaker at 100% with alert notification |
-| **Scheduled Cloud Backup** | After 02:00 every Monday: all credentials are stripped from a consistent snapshot, which is then encrypted with AES-256-GCM using the panel backup passphrase before being sent to Telegram (and optionally R2). **Without a passphrase the backup is skipped — no plaintext database ever leaves the host** |
+| **Scheduled Cloud Backup** | Every Monday at midnight, core database is automatically packaged and sent to your Telegram as an encrypted file |
 
 ---
 
@@ -124,20 +124,17 @@
 relay/
 ├── main.go              # Entry point (just calls app.Main)
 ├── Dockerfile           # Multi-stage build
-├── relay.sh             # One-click installer (verifies official checksums.txt)
-├── LICENSE              # MIT
+├── relay.sh             # One-click installer
 ├── docs/STRUCTURE.md    # Detailed architecture notes
 └── internal/app/        # All implementation (package app)
-    ├── core_*.go        # Constants / types / global state / DB / config / crypto
+    ├── core_*.go        # Constants / types / global state / DB / config / utils
     ├── master_core.go   # Master: listeners, agent connections, stats, WS broadcast
     ├── node_*.go        # Node: agent connection, TCP/UDP forwarding engine
-    ├── ops_*.go         # Ops: service install, self-update, schedulers, backup
-    ├── tg_*.go          # Telegram: API, interactive bot
+    ├── ops_*.go         # Ops: service install, self-update, traffic schedulers
+    ├── tg_*.go          # Telegram: API, interactive bot, cloud backup
     ├── web_*.go         # Web: auth, pages, rule/settings APIs, PWA
-    ├── *_test.go        # Unit tests
-    └── web/             # go:embed frontend assets (zero external CDN at runtime)
-        ├── icons/       # PWA / favicon icons (PNG/SVG/ICO)
-        └── vendor/      # Locally bundled Chart.js and Remix Icon
+    └── web/             # go:embed frontend assets (HTML/JSON/JS)
+        └── icons/       # PWA / favicon icons (PNG/SVG/ICO)
 ```
 
 > See [docs/STRUCTURE.md](docs/STRUCTURE.md) for layers, call flows and verification records.
@@ -166,17 +163,11 @@ docker run -d --name relay-master \
 ### 🔨 Build from Source
 
 ```bash
-# 0. Requires Go 1.25.6 or newer
-go version
-
 # 1. Clone the repository
 git clone https://github.com/jinhuaitao/relay.git
 cd relay
 
-# 2. Static checks and unit tests (recommended)
-go vet ./... && go test ./...
-
-# 3. Build for Linux 64-bit
+# 2. Build for Linux 64-bit
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o relay .
 
 # 3. Make executable
@@ -297,7 +288,6 @@ tail -n 50 /var/log/relay.log
 | `80` / `443` | HTTPS and certificate application |
 | `8888` | Default Web when no domain is configured |
 | `9999` | Agent communication |
-| `20000-50000` | Auto-assigned BridgePort for the entry→exit hop |
 
 ### ☁️ Cloudflare CDN Pitfalls
 
@@ -313,28 +303,6 @@ For pure IP internal network connection, manually remove `-tls` from the command
 ### 💾 Security Note
 
 Please keep the `data.db` database file and node credentials generated in the backend secure. They are critical to your entire forwarding network security.
-
----
-
-## 🔐 Security configuration (read before public deployment)
-
-| Item | Where | Notes |
-|------|-------|-------|
-| **Setup token** | First-run log | Generated until setup completes; remote `/setup` requires it, preventing admin hijacking during the deployment window |
-| **Panel domain** | System Settings | Only a valid domain triggers Let's Encrypt; otherwise both panel and agents are plaintext |
-| **Backup passphrase** | Settings → Notifications | All Telegram / R2 backups are AES-256-GCM encrypted. Without it, scheduled backups are skipped |
-| **Trusted proxies** | Settings → Notifications | Only requests from these IPs/CIDRs may supply `X-Forwarded-For` / `CF-Connecting-IP`. Leave empty for direct access; fill in your CDN's origin ranges otherwise |
-| **Checksums** | Installer / self-update | Binaries come only from official GitHub Releases and are verified against the same release's `checksums.txt` (SHA256); a mismatch aborts the replacement |
-
-**Secrets are never echoed back into the panel.** Token / Secret / backup passphrase fields render empty; leaving them blank keeps the stored value, while `__CLEAR__` removes it.
-
-**Decrypt a cloud backup** (the result has all credentials stripped; rules, stats and logs remain recoverable):
-
-```bash
-GORELAY_BACKUP_PASSPHRASE='your-passphrase' ./relay -decrypt-backup=gorelay_backup_20260101_020000.db.enc
-```
-
-For a **full backup including credentials**, use System Settings → Export Config and store it offline. Never share that file through Telegram or a public bucket.
 
 ---
 

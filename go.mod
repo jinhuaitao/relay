@@ -8,7 +8,7 @@ require (
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.48.0
-	golang.org/x/time v0.15.0
+    golang.org/x/time v0.15.0
 	modernc.org/sqlite v1.44.3
 )
 
