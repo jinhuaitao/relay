@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	AppVersion = "v3.4.3"
+	AppVersion = "v3.4.4"
 	DBFile     = "data.db"
 	WebPort    = ":8888"
 
