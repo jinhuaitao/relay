@@ -1,7 +1,7 @@
 // config.go — 配置持久化：加载/保存、日志清理、离线节点回收
 //
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
+// 保存路径现在会检查事务与每条语句的错误：旧实现把所有错误吞掉，
+// 一旦磁盘满或表结构异常，规则会静默丢失而面板毫无提示。
 
 package app
 
@@ -10,6 +10,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func loadConfig() {
@@ -20,7 +21,9 @@ func loadConfig() {
 		defer rows.Close()
 		for rows.Next() {
 			var k, v string
-			rows.Scan(&k, &v)
+			if err := rows.Scan(&k, &v); err != nil {
+				continue
+			}
 			switch k {
 			case "web_user":
 				config.WebUser = v
@@ -29,9 +32,9 @@ func loadConfig() {
 			case "agent_token":
 				config.AgentToken = v
 			case "agent_tokens":
-				json.Unmarshal([]byte(v), &config.AgentTokens)
+				_ = json.Unmarshal([]byte(v), &config.AgentTokens)
 			case "agent_add_times":
-				json.Unmarshal([]byte(v), &config.AgentAddTimes)
+				_ = json.Unmarshal([]byte(v), &config.AgentAddTimes)
 			case "agent_ports":
 				config.AgentPorts = v
 			case "master_domain":
@@ -67,6 +70,10 @@ func loadConfig() {
 				config.R2Endpoint = v
 			case "r2_bucket":
 				config.R2Bucket = v
+			case "backup_passphrase":
+				config.BackupPassphrase = v
+			case "trusted_proxies":
+				config.TrustedProxies = v
 			}
 		}
 	}
@@ -74,15 +81,13 @@ func loadConfig() {
 	if config.AgentTokens == nil {
 		config.AgentTokens = make(map[string]string)
 	}
+	setTrustedProxies(config.TrustedProxies)
 
-	// 恢复 TG 周备份幂等键，保证进程重启后不会在同一周重复备份
 	lastTgBackupDate = ""
 	if err := db.QueryRow("SELECT value FROM settings WHERE key = 'last_backup_date'").Scan(&lastTgBackupDate); err != nil {
 		lastTgBackupDate = ""
 	}
 
-	// 首次初始化令牌：仅在尚未完成 setup 时生成。
-	// 远程访问 /setup 必须携带它，避免部署窗口期被端口扫描器抢先设置管理员。
 	if !config.IsSetup && setupToken == "" {
 		setupToken = generateSalt()[:16]
 		log.Printf("🔐 初始化令牌: %s", setupToken)
@@ -97,7 +102,10 @@ func loadConfig() {
 		for rRows.Next() {
 			var r LogicalRule
 			var d, a80, a95, a100 int
-			rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx, &r.LBStrategy, &a80, &a95, &a100)
+			if err := rRows.Scan(&r.ID, &r.Group, &r.Note, &r.EntryAgent, &r.EntryPort, &r.ExitAgent, &r.TargetIP, &r.TargetPort, &r.Protocol, &r.BridgePort, &r.TrafficLimit, &d, &r.SpeedLimit, &r.TotalTx, &r.TotalRx, &r.LBStrategy, &a80, &a95, &a100); err != nil {
+				log.Printf("⚠️ 读取规则行失败，已跳过: %v", err)
+				continue
+			}
 			r.Disabled = (d == 1)
 			r.Alert80 = (a80 == 1)
 			r.Alert95 = (a95 == 1)
@@ -113,13 +121,37 @@ func saveConfig() {
 	saveConfigNoLock()
 }
 
+// saveConfigNoLock 必须在调用方持有 mu 时使用。
 func saveConfigNoLock() {
+	if db == nil {
+		log.Printf("⚠️ 保存配置失败：数据库未初始化")
+		return
+	}
 	conf := config
 	lRules := make([]LogicalRule, len(rules))
 	copy(lRules, rules)
 
-	tx, _ := db.Begin()
-	setS := func(k, v string) { _, _ = tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("⚠️ 保存配置失败（开启事务）: %v", err)
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var saveErr error
+	setS := func(k, v string) {
+		if saveErr != nil {
+			return
+		}
+		if _, e := tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v); e != nil {
+			saveErr = e
+		}
+	}
 	setS("web_user", conf.WebUser)
 	setS("web_pass", conf.WebPass)
 	setS("agent_token", conf.AgentToken)
@@ -148,9 +180,16 @@ func saveConfigNoLock() {
 	setS("r2_secret_key", conf.R2SecretKey)
 	setS("r2_endpoint", conf.R2Endpoint)
 	setS("r2_bucket", conf.R2Bucket)
+	setS("backup_passphrase", conf.BackupPassphrase)
+	setS("trusted_proxies", conf.TrustedProxies)
 
-	_, _ = tx.Exec("DELETE FROM rules")
+	if saveErr == nil {
+		_, saveErr = tx.Exec("DELETE FROM rules")
+	}
 	for _, r := range lRules {
+		if saveErr != nil {
+			break
+		}
 		d, a80, a95, a100 := 0, 0, 0, 0
 		if r.Disabled {
 			d = 1
@@ -164,11 +203,18 @@ func saveConfigNoLock() {
 		if r.Alert100 {
 			a100 = 1
 		}
-
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		_, saveErr = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy, a80, a95, a100)
 	}
-	_ = tx.Commit()
+	if saveErr != nil {
+		log.Printf("⚠️ 保存配置失败（写入）: %v", saveErr)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("⚠️ 保存配置失败（提交）: %v", err)
+		return
+	}
+	committed = true
 }
 
 func cleanOldLogs() {
@@ -181,8 +227,30 @@ func cleanOldLogs() {
 	}
 }
 
-// pruneOfflineAgents 清理离线且无规则引用的 Agent，避免 agents map 无界增长。
-// 仍被规则引用的离线 Agent 保留（用于面板展示"离线"状态）。
+// cleanExpiredSessions 回收过期会话与 OAuth state，避免内存无界增长。
+func cleanExpiredSessions() {
+	now := time.Now()
+	mu.Lock()
+	defer mu.Unlock()
+	for sid, exp := range sessions {
+		if now.After(exp) {
+			delete(sessions, sid)
+		}
+	}
+	for state, exp := range oauthStates {
+		if now.After(exp) {
+			delete(oauthStates, state)
+		}
+	}
+	loginAttempts.Range(func(k, _ interface{}) bool {
+		if t, ok := blockUntil.Load(k); ok && now.After(t.(time.Time)) {
+			blockUntil.Delete(k)
+			loginAttempts.Delete(k)
+		}
+		return true
+	})
+}
+
 func pruneOfflineAgents() {
 	mu.Lock()
 	defer mu.Unlock()

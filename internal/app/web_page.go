@@ -1,7 +1,7 @@
 // handlers_page.go — 控制面板首页渲染（注入规则、节点、日志、统计等页面数据）
 //
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
+// 注入模板前会剥离所有凭据字段：面板 DOM 里不再出现任何密钥明文，
+// 即使前端存在注入点也不会造成凭据泄露。
 
 package app
 
@@ -14,6 +14,24 @@ import (
 	"time"
 )
 
+// sanitizedConfigForView 返回只含非敏感展示字段的配置副本。
+func sanitizedConfigForView(in AppConfig) AppConfig {
+	out := in
+	out.WebPass = ""
+	out.AgentToken = ""
+	out.AgentTokens = nil
+	out.AgentAddTimes = nil
+	out.TwoFASecret = ""
+	out.TgBotToken = ""
+	out.GithubClientSecret = ""
+	out.R2AccessKey = ""
+	out.R2SecretKey = ""
+	out.BackupPassphrase = ""
+	out.Rules = nil
+	out.Logs = nil
+	return out
+}
+
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	al := make([]*AgentInfo, 0)
@@ -24,7 +42,7 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		t1 := config.AgentAddTimes[al[i].Name]
 		t2 := config.AgentAddTimes[al[j].Name]
 		if t1 == t2 {
-			return al[i].Name < al[j].Name // 时间相同的老节点按名称字母排序
+			return al[i].Name < al[j].Name
 		}
 		return t1 < t2
 	})
@@ -35,11 +53,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	displayRules := make([]LogicalRule, len(rules))
 	for i, r := range rules {
 		displayRules[i] = r
-		// 根据节点名称查找当前真实的入口 IP
 		if a, ok := agents[r.EntryAgent]; ok {
 			rip := a.RemoteIP
 			if strings.Contains(rip, ":") && !strings.Contains(rip, "[") {
-				rip = "[" + rip + "]" // 处理 IPv6
+				rip = "[" + rip + "]"
 			}
 			displayRules[i].EntryIP = rip
 		} else {
@@ -62,13 +79,13 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 			defer rows.Close()
 			for rows.Next() {
 				var l OpLog
-				rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
-				displayLogs = append(displayLogs, l)
+				if err := rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg); err == nil {
+					displayLogs = append(displayLogs, l)
+				}
 			}
 		}
 	}
 
-	// 提取近 30 天流量记录
 	var dailyStats []DailyStat
 	if db != nil {
 		dsRows, err := db.Query("SELECT date, tx, rx FROM daily_stats ORDER BY date DESC LIMIT 30")
@@ -76,23 +93,22 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 			defer dsRows.Close()
 			for dsRows.Next() {
 				var ds DailyStat
-				dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx)
-				dailyStats = append(dailyStats, ds)
+				if err := dsRows.Scan(&ds.Date, &ds.Tx, &ds.Rx); err == nil {
+					dailyStats = append(dailyStats, ds)
+				}
 			}
 		}
 	}
-	// 将数据按时间顺序颠倒，方便图表显示
 	for i, j := 0, len(dailyStats)-1; i < j; i, j = i+1, j-1 {
 		dailyStats[i], dailyStats[j] = dailyStats[j], dailyStats[i]
 	}
-	// 如果没有任何记录，给一条今天的空数据防止前台报错
 	if len(dailyStats) == 0 {
 		dailyStats = append(dailyStats, DailyStat{Date: time.Now().Format("2006-01-02"), Tx: 0, Rx: 0})
 	}
 	dsBytes, _ := json.Marshal(dailyStats)
 
 	mu.Lock()
-	conf := config
+	conf := sanitizedConfigForView(config)
 	mu.Unlock()
 
 	pStr := conf.AgentPorts
@@ -173,5 +189,5 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	t, _ = t.Parse(dashboardHtml)
-	t.Execute(w, data)
+	_ = t.Execute(w, data)
 }

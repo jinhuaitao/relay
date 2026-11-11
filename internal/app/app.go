@@ -1,7 +1,4 @@
 // app.go — 应用入口逻辑：命令行参数解析与运行模式分发
-//
-// 由原单文件 main.go（AppVersion v3.3.6）拆分而来，函数体未做任何改动；
-// 唯一差异是入口函数由 main 更名为 Main，供仓库根目录的 main.go 调用。
 
 package app
 
@@ -19,7 +16,14 @@ func Main() {
 	token := flag.String("token", "", "通信Token")
 	serviceOp := flag.String("service", "", "install | uninstall")
 	tlsFlag := flag.Bool("tls", false, "使用 TLS 加密连接")
+	decryptFile := flag.String("decrypt-backup", "", "解密一份 .db.enc 云备份（口令来自 GORELAY_BACKUP_PASSPHRASE 或标准输入）")
+	outFile := flag.String("out", "", "解密输出路径，默认与输入同名 .db")
 	flag.Parse()
+
+	if *decryptFile != "" {
+		runDecryptBackup(*decryptFile, *outFile)
+		return
+	}
 
 	if *serviceOp != "" {
 		handleService(*serviceOp, *mode, *name, *connect, *token, *tlsFlag)

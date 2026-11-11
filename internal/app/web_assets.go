@@ -1,7 +1,7 @@
 // web_assets.go — 前端资源（编译期用 go:embed 内嵌进二进制）
 //
-// 模板与静态文件位于 internal/app/web/，修改后重新编译即可生效；
-// 对外仍是单文件二进制部署，运行时不依赖任何外部文件。
+// 前端脚本、图标字体、样式全部随二进制分发，运行时不依赖任何外部 CDN，
+// 内网/离线部署也能完整渲染；同时消除了第三方脚本被篡改的供应链风险。
 
 package app
 
@@ -22,8 +22,16 @@ var manifestJSON string
 //go:embed web/sw.js
 var serviceWorkerJS string
 
-// 图标资源整目录内嵌（PNG / ICO / SVG），由 web_pwa.go 统一对外提供。
-// 新增图标时直接放进 web/icons/ 即可，重新编译后生效。
-//
 //go:embed web/icons
 var iconsFS embed.FS
+
+//go:embed web/vendor/chart.umd.min.js
+var chartJS []byte
+
+//go:embed web/vendor/remixicon.css
+var remixiconCSS []byte
+
+// 只打包现代浏览器实际会用到的两种字体格式，避免二进制无谓膨胀。
+//
+//go:embed web/vendor/fonts/remixicon.woff2 web/vendor/fonts/remixicon.woff
+var vendorFonts embed.FS

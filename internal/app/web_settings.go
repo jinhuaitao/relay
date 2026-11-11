@@ -1,11 +1,13 @@
 // handlers_settings.go — 系统设置、配置导入导出、日志与规则导出
 //
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
+// 加固点：密钥类设置项不再回显，留空保持原值（__CLEAR__ 显式清空）；
+// 上传数据库前做大小、SQLite 魔数与核心表校验，并保留可回滚的备份。
 
 package app
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,10 +19,23 @@ import (
 	"time"
 )
 
+// applySecretField 实现「留空保持不变」，避免面板刷新把已保存的密钥清空。
+func applySecretField(current, submitted string) string {
+	if submitted == "" {
+		return current
+	}
+	if submitted == clearSentinel {
+		return ""
+	}
+	return submitted
+}
+
 func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 
 	mu.Lock()
 	oldPanelDomain := config.PanelDomain
@@ -28,23 +43,28 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	oldPorts := config.AgentPorts
 
 	if p := r.FormValue("password"); p != "" {
-		salt := generateSalt()
-		config.WebPass = salt + "$" + hashPassword(p, salt)
+		pwdHash, err := hashNewPassword(p)
+		if err != nil {
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "口令散列失败"})
+			return
+		}
+		config.WebPass = pwdHash
 	}
 	config.AgentPorts = r.FormValue("agent_ports")
 	config.MasterDomain = r.FormValue("master_domain")
 	config.PanelDomain = r.FormValue("panel_domain")
-	// TG 凭证必须清洗首尾空白：带空格的 Chat ID 会导致所有身份校验恒不相等，
-	// 表现为机器人"完全不响应"
-	config.TgBotToken = strings.TrimSpace(r.FormValue("tg_bot_token"))
+	config.TgBotToken = strings.TrimSpace(applySecretField(config.TgBotToken, r.FormValue("tg_bot_token")))
 	config.TgChatID = strings.TrimSpace(r.FormValue("tg_chat_id"))
 	config.GithubClientID = r.FormValue("github_client_id")
-	config.GithubClientSecret = r.FormValue("github_client_secret")
+	config.GithubClientSecret = applySecretField(config.GithubClientSecret, r.FormValue("github_client_secret"))
 	config.GithubAllowedUsers = r.FormValue("github_allowed_users")
-	config.R2AccessKey = r.FormValue("r2_access_key")
-	config.R2SecretKey = r.FormValue("r2_secret_key")
+	config.R2AccessKey = applySecretField(config.R2AccessKey, r.FormValue("r2_access_key"))
+	config.R2SecretKey = applySecretField(config.R2SecretKey, r.FormValue("r2_secret_key"))
 	config.R2Endpoint = r.FormValue("r2_endpoint")
 	config.R2Bucket = r.FormValue("r2_bucket")
+	config.BackupPassphrase = applySecretField(config.BackupPassphrase, r.FormValue("backup_passphrase"))
+	config.TrustedProxies = r.FormValue("trusted_proxies")
 
 	if rd := r.FormValue("traffic_reset_day"); rd != "" {
 		d, _ := strconv.Atoi(rd)
@@ -61,14 +81,14 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	newPanelDomain := config.PanelDomain
 	newMasterDomain := config.MasterDomain
 	newPorts := config.AgentPorts
+	trusted := config.TrustedProxies
 	mu.Unlock()
+	setTrustedProxies(trusted)
 
 	needRestart := (oldPanelDomain != newPanelDomain) || (oldMasterDomain != newMasterDomain) || (oldPorts != newPorts)
-
 	addLog(r, "修改配置", "更新了系统全局配置")
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       true,
 		"need_restart":  needRestart,
 		"redirect_host": newPanelDomain,
@@ -83,11 +103,6 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // snapshotDB 生成一份内容一致、可直接打开的数据库快照。
-//
-// 数据库跑在 WAL 模式下，最近的提交可能还停留在 data.db-wal 里，
-// 直接 ServeFile 主文件会导出一份"少数据"甚至"撕裂页"的备份——恢复时轻则丢配置、
-// 重则打不开。这里优先用 SQLite 的 VACUUM INTO 做一致性快照（内部开启读事务并压实文件），
-// 失败时退回"先 checkpoint 再整体拷贝"。
 func snapshotDB() (string, error) {
 	mu.Lock()
 	d := db
@@ -106,7 +121,6 @@ func snapshotDB() (string, error) {
 		_ = os.Remove(tmp)
 	}
 
-	// 回退路径：先把 WAL 合并回主文件，再整体拷贝
 	_, _ = d.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 	if err := copyFile(DBFile, tmp); err != nil {
 		_ = os.Remove(tmp)
@@ -122,7 +136,7 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
@@ -135,6 +149,23 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// verifySQLiteDB 校验文件确实是可打开的 SQLite 库，且包含核心表。
+func verifySQLiteDB(path string) error {
+	d, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	var n int
+	if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('settings','rules')").Scan(&n); err != nil {
+		return fmt.Errorf("不是有效的 GoRelay 数据库: %w", err)
+	}
+	if n < 2 {
+		return fmt.Errorf("备份文件缺少 settings / rules 表")
+	}
+	return nil
 }
 
 func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
@@ -150,61 +181,85 @@ func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename="+name)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeFile(w, r, tmp)
-	addLog(r, "导出配置", "已导出数据库一致性快照")
+	addLog(r, "导出配置", "已导出完整数据库快照（含凭据，请妥善保管）")
 }
 
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	respond := func(ok bool, msg string) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": ok, "error": msg})
+	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadSize)
 	file, _, err := r.FormFile("db_file")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "读取上传文件失败"})
+		respond(false, "读取上传文件失败（文件或请求体过大）")
 		return
 	}
 	defer file.Close()
 
-	// 1. 获取锁，安全地清理旧数据库连接
-	mu.Lock()
-
-	if db != nil {
-		db.Close()
-		db = nil
+	buf, err := io.ReadAll(io.LimitReader(file, MaxUploadSize+1))
+	if err != nil || len(buf) > MaxUploadSize {
+		respond(false, "备份文件超过 64MB 上限")
+		return
 	}
-
-	os.Remove(DBFile + "-wal")
-	os.Remove(DBFile + "-shm")
-
-	out, err := os.Create(DBFile)
-	if err != nil {
-		// 恢复数据库连接，避免面板进入 db=nil 半瘫态
-		initDB()
-		mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
+	if len(buf) < 100 || !bytes.Equal(buf[:16], []byte("SQLite format 3\x00")) {
+		respond(false, "不是有效的 SQLite 数据库文件")
 		return
 	}
 
-	// 2. 覆盖写入新数据
-	io.Copy(out, file)
-	out.Close() // 必须显式关闭文件句柄
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("gorelay_upload_%d.db", time.Now().UnixNano()))
+	if err := os.WriteFile(tmp, buf, 0600); err != nil {
+		respond(false, "写入临时文件失败")
+		return
+	}
+	defer os.Remove(tmp)
+	if err := verifySQLiteDB(tmp); err != nil {
+		respond(false, err.Error())
+		return
+	}
 
-	// 3. 重新初始化数据库连接
+	// 覆盖前留一份一致性快照，任何一步失败都能回滚
+	backupPath := ""
+	if snap, e := snapshotDB(); e == nil {
+		backupPath = snap
+	}
+	defer func() {
+		if backupPath != "" {
+			_ = os.Remove(backupPath)
+		}
+	}()
+
+	mu.Lock()
+	if db != nil {
+		_ = db.Close()
+		db = nil
+	}
+	_ = os.Remove(DBFile + "-wal")
+	_ = os.Remove(DBFile + "-shm")
+	if err := copyFile(tmp, DBFile); err != nil {
+		if backupPath != "" {
+			_ = copyFile(backupPath, DBFile)
+		}
+		initDB()
+		mu.Unlock()
+		respond(false, "无法覆盖写入新数据库：已回滚")
+		return
+	}
 	initDB()
-
-	// 4. 解锁！必须在 loadConfig 之前解锁，避免内部循环锁死锁
 	mu.Unlock()
 
-	// 5. 将新数据库中的配置重新加载到内存中
 	loadConfig()
 
-	// 获取恢复后的新面板域名
 	mu.Lock()
 	newPanelDomain := config.PanelDomain
 	mu.Unlock()
 
-	// 6. 响应前端成功，并下发新的重定向域名
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	addLog(r, "恢复配置", "已从上传的数据库恢复配置")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       true,
 		"redirect_host": newPanelDomain,
 	})
@@ -213,84 +268,90 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 func handleExportLogs(w http.ResponseWriter, r *http.Request) {
 	var logs []OpLog
 	if db != nil {
-		rows, err := db.Query("SELECT time, ip, COALESCE(category,'') AS category, action, msg FROM logs ORDER BY id DESC")
+		rows, err := db.Query("SELECT time, ip, COALESCE(category,'') AS category, action, msg FROM logs ORDER BY id DESC LIMIT 10000")
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var l OpLog
-				rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
-				logs = append(logs, l)
+				if err := rows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg); err == nil {
+					logs = append(logs, l)
+				}
 			}
 		}
 	}
 	b, _ := json.MarshalIndent(logs, "", "  ")
 	w.Header().Set("Content-Disposition", "attachment; filename=logs.json")
-	w.Write(b)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
 }
 
 func handleClearLogs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if db != nil {
-		// 清空 logs 表
-		_, err := db.Exec("DELETE FROM logs")
-		if err == nil {
-			// 重置自增 ID (SQLite 特定语法)
-			db.Exec("DELETE FROM sqlite_sequence WHERE name='logs'")
-			// 添加一条清空操作的记录
+		if _, err := db.Exec("DELETE FROM logs"); err == nil {
+			_, _ = db.Exec("DELETE FROM sqlite_sequence WHERE name='logs'")
 			addLog(r, "清理日志", "管理员手动清空了所有操作日志")
 		}
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleExportRules(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
-	defer mu.Unlock()
 	b, err := json.MarshalIndent(rules, "", "  ")
+	mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Disposition", "attachment; filename=rules_backup.json")
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(b)
+	_, _ = w.Write(b)
 }
 
 func handleImportRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
 	file, _, err := r.FormFile("rules_file")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "读取上传文件失败"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "读取上传文件失败"})
 		return
 	}
 	defer file.Close()
 
-	var importedRules []LogicalRule
-	if err := json.NewDecoder(file).Decode(&importedRules); err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "解析 JSON 格式失败，请确保文件正确"})
+	var imported []LogicalRule
+	if err := json.NewDecoder(io.LimitReader(file, 8<<20)).Decode(&imported); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "解析 JSON 格式失败，请确保文件正确"})
+		return
+	}
+	validated, err := validateImportedRules(imported)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
 
 	mu.Lock()
-	rules = importedRules
+	rules = validated
 	saveConfigNoLock()
 	mu.Unlock()
 
 	go pushConfigToAll()
-
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func handleRestart(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	addLog(r, "重启服务", "管理员触发了系统重启")
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		doRestart()

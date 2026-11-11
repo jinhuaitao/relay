@@ -5,10 +5,13 @@
  *
  * 注意：CACHE_NAME 必须在图标资源变更时同步升级，否则旧图标会被永久命中。
  */
-const CACHE_NAME = 'gorelay-pwa-v3';
+const CACHE_NAME = 'gorelay-pwa-v4';
 
 const PRECACHE = [
     '/manifest.json',
+    '/vendor/chart.umd.min.js',
+    '/vendor/remixicon.css',
+    '/vendor/fonts/remixicon.woff2',
     '/icons/icon-192.png?v=2',
     '/icons/icon-512.png?v=2',
     '/icons/icon-maskable-192.png?v=2',

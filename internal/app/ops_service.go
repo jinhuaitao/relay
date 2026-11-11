@@ -1,7 +1,4 @@
 // service.go — 进程级运维：文件句柄上限、systemd/OpenRC 服务安装卸载、重启、信号处理
-//
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
 
 package app
 
@@ -21,9 +18,12 @@ func setRLimit() {
 	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 		var rLimit syscall.Rlimit
 		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
-			rLimit.Cur = 1000000
-			rLimit.Max = 1000000
-			syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+			want := uint64(1000000)
+			if rLimit.Max > 0 && want > rLimit.Max {
+				want = rLimit.Max
+			}
+			rLimit.Cur = want
+			_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 		}
 	}
 }
@@ -32,6 +32,24 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if os.Geteuid() != 0 {
 		log.Fatal("需 root 权限")
 	}
+	if op != "install" && op != "uninstall" {
+		log.Fatal("未知的 service 操作")
+	}
+	if mode != "master" && mode != "agent" {
+		log.Fatal("未知的运行模式")
+	}
+	// 这些参数会被拼进 systemd/OpenRC 单元文件，必须先排除引号与元字符，
+	// 否则一个含 " 的节点名就能改写 ExecStart。
+	if op == "install" {
+		for _, p := range []struct{ label, value string }{
+			{"name", name}, {"connect", connect}, {"token", token},
+		} {
+			if p.value != "" && !safeServiceArg(p.value) {
+				log.Fatalf("参数 %s 含非法字符（禁止引号、空白、$、反引号等）", p.label)
+			}
+		}
+	}
+
 	exe, _ := os.Executable()
 	exe, _ = filepath.Abs(exe)
 	tlsParam := ""
@@ -57,31 +75,50 @@ func handleService(op, mode, name, connect, token string, useTLS bool) {
 	if op == "install" {
 		if isSys {
 			c := fmt.Sprintf("[Unit]\nDescription=GoRelay Service (%s)\nAfter=network.target\n[Service]\nType=simple\nExecStart=%s %s\nRestart=always\nUser=root\nLimitNOFILE=1000000\n[Install]\nWantedBy=multi-user.target", svcName, exe, args)
-			os.WriteFile(fmt.Sprintf("/etc/systemd/system/%s.service", svcName), []byte(c), 0644)
-			exec.Command("systemctl", "enable", svcName).Run()
-			exec.Command("systemctl", "restart", svcName).Run()
+			if err := os.WriteFile(fmt.Sprintf("/etc/systemd/system/%s.service", svcName), []byte(c), 0644); err != nil {
+				log.Fatalf("写入 systemd 单元失败: %v", err)
+			}
+			_ = exec.Command("systemctl", "enable", svcName).Run()
+			_ = exec.Command("systemctl", "restart", svcName).Run()
 			log.Printf("Systemd 服务 %s 已安装", svcName)
 		} else if isAlpine {
-			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"%s\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/%s.pid\"\nrc_ulimit=\"-n 1000000\"\ndepend(){ need net; }", svcName, exe, args, svcName)
-			os.WriteFile(fmt.Sprintf("/etc/init.d/%s", svcName), []byte(c), 0755)
-			exec.Command("rc-update", "add", svcName, "default").Run()
-			exec.Command("rc-service", svcName, "restart").Run()
+			c := fmt.Sprintf("#!/sbin/openrc-run\nname=\"%s\"\ncommand=\"%s\"\ncommand_args=\"%s\"\ncommand_background=true\npidfile=\"/run/%s.pid\"\nrc_ulimit=\"-n 1000000\"\noutput_log=\"/var/log/relay.log\"\nerror_log=\"/var/log/relay.log\"\ndepend(){ need net; }", svcName, exe, args, svcName)
+			if err := os.WriteFile(fmt.Sprintf("/etc/init.d/%s", svcName), []byte(c), 0755); err != nil {
+				log.Fatalf("写入 OpenRC 脚本失败: %v", err)
+			}
+			_ = exec.Command("rc-update", "add", svcName, "default").Run()
+			_ = exec.Command("rc-service", svcName, "restart").Run()
 			log.Printf("OpenRC 服务 %s 已安装", svcName)
 		} else {
-			exec.Command("nohup", exe, args, "&").Start()
-			log.Println("已通过 nohup 启动")
+			// 兜底分支：旧实现把整串参数当单个 argv 传入并附带 "&"，实际无法启动。
+			cmdArgs := []string{"-mode", mode}
+			if mode == "agent" {
+				cmdArgs = append(cmdArgs, "-name", name, "-connect", connect, "-token", token)
+			}
+			if useTLS {
+				cmdArgs = append(cmdArgs, "-tls")
+			}
+			cmd := exec.Command(exe, cmdArgs...)
+			if f, err := os.OpenFile("/var/log/relay.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+				cmd.Stdout, cmd.Stderr = f, f
+				defer f.Close()
+			}
+			if err := cmd.Start(); err != nil {
+				log.Fatalf("后台启动失败: %v", err)
+			}
+			log.Printf("已后台启动 (pid=%d)，日志: /var/log/relay.log", cmd.Process.Pid)
 		}
 	} else {
 		if isSys {
-			exec.Command("systemctl", "disable", svcName).Run()
-			exec.Command("systemctl", "stop", svcName).Run()
-			os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", svcName))
-			exec.Command("systemctl", "daemon-reload").Run()
+			_ = exec.Command("systemctl", "disable", svcName).Run()
+			_ = exec.Command("systemctl", "stop", svcName).Run()
+			_ = os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", svcName))
+			_ = exec.Command("systemctl", "daemon-reload").Run()
 		}
 		if isAlpine {
-			exec.Command("rc-update", "del", svcName, "default").Run()
-			exec.Command("rc-service", svcName, "stop").Run()
-			os.Remove(fmt.Sprintf("/etc/init.d/%s", svcName))
+			_ = exec.Command("rc-update", "del", svcName, "default").Run()
+			_ = exec.Command("rc-service", svcName, "stop").Run()
+			_ = os.Remove(fmt.Sprintf("/etc/init.d/%s", svcName))
 		}
 		log.Printf("服务 %s 已卸载", svcName)
 	}
@@ -94,18 +131,18 @@ func doSelfUninstall() {
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
-				exec.Command("systemctl", "disable", s).Run()
-				exec.Command("systemctl", "stop", s).Run()
-				os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", s))
+				_ = exec.Command("systemctl", "disable", s).Run()
+				_ = exec.Command("systemctl", "stop", s).Run()
+				_ = os.Remove(fmt.Sprintf("/etc/systemd/system/%s.service", s))
 			}
 		}
-		exec.Command("systemctl", "daemon-reload").Run()
+		_ = exec.Command("systemctl", "daemon-reload").Run()
 	} else if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
-				exec.Command("rc-update", "del", s, "default").Run()
-				exec.Command("rc-service", s, "stop").Run()
-				os.Remove(fmt.Sprintf("/etc/init.d/%s", s))
+				_ = exec.Command("rc-update", "del", s, "default").Run()
+				_ = exec.Command("rc-service", s, "stop").Run()
+				_ = os.Remove(fmt.Sprintf("/etc/init.d/%s", s))
 			}
 		}
 	}
@@ -117,20 +154,19 @@ func doSelfUninstall() {
 			realPath = exe
 		}
 		absPath, _ := filepath.Abs(realPath)
-		os.Remove(absPath)
+		_ = os.Remove(absPath)
 	}
 	os.Exit(0)
 }
 
 func doRestart() {
 	log.Println("🔄 接收到重启指令...")
-
 	services := []string{"relay", "gorelay"}
 
 	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/systemd/system/%s.service", s)); err == nil {
-				exec.Command("systemctl", "restart", s).Start()
+				_ = exec.Command("systemctl", "restart", s).Start()
 				time.Sleep(1 * time.Second)
 				os.Exit(0)
 				return
@@ -141,7 +177,7 @@ func doRestart() {
 	if _, err := os.Stat("/etc/init.d"); err == nil {
 		for _, s := range services {
 			if _, err := os.Stat(fmt.Sprintf("/etc/init.d/%s", s)); err == nil {
-				exec.Command("rc-service", s, "restart").Start()
+				_ = exec.Command("rc-service", s, "restart").Start()
 				time.Sleep(1 * time.Second)
 				os.Exit(0)
 				return
@@ -154,20 +190,14 @@ func doRestart() {
 		argv0 = os.Args[0]
 	}
 	if runtime.GOOS == "windows" {
-		// Windows 不支持 syscall.Exec，重新拉起自身后退出
 		cmd := exec.Command(argv0, os.Args[1:]...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if e := cmd.Start(); e == nil {
 			time.Sleep(500 * time.Millisecond)
 		}
 		os.Exit(0)
 	} else {
-		os.Stdin = nil
-		os.Stdout = nil
-		os.Stderr = nil
-		syscall.Exec(argv0, os.Args, os.Environ())
+		_ = syscall.Exec(argv0, os.Args, os.Environ())
 	}
 }
 
@@ -179,12 +209,14 @@ func setupSignalHandler() {
 		log.Println("📢 正在安全关闭服务...")
 		mu.Lock()
 		for _, a := range agents {
-			a.Conn.Close()
+			if a.Conn != nil {
+				_ = a.Conn.Close()
+			}
 		}
 		saveConfigNoLock()
 		mu.Unlock()
 		if db != nil {
-			db.Close()
+			_ = db.Close()
 		}
 		os.Exit(0)
 	}()

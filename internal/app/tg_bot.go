@@ -389,15 +389,11 @@ func startTgBotLoop() {
 						buildRulesMenuMarkup(page))
 				} else if data == "cmd:backup" {
 					go func() {
-						// 1. 先发送到 Telegram
-						sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
-
-						// 2. 触发 Cloudflare R2 备份
-						if err := uploadToR2(DBFile); err == nil {
-							sendTelegram("✅ <b>R2 容灾备份成功</b>\n手动触发的备份已同步至 Cloudflare R2。")
-						} else if err.Error() != "R2 配置未启用" {
-							sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+						if err := performCloudBackup(); err != nil {
+							sendTelegram("❌ <b>云备份失败</b>\n" + tgEscape(err.Error()))
+							return
 						}
+						sendTelegram("✅ <b>云备份完成</b>\n备份已剥离全部凭据并加密后发送；R2（若已配置）同步完成。")
 					}()
 				} else if strings.HasPrefix(data, "toggle:") {
 					// 格式: toggle:id:page

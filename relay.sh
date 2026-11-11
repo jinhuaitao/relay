@@ -6,7 +6,7 @@
 # =========================================================
 
 # --- 基础配置 ---
-DOWNLOAD_URL="https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download/relay"
+DOWNLOAD_URL="https://github.com/jinhuaitao/relay/releases/latest/download/relay"
 BIN_PATH="/usr/local/bin/relay"
 SERVICE_NAME="relay"
 
@@ -99,32 +99,50 @@ install_relay() {
 
     # --- 新增：自动识别架构并修改下载链接 ---
     ARCH=$(uname -m)
-    BASE_URL="https://jht126.eu.org/https://github.com/jinhuaitao/relay/releases/latest/download"
+    # 只从官方 GitHub Release 下载，绝不经过第三方反向代理
+    BASE_URL="https://github.com/jinhuaitao/relay/releases/latest/download"
     case "$ARCH" in
         x86_64)
-            DOWNLOAD_URL="${BASE_URL}/relay-linux-amd64"
+            ASSET="relay-linux-amd64"
             ;;
         aarch64|arm64)
-            DOWNLOAD_URL="${BASE_URL}/relay-linux-arm64"
+            ASSET="relay-linux-arm64"
             ;;
         *)
             log_error "不支持的系统架构: $ARCH"
             return
             ;;
     esac
+    DOWNLOAD_URL="${BASE_URL}/${ASSET}"
     log_info "检测到系统架构: $ARCH，使用对应版本安装"
     # ----------------------------------------
 
-    # 1. 下载
+    # 1. 下载官方校验清单与二进制，并做 SHA256 强校验
+    log_info "正在下载官方校验清单..."
+    if ! wget -q -O /tmp/relay_checksums.txt "${BASE_URL}/checksums.txt"; then
+        log_error "无法获取官方校验清单，已取消安装（拒绝安装未校验的二进制）。"
+        read -p "按回车键返回..."
+        return
+    fi
+    EXPECTED=$(awk -v f="$ASSET" '$2 == f {print $1}' /tmp/relay_checksums.txt | head -n1)
+
     log_info "正在下载二进制文件..."
-    wget -q -O "$BIN_PATH" "$DOWNLOAD_URL"
-    if [ $? -ne 0 ]; then
+    if ! wget -q -O "$BIN_PATH" "$DOWNLOAD_URL"; then
         log_error "下载失败，请检查网络连接。"
+        rm -f /tmp/relay_checksums.txt "$BIN_PATH"
+        read -p "按回车键返回..."
+        return
+    fi
+    ACTUAL=$(sha256sum "$BIN_PATH" | awk '{print $1}')
+    rm -f /tmp/relay_checksums.txt
+    if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+        log_error "SHA256 校验失败，已删除下载文件。请稍后重试或检查 Release 是否被篡改。"
+        rm -f "$BIN_PATH"
         read -p "按回车键返回..."
         return
     fi
     chmod +x "$BIN_PATH"
-    log_success "下载成功，已安装至: ${CYAN}$BIN_PATH${PLAIN}"
+    log_success "下载并校验成功，已安装至: ${CYAN}$BIN_PATH${PLAIN}"
 
     # 2. 配置服务
     log_info "正在配置系统服务..."

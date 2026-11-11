@@ -6,11 +6,11 @@
 package app
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
-	"golang.org/x/crypto/acme/autocert"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -19,9 +19,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 func runMaster() {
+	// WebSocket 与 HTTP 共用同源判定，阻止跨站 WebSocket 劫持（CSWSH）。
+	wsUpgrader.CheckOrigin = func(r *http.Request) bool { return isSameOrigin(r) }
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
@@ -31,6 +37,7 @@ func runMaster() {
 			cleanOldLogs()
 			flushDailyStats()
 			pruneOfflineAgents()
+			cleanExpiredSessions()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
@@ -158,6 +165,7 @@ func runMaster() {
 
 	http.HandleFunc("/manifest.json", handleManifest)
 	http.HandleFunc("/sw.js", handleServiceWorker)
+	http.HandleFunc("/vendor/", handleVendor)
 	http.HandleFunc("/icons/", handleIcons)
 	http.HandleFunc("/icon.svg", handleIcon) // 旧入口，保留兼容
 	http.HandleFunc("/favicon.ico", handleFavicon)
@@ -226,9 +234,9 @@ func flushDailyStats() {
 }
 
 func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		w.Write([]byte(""))
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" || len(name) > 64 {
+		_, _ = w.Write([]byte(""))
 		return
 	}
 
@@ -424,8 +432,9 @@ func broadcastLoop() {
 			if err == nil {
 				for lRows.Next() {
 					var l OpLog
-					lRows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg)
-					logData = append(logData, l)
+					if err := lRows.Scan(&l.Time, &l.IP, &l.Category, &l.Action, &l.Msg); err == nil {
+						logData = append(logData, l)
+					}
 				}
 				lRows.Close()
 			}
@@ -474,13 +483,19 @@ func handleAgentConn(conn net.Conn) {
 	// 不必等到默认的十几分钟重传超时（TCPKeepAlive 常量此前定义了却从未使用）。
 	enableKeepAlive(conn)
 
-	dec := json.NewDecoder(conn)
-	// 认证帧限时：防止未认证的空连接长期占用 goroutine 与文件句柄
+	// 未认证阶段按行读取并限制单帧长度，避免恶意连接用超长 JSON 打爆内存。
+	// bufio.Reader 会保留已缓冲的后续数据，认证通过后主循环继续从它解码。
 	_ = conn.SetReadDeadline(time.Now().Add(agentAuthTimeout))
-	var msg Message
-	if err := dec.Decode(&msg); err != nil || msg.Type != "auth" {
+	br := bufio.NewReader(conn)
+	line, err := br.ReadBytes('\n')
+	if err != nil || len(line) > 64*1024 {
 		return
 	}
+	var msg Message
+	if err := json.Unmarshal(line, &msg); err != nil || msg.Type != "auth" {
+		return
+	}
+	dec := json.NewDecoder(br)
 
 	data, ok := msg.Payload.(map[string]interface{})
 	if !ok {
@@ -542,8 +557,8 @@ func handleAgentConn(conn net.Conn) {
 	// ----------------------------------------------------------
 
 	mu.Lock()
-	if old, exists := agents[name]; exists {
-		old.Conn.Close()
+	if old, exists := agents[name]; exists && old.Conn != nil {
+		_ = old.Conn.Close()
 	}
 	// 初始化为获取中
 	agents[name] = &AgentInfo{Name: name, RemoteIP: remoteIP, Conn: conn, ConnectedAt: time.Now(), IsOnline: true, Version: reportedVersion, Region: "🌍 --"}
@@ -556,15 +571,23 @@ func handleAgentConn(conn net.Conn) {
 			host = h
 		}
 		host = strings.Trim(host, "[]")
+		// 只查询合法 IP，避免把 Agent 上报的任意字符串拼进外部 URL。
+		if net.ParseIP(host) == nil {
+			return
+		}
 		client := http.Client{Timeout: 3 * time.Second}
-		// 使用免费接口查询 IP 信息
-		if resp, err := client.Get("http://ip-api.com/json/" + host + "?fields=countryCode"); err == nil {
+		// 明文 HTTP 的地理接口已换成支持 TLS 的 ipwho.is
+		if resp, err := client.Get("https://ipwho.is/" + host + "?fields=country_code"); err == nil {
 			defer resp.Body.Close()
 			var res struct {
-				CountryCode string `json:"countryCode"`
+				CountryCode string `json:"country_code"`
+				Success     bool   `json:"success"`
 			}
-			if json.NewDecoder(resp.Body).Decode(&res) == nil && len(res.CountryCode) == 2 {
+			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&res) == nil && res.Success && len(res.CountryCode) == 2 {
 				cc := strings.ToUpper(res.CountryCode)
+				if cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+					return
+				}
 				// 巧妙利用 Unicode 偏移量将两位字母转为国旗 Emoji (例如 US 会变成 🇺🇸)
 				flag := string([]rune{rune(cc[0]) + 127397, rune(cc[1]) + 127397}) + " " + cc
 				mu.Lock()
@@ -682,26 +705,25 @@ func handleStatsReport(payload interface{}) {
 func handleHealthReport(payload interface{}) {
 	d, _ := json.Marshal(payload)
 	var reports []HealthReport
-	json.Unmarshal(d, &reports)
+	_ = json.Unmarshal(d, &reports)
 	mu.Lock()
 	defer mu.Unlock()
+	// 建索引，避免每条上报都线性扫一遍规则表
+	ruleIndex := make(map[string]int, len(rules))
+	for i := range rules {
+		ruleIndex[rules[i].ID] = i
+	}
 	for _, rep := range reports {
 		if strings.HasSuffix(rep.TaskID, "_exit") {
 			rid := strings.TrimSuffix(rep.TaskID, "_exit")
-			for i := range rules {
-				if rules[i].ID == rid {
-					rules[i].TargetStatus = (rep.Latency >= 0)
-					rules[i].TargetLatency = rep.Latency
-					break
-				}
+			if i, ok := ruleIndex[rid]; ok {
+				rules[i].TargetStatus = (rep.Latency >= 0)
+				rules[i].TargetLatency = rep.Latency
 			}
-		} else if strings.HasSuffix(rep.TaskID, "_entry") { // --- 新增：截获入口到出口的延迟 ---
+		} else if strings.HasSuffix(rep.TaskID, "_entry") {
 			rid := strings.TrimSuffix(rep.TaskID, "_entry")
-			for i := range rules {
-				if rules[i].ID == rid {
-					rules[i].BridgeLatency = rep.Latency
-					break
-				}
+			if i, ok := ruleIndex[rid]; ok {
+				rules[i].BridgeLatency = rep.Latency
 			}
 		}
 	}

@@ -1,14 +1,10 @@
 // proxy.go — 转发内核：监听、负载均衡选路、TCP/UDP 双向复制与限速
-//
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
 
 package app
 
 import (
 	"context"
 	"crypto/rand"
-	"golang.org/x/time/rate"
 	"io"
 	"math/big"
 	"net"
@@ -16,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type IpTracker struct {
@@ -41,13 +39,10 @@ func (t *IpTracker) Remove(addr string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-
 	if count, exists := t.refs[host]; !exists || count <= 0 {
 		return
 	}
-
 	t.refs[host]--
-
 	if t.refs[host] <= 0 {
 		delete(t.refs, host)
 		if atomic.LoadInt64(t.count) > 0 {
@@ -72,12 +67,23 @@ func startProxy(t ForwardTask) {
 			f()
 		}
 		for c := range activeConns {
-			c.Close()
+			_ = c.Close()
 		}
 	}
 	runningListeners.Store(t.ID, closeAll)
-	v, _ := agentUserCounts.Load(t.ID)
-	userCountPtr := v.(*int64)
+
+	// 任务可能在重连恢复路径中被创建，对应计数器未必已初始化；
+	// 旧实现在此处直接做类型断言，缺失时会 panic 并带崩整个 Agent。
+	v, ok := agentUserCounts.Load(t.ID)
+	if !ok {
+		uz := int64(0)
+		agentUserCounts.Store(t.ID, &uz)
+		v = &uz
+	}
+	userCountPtr, ok := v.(*int64)
+	if !ok {
+		return
+	}
 	ipTracker := &IpTracker{refs: make(map[string]int), count: userCountPtr}
 
 	if t.Protocol == "tcp" || t.Protocol == "both" {
@@ -87,7 +93,7 @@ func startProxy(t ForwardTask) {
 				return
 			}
 			l.Lock()
-			closers = append(closers, func() { ln.Close() })
+			closers = append(closers, func() { _ = ln.Close() })
 			l.Unlock()
 			for {
 				c, e := ln.Accept()
@@ -96,7 +102,7 @@ func startProxy(t ForwardTask) {
 				}
 				l.Lock()
 				if closed {
-					c.Close()
+					_ = c.Close()
 					l.Unlock()
 					continue
 				}
@@ -121,7 +127,7 @@ func startProxy(t ForwardTask) {
 				return
 			}
 			l.Lock()
-			closers = append(closers, func() { ln.Close() })
+			closers = append(closers, func() { _ = ln.Close() })
 			l.Unlock()
 			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit, t.LBStrategy)
 		}()
@@ -147,12 +153,9 @@ func selectTarget(tid string, targets []string, strategy string) string {
 		valid = targets
 		latencies = make([]int64, len(targets))
 	}
-
-	// 目标全部为空（规则未配置 target），返回空串让调用方放弃
 	if len(valid) == 0 {
 		return ""
 	}
-	// 去除仅含空串的退化情况
 	nonEmpty := false
 	for _, t := range valid {
 		if strings.TrimSpace(t) != "" {
@@ -163,7 +166,6 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	if !nonEmpty {
 		return ""
 	}
-
 	if len(valid) == 1 {
 		return valid[0]
 	}
@@ -255,6 +257,16 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 	cnt := v.(*TrafficCounter)
 
+	// UDP 也遵守 SpeedLimit：超速直接丢包（符合 UDP 语义），不阻塞读循环。
+	var udpLimiter *rate.Limiter
+	if limit > 0 {
+		burst := UDPBufferSize
+		if limit > int64(burst) {
+			burst = int(limit)
+		}
+		udpLimiter = rate.NewLimiter(rate.Limit(limit), burst)
+	}
+
 	go func() {
 		for {
 			time.Sleep(30 * time.Second)
@@ -262,7 +274,7 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			udpSessions.Range(func(key, value interface{}) bool {
 				s := value.(*udpSession)
 				if now.Sub(s.lastActive) > 45*time.Second {
-					s.conn.Close()
+					_ = s.conn.Close()
 					udpSessions.Delete(key)
 					tracker.Remove(key.(string))
 				}
@@ -271,14 +283,17 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		}
 	}()
 
-	// 每个数据包从池中借还缓冲，避免长期独占导致池失效
 	for {
-		bufPtr := bufPool.Get().(*[]byte)
+		bufPtr := udpBufPool.Get().(*[]byte)
 		buf := *bufPtr
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
-			bufPool.Put(bufPtr)
+			udpBufPool.Put(bufPtr)
 			break
+		}
+		if udpLimiter != nil && !udpLimiter.AllowN(time.Now(), n) {
+			udpBufPool.Put(bufPtr)
+			continue
 		}
 		atomic.AddInt64(&cnt.Tx, int64(n))
 		sAddr := srcAddr.String()
@@ -286,20 +301,20 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 		if ok {
 			s := val.(*udpSession)
 			s.lastActive = time.Now()
-			s.conn.Write(buf[:n])
-			bufPool.Put(bufPtr)
+			_, _ = s.conn.Write(buf[:n])
+			udpBufPool.Put(bufPtr)
 		} else {
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
 			} else {
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 			targets := strings.Split(currentTargetStr, ",")
 			bestTarget := selectTarget(tid, targets, strategy)
 			if bestTarget == "" {
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 
@@ -310,29 +325,32 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				atomic.AddInt64(vConn.(*int64), -1)
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
-			newConn.Write(buf[:n])
-			bufPool.Put(bufPtr)
+			_, _ = newConn.Write(buf[:n])
+			udpBufPool.Put(bufPtr)
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				bPtr := bufPool.Get().(*[]byte)
-				defer bufPool.Put(bPtr)
+				bPtr := udpBufPool.Get().(*[]byte)
+				defer udpBufPool.Put(bPtr)
 				b := *bPtr
 				for {
-					c.SetReadDeadline(time.Now().Add(65 * time.Second))
+					_ = c.SetReadDeadline(time.Now().Add(65 * time.Second))
 					m, _, e := c.ReadFromUDP(b)
 					if e != nil {
-						c.Close()
+						_ = c.Close()
 						udpSessions.Delete(k)
 						tracker.Remove(k)
 						atomic.AddInt64(vConn.(*int64), -1)
 						break
 					}
-					ln.WriteToUDP(b[:m], sa)
+					if udpLimiter != nil && !udpLimiter.AllowN(time.Now(), m) {
+						continue
+					}
+					_, _ = ln.WriteToUDP(b[:m], sa)
 					atomic.AddInt64(&cnt.Rx, int64(m))
 				}
 			}(newConn, srcAddr, sAddr, bestTarget)
@@ -345,23 +363,22 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
 
-	// 初始化官方令牌桶限速器
 	var limiter *rate.Limiter
 	if limit > 0 {
-		// Limit(limit) 表示每秒允许的字节数，Burst 设为 32KB 应对缓冲区突发
-		limiter = rate.NewLimiter(rate.Limit(limit), 32*1024)
+		limiter = rate.NewLimiter(rate.Limit(limit), CopyBufferSize)
 	}
 
-	ctx := context.Background()
 	for {
 		nr, err := src.Read(buf)
 		if nr > 0 {
-			// 如果开启了限速，平滑消费令牌，替代粗暴的 time.Sleep
 			if limiter != nil {
-				_ = limiter.WaitN(ctx, nr)
+				// 带超时的等待：连接已被对端关闭时，不能让极低速率的令牌桶
+				// 把这个 goroutine 永久挂住。
+				waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				_ = limiter.WaitN(waitCtx, nr)
+				cancel()
 			}
 
-			// 必须写完整个切片：dst.Write 允许短写，未补齐会截断转发流
 			toWrite := buf[0:nr]
 			for len(toWrite) > 0 {
 				nw, werr := dst.Write(toWrite)

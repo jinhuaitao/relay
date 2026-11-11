@@ -1,7 +1,4 @@
 // agent.go — Agent 节点：主控连接、心跳、目标健康探测
-//
-// 由原单文件 main.go（AppVersion v3.3.6）按职责拆分而来，
-// 代码逻辑、执行顺序与对外行为完全未改动（同一 package main）。
 
 package app
 
@@ -21,23 +18,27 @@ import (
 )
 
 func runAgent(name, masterAddr, token string) {
-	// --- 新增：精准探测公网 IPv4 / IPv6 ---
+	// 公网 IP 探测一律走 HTTPS，避免明文请求泄露节点出口信息且可被篡改。
 	var publicIPv4, publicIPv6 string
-	client4 := http.Client{Timeout: 3 * time.Second}
-	if resp, err := client4.Get("http://ipv4.icanhazip.com"); err == nil {
-		if b, err := io.ReadAll(resp.Body); err == nil {
+	client := http.Client{Timeout: 3 * time.Second}
+	if resp, err := client.Get("https://ipv4.icanhazip.com"); err == nil {
+		if b, err := io.ReadAll(io.LimitReader(resp.Body, 256)); err == nil {
 			publicIPv4 = strings.TrimSpace(string(b))
 		}
 		resp.Body.Close()
 	}
-	client6 := http.Client{Timeout: 3 * time.Second}
-	if resp, err := client6.Get("http://ipv6.icanhazip.com"); err == nil {
-		if b, err := io.ReadAll(resp.Body); err == nil {
+	if resp, err := client.Get("https://ipv6.icanhazip.com"); err == nil {
+		if b, err := io.ReadAll(io.LimitReader(resp.Body, 256)); err == nil {
 			publicIPv6 = strings.TrimSpace(string(b))
 		}
 		resp.Body.Close()
 	}
-	// ------------------------------------
+	if net.ParseIP(publicIPv4) == nil {
+		publicIPv4 = ""
+	}
+	if net.ParseIP(publicIPv6) == nil {
+		publicIPv6 = ""
+	}
 
 	for {
 		var conn net.Conn
@@ -58,37 +59,29 @@ func runAgent(name, masterAddr, token string) {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		// 与主控侧对称：开启 keepalive，主控失联时内核能主动探测到
 		enableKeepAlive(conn)
 
-		// 串行化对主控连接的写操作，避免 ticker 与主循环并发写导致数据交错
 		var masterMu sync.Mutex
 		writeMsg := func(m Message) {
 			masterMu.Lock()
 			defer masterMu.Unlock()
-			// 主控侧网络黑洞时写操作会永久阻塞并卡住心跳协程，
-			// 加超时让 Encode 尽快失败，由 decode 分支触发重连
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			_ = json.NewEncoder(conn).Encode(m)
 		}
 
-		// --- 新增：开启临时测试端口，供主控测试入站连通性 ---
 		testLn, _ := net.Listen("tcp", ":0")
 		var testPort int
 		if testLn != nil {
 			testPort = testLn.Addr().(*net.TCPAddr).Port
 			go func(ln net.Listener) {
 				defer ln.Close()
-				// 10 秒后自动关闭测试端口，防止端口泄露
-				ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+				_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
 				if c, err := ln.Accept(); err == nil {
-					c.Close()
+					_ = c.Close()
 				}
 			}(testLn)
 		}
-		// -------------------------------------------------
 
-		// 修改：将 IPv4、IPv6 和 测试端口 一并发送，Payload 类型改为 interface{}
 		writeMsg(Message{Type: "auth", Payload: map[string]interface{}{
 			"name": name, "token": token, "ipv4": publicIPv4, "ipv6": publicIPv6, "test_port": testPort, "version": AppVersion,
 		}})
@@ -150,7 +143,7 @@ func runAgent(name, masterAddr, token string) {
 			if msg.Type == "update" {
 				d, _ := json.Marshal(msg.Payload)
 				var tasks []ForwardTask
-				json.Unmarshal(d, &tasks)
+				_ = json.Unmarshal(d, &tasks)
 				active := make(map[string]bool)
 				for _, t := range tasks {
 					active[t.ID] = true
@@ -190,6 +183,23 @@ func runAgent(name, masterAddr, token string) {
 	}
 }
 
+// validPingHost 只允许合法 IP 或常规域名，避免目标地址以 "-" 开头被 ping 当成参数。
+func validPingHost(h string) bool {
+	h = strings.TrimSpace(strings.Trim(h, "[]"))
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	for _, r := range h {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func doPing(address string) (int64, bool) {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -198,6 +208,9 @@ func doPing(address string) (int64, bool) {
 		} else {
 			return -1, false
 		}
+	}
+	if !validPingHost(host) {
+		return -1, false
 	}
 
 	var cmd *exec.Cmd
@@ -210,7 +223,6 @@ func doPing(address string) (int64, bool) {
 	start := time.Now()
 	err = cmd.Run()
 	latency := time.Since(start).Milliseconds()
-
 	if err != nil {
 		return -1, false
 	}
@@ -243,27 +255,26 @@ func checkTargetHealth(send func(Message)) {
 			var success bool
 			var lat int64
 
-			if checkMode == "ping" {
+			switch checkMode {
+			case "ping":
 				lat, success = doPing(target)
-			} else if checkMode == "mixed" {
+			case "mixed":
 				start := time.Now()
 				c, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err == nil {
-					c.Close()
+					_ = c.Close()
 					lat = time.Since(start).Milliseconds()
 					success = true
 				} else {
 					lat, success = doPing(target)
 				}
-			} else {
+			default:
 				start := time.Now()
 				c, err := net.DialTimeout("tcp", target, 2*time.Second)
 				if err == nil {
-					c.Close()
+					_ = c.Close()
 					lat = time.Since(start).Milliseconds()
 					success = true
-				} else {
-					success = false
 				}
 			}
 
