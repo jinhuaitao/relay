@@ -112,8 +112,8 @@ func TestSaveConfigUpdatesTrafficOnly(t *testing.T) {
 	upsertRuleNoLock(rules[0])
 	rules[0].TotalTx = 999
 	rules[0].Alert95 = true
-	saveConfig()
 	mu.Unlock()
+	saveConfig() // 自带 mu 锁，必须在锁外调用
 
 	rules = nil
 	loadConfig()
