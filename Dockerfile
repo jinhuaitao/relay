@@ -44,8 +44,8 @@ RUN apk --no-cache add ca-certificates tzdata
 # 从构建阶段复制编译好的二进制文件
 COPY --from=builder /src/app ./gorelay
 
-# 暴露必要的端口
-EXPOSE 80 443 8888 9999 20000-25000
+# 暴露必要的端口（桥端口实际分配范围为 20000-49999）
+EXPOSE 80 443 8888 9999 20000-49999
 
 # 挂载卷
 VOLUME ["/app"]

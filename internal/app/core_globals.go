@@ -30,6 +30,9 @@ var (
 	rrCounters   sync.Map
 	connCounters sync.Map
 
+	// taskRemaining: tid → *int64 剩余流量额度（原子扣减）；缺省表示不限流量
+	taskRemaining sync.Map
+
 	loginAttempts = sync.Map{}
 	blockUntil    = sync.Map{}
 

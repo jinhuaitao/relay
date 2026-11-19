@@ -6,6 +6,7 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,8 +29,13 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	oldPorts := config.AgentPorts
 
 	if p := r.FormValue("password"); p != "" {
-		salt := generateSalt()
-		config.WebPass = salt + "$" + hashPassword(p, salt)
+		newHash, err := hashPasswordBcrypt(p)
+		if err != nil {
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "口令处理失败"})
+			return
+		}
+		config.WebPass = newHash
 	}
 	config.AgentPorts = r.FormValue("agent_ports")
 	config.MasterDomain = r.FormValue("master_domain")
@@ -56,7 +62,7 @@ func handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.TrafficResetDay = 0
 	}
 
-	saveConfigNoLock()
+	saveSettingsNoLock()
 
 	newPanelDomain := config.PanelDomain
 	newMasterDomain := config.MasterDomain
@@ -153,10 +159,35 @@ func handleDownloadConfig(w http.ResponseWriter, r *http.Request) {
 	addLog(r, "导出配置", "已导出数据库一致性快照")
 }
 
+// validateBackupDB 在替换运行库之前验证上传文件：
+// 必须是完整可读的 SQLite，且包含本程序的全部必需表。
+// 损坏文件或伪装的恶意文件在此被拒绝，不再有机会打瘫面板。
+func validateBackupDB(path string) error {
+	vdb, err := sql.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("无法打开数据库: %v", err)
+	}
+	defer vdb.Close()
+	var ok string
+	if err := vdb.QueryRow("PRAGMA quick_check").Scan(&ok); err != nil || ok != "ok" {
+		return fmt.Errorf("不是有效的 SQLite 数据库文件")
+	}
+	for _, t := range []string{"settings", "rules", "logs", "daily_stats"} {
+		var name string
+		if err := vdb.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", t).Scan(&name); err != nil {
+			return fmt.Errorf("缺少必需数据表: %s", t)
+		}
+	}
+	return nil
+}
+
 func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		return
 	}
+
+	// 限制上传体积，防止超大文件耗尽磁盘与内存
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<20)
 
 	file, _, err := r.FormFile("db_file")
 	if err != nil {
@@ -165,7 +196,27 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 1. 获取锁，安全地清理旧数据库连接
+	// 1. 先落临时文件并完成合法性校验，全程不触碰运行中的数据库
+	tmp, err := os.CreateTemp("", "gorelay_upload_*.db")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "创建临时文件失败"})
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	_, err = io.Copy(tmp, file)
+	tmp.Close()
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "写入临时文件失败（可能超出 256MB 限制）"})
+		return
+	}
+	if err := validateBackupDB(tmpPath); err != nil {
+		addLog(r, "恢复配置", "上传文件校验失败: "+err.Error())
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "备份校验失败: " + err.Error()})
+		return
+	}
+
+	// 2. 校验通过，获取锁并安全地清理旧数据库连接
 	mu.Lock()
 
 	if db != nil {
@@ -176,18 +227,18 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	os.Remove(DBFile + "-wal")
 	os.Remove(DBFile + "-shm")
 
-	out, err := os.Create(DBFile)
-	if err != nil {
+	// 临时目录可能与工作目录跨分区，rename 失败时回退为整体拷贝
+	replaceErr := os.Rename(tmpPath, DBFile)
+	if replaceErr != nil {
+		replaceErr = copyFile(tmpPath, DBFile)
+	}
+	if replaceErr != nil {
 		// 恢复数据库连接，避免面板进入 db=nil 半瘫态
 		initDB()
 		mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无法覆盖写入新文件"})
 		return
 	}
-
-	// 2. 覆盖写入新数据
-	io.Copy(out, file)
-	out.Close() // 必须显式关闭文件句柄
 
 	// 3. 重新初始化数据库连接
 	initDB()
@@ -202,6 +253,8 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	newPanelDomain := config.PanelDomain
 	mu.Unlock()
+
+	addLog(r, "恢复配置", "已通过校验并恢复数据库备份")
 
 	// 6. 响应前端成功，并下发新的重定向域名
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -273,6 +326,32 @@ func handleImportRules(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(file).Decode(&importedRules); err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "解析 JSON 格式失败，请确保文件正确"})
 		return
+	}
+
+	// 导入前校验：ID 必须非空且唯一；桥端口冲突时重新分配，
+	// 避免脏数据造成规则互相覆盖或监听端口打架
+	seenIDs := make(map[string]bool, len(importedRules))
+	usedPorts := make(map[string]bool, len(importedRules)*2)
+	for i := range importedRules {
+		rid := importedRules[i].ID
+		if rid == "" || seenIDs[rid] {
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "导入文件存在空或重复的规则 ID，已拒绝"})
+			return
+		}
+		seenIDs[rid] = true
+		usedPorts[importedRules[i].EntryPort] = true
+	}
+	for i := range importedRules {
+		bp := importedRules[i].BridgePort
+		if bp == "" || usedPorts[bp] {
+			bp = assignBridgePort(usedPorts)
+			if bp == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "无可用桥端口，已拒绝导入"})
+				return
+			}
+			importedRules[i].BridgePort = bp
+		}
+		usedPorts[bp] = true
 	}
 
 	mu.Lock()

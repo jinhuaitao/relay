@@ -89,6 +89,10 @@ type ForwardTask struct {
 	Target     string `json:"target"`
 	SpeedLimit int64  `json:"speed_limit"`
 	LBStrategy string `json:"lb_strategy"`
+	// 节点侧硬熔断：TrafficLimit>0 时，Agent 以 UsedTraffic 为基数本地扣减，
+	// 额度耗尽立即关闭监听，不等主控下一轮推送（消除上报周期带来的超额）
+	TrafficLimit int64 `json:"traffic_limit"`
+	UsedTraffic  int64 `json:"used_traffic"`
 }
 
 type TrafficReport struct {
@@ -115,13 +119,16 @@ type AgentInfo struct {
 	writeMu     sync.Mutex `json:"-"`
 }
 
-// sendMessage 串行化对该 Agent 连接的写操作，避免并发 JSON 写交错导致 Agent 侧解码失败
+// sendMessage 串行化对该 Agent 连接的写操作，避免并发 JSON 写交错导致 Agent 侧解码失败。
+// 写超时与 Agent 侧对称：节点处于网络黑洞时尽快失败，
+// 而不是让调用方（可能持有全局 mu）无限期阻塞。
 func (a *AgentInfo) sendMessage(msg Message) error {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	if a.Conn == nil {
 		return fmt.Errorf("agent %s 连接已关闭", a.Name)
 	}
+	_ = a.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return json.NewEncoder(a.Conn).Encode(msg)
 }
 

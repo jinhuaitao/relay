@@ -6,6 +6,7 @@
 package app
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -29,11 +30,18 @@ func runMaster() {
 				saveConfig()
 			}
 			cleanOldLogs()
-			flushDailyStats()
 			pruneOfflineAgents()
+			pruneExpiredSessions()
 			if db != nil {
 				db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
 			}
+		}
+	}()
+	// 每日流量缓冲高频刷盘：进程崩溃时最多丢失 5 秒统计（原为 30 秒）
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		for range ticker.C {
+			flushDailyStats()
 		}
 	}()
 	go broadcastLoop()
@@ -244,7 +252,7 @@ func handleGenAgentToken(w http.ResponseWriter, r *http.Request) {
 		tk = generateUUID()
 		config.AgentTokens[name] = tk
 		config.AgentAddTimes[name] = time.Now().Unix() // 记录永久添加时间
-		saveConfigNoLock()
+		saveSettingsNoLock()
 	}
 	mu.Unlock()
 
@@ -510,10 +518,20 @@ func handleAgentConn(conn net.Conn) {
 	if reqToken == "" || name == "" {
 		return
 	}
-	if (globalTk != "" && reqToken == globalTk) || (agentTk != "" && reqToken == agentTk) {
-		// 认证通过
+	// 常数时间比较，消除按字节比较的时序侧信道。
+	// 已签发专属 token 的节点只认专属 token：全局 token 泄露时
+	// 攻击者无法再冒充这些节点上线并顶掉真实连接。
+	tokenOK := func(want string) bool {
+		return want != "" && subtle.ConstantTimeCompare([]byte(reqToken), []byte(want)) == 1
+	}
+	authorized := false
+	if agentTk != "" {
+		authorized = tokenOK(agentTk)
 	} else {
-		return // 认证失败
+		authorized = tokenOK(globalTk)
+	}
+	if !authorized {
+		return
 	}
 
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
@@ -742,6 +760,7 @@ func pushConfigToAll() {
 			}
 			tasksMap[r.EntryAgent] = append(tasksMap[r.EntryAgent], ForwardTask{
 				ID: r.ID + "_entry", Protocol: r.Protocol, Listen: ":" + r.EntryPort, Target: fmt.Sprintf("%s:%s", rip, r.BridgePort), SpeedLimit: r.SpeedLimit, LBStrategy: "rr",
+				TrafficLimit: r.TrafficLimit, UsedTraffic: r.TotalTx + r.TotalRx,
 			})
 		}
 	}

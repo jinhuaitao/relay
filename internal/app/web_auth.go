@@ -26,6 +26,12 @@ import (
 	"time"
 )
 
+// sessionTTL 会话有效期：30 天。配合登出服务端吊销与定期过期清理。
+const sessionTTL = 30 * 24 * time.Hour
+
+// oauthStateTTL OAuth state 的存活窗口，覆盖一次正常授权跳转所需时间。
+const oauthStateTTL = 10 * time.Minute
+
 func checkLoginRateLimit(ip string) bool {
 	if t, ok := blockUntil.Load(ip); ok {
 		if time.Now().Before(t.(time.Time)) {
@@ -154,16 +160,20 @@ func handleSetup(w http.ResponseWriter, r *http.Request) {
 
 		mu.Lock()
 		config.WebUser = r.FormValue("username")
-		salt := generateSalt()
-		pwdHash := hashPassword(r.FormValue("password"), salt)
-		config.WebPass = salt + "$" + pwdHash
+		pwdHash, err := hashPasswordBcrypt(r.FormValue("password"))
+		if err != nil {
+			mu.Unlock()
+			http.Error(w, "口令处理失败", http.StatusInternalServerError)
+			return
+		}
+		config.WebPass = pwdHash
 		config.AgentToken = generateUUID()
 		if config.AgentTokens == nil {
 			config.AgentTokens = make(map[string]string)
 		}
 		config.IsSetup = true
 		setupToken = "" // 初始化完成后令牌立即作废
-		saveConfigNoLock()
+		saveSettingsNoLock()
 		mu.Unlock()
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -213,15 +223,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	twoFASecret := config.TwoFASecret
 	mu.Unlock()
 
-	passMatch := false
-	parts := strings.Split(storedVal, "$")
-	if len(parts) == 2 {
-		if r.FormValue("username") == u && hashPassword(r.FormValue("password"), parts[0]) == parts[1] {
-			passMatch = true
-		}
-	} else if r.FormValue("username") == u && md5Hash(r.FormValue("password")) == storedVal {
-		passMatch = true
-	}
+	passMatch := r.FormValue("username") == u && verifyPassword(storedVal, r.FormValue("password"))
 
 	if !passMatch {
 		recordLoginFail(ip)
@@ -239,23 +241,24 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 命中旧版无盐 MD5 口令则自动升级为加盐 SHA256，避免库泄露后被彩虹表秒破
-	if !strings.Contains(storedVal, "$") {
-		salt := generateSalt()
-		newHash := salt + "$" + hashPassword(r.FormValue("password"), salt)
-		mu.Lock()
-		if config.WebUser == u {
-			config.WebPass = newHash
-			saveConfigNoLock()
+	// 命中旧版散列（无盐 MD5 / 单轮加盐 SHA256）则自动升级为 bcrypt，
+	// 避免库泄露后被彩虹表或 GPU 高速爆破
+	if !strings.HasPrefix(storedVal, "$2") {
+		if newHash, err := hashPasswordBcrypt(r.FormValue("password")); err == nil {
+			mu.Lock()
+			if config.WebUser == u {
+				config.WebPass = newHash
+				saveSettingsNoLock()
+			}
+			mu.Unlock()
 		}
-		mu.Unlock()
 	}
 
 	sid := make([]byte, 16)
 	rand.Read(sid)
 	sidStr := hex.EncodeToString(sid)
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
+	sessions[sidStr] = time.Now().Add(sessionTTL)
 	mu.Unlock()
 
 	// 登录成功，写入系统日志
@@ -263,14 +266,32 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// 智能判断是否开启安全 Cookie
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: int(sessionTTL / time.Second), SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	addLog(r, "退出登录", "用户主动登出")
+	// 服务端同步吊销会话：仅清 cookie 时，已泄露的 sid 在到期前仍然有效
+	if c, err := r.Cookie("sid"); err == nil {
+		mu.Lock()
+		delete(sessions, c.Value)
+		mu.Unlock()
+	}
 	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// pruneExpiredSessions 定期回收过期会话，防止 sessions map 无界增长。
+func pruneExpiredSessions() {
+	mu.Lock()
+	now := time.Now()
+	for sid, exp := range sessions {
+		if now.After(exp) {
+			delete(sessions, sid)
+		}
+	}
+	mu.Unlock()
 }
 
 func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
@@ -283,11 +304,32 @@ func handleGithubLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s", clientID)
+	// state 绑定本次授权请求与浏览器，回调时校验，抵御登录 CSRF
+	// （攻击者无法把自己的 GitHub 会话悄悄绑定到受害者浏览器）
+	state := generateSalt()
+	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{
+		Name: "oauth_state", Value: state, Path: "/oauth/github",
+		MaxAge: int(oauthStateTTL / time.Second), HttpOnly: true,
+		Secure: secureCookie, SameSite: http.SameSiteLaxMode,
+	})
+
+	redirectURL := fmt.Sprintf("https://github.com/login/oauth/authorize?client_id=%s&state=%s", clientID, url.QueryEscape(state))
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
+	// 无论成败都立即作废 state cookie，防止重放
+	stateCookie, scErr := r.Cookie("oauth_state")
+	http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/oauth/github", MaxAge: -1})
+	gotState := r.URL.Query().Get("state")
+	if scErr != nil || stateCookie.Value == "" || gotState == "" ||
+		subtle.ConstantTimeCompare([]byte(gotState), []byte(stateCookie.Value)) != 1 {
+		addSystemLog(getClientIP(r), "登录失败", "GitHub OAuth state 校验失败")
+		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
+		return
+	}
+
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		http.Redirect(w, r, "/login?err=3", http.StatusSeeOther)
@@ -363,12 +405,12 @@ func handleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	sidStr := hex.EncodeToString(sid)
 
 	mu.Lock()
-	sessions[sidStr] = time.Now().Add(365 * 24 * time.Hour)
+	sessions[sidStr] = time.Now().Add(sessionTTL)
 	mu.Unlock()
 
 	addLog(r, "GitHub 登录", fmt.Sprintf("通过 GitHub 登录成功 (%s)", userData.Login))
 	secureCookie := isMasterTLS || r.Header.Get("X-Forwarded-Proto") == "https"
-	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: 31536000, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: sidStr, Path: "/", HttpOnly: true, Secure: secureCookie, MaxAge: int(sessionTTL / time.Second), SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -392,7 +434,7 @@ func handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		config.TwoFASecret = req.Secret
 		config.TwoFAEnabled = true
-		saveConfigNoLock()
+		saveSettingsNoLock()
 		mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]bool{"success": true})
 	} else {
@@ -408,7 +450,7 @@ func handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	config.TwoFAEnabled = false
 	config.TwoFASecret = ""
-	saveConfigNoLock()
+	saveSettingsNoLock()
 	mu.Unlock()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

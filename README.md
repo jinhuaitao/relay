@@ -11,7 +11,7 @@
 
 <p align="center">
   
-[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)](https://www.alpinelinux.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Master%2FAgent-blue)](https://github.com/jinhuaitao/relay)
 [![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=flat&logo=sqlite)
@@ -89,7 +89,7 @@
 | **Inline Keyboard** | 发送 `/menu` 呼出全按键菜单，移动端无需输入指令，一键查看状态、无缝启停转发规则 |
 | **自动化流量管理** | 设定每月账单重置日，系统将在零点自动执行全网流量清零 |
 | **阶梯式告警** | 流量使用达 80%、95% 时触发预警；达到 100% 时自动精准熔断并发送警报 |
-| **定时云端备份** | 每周一凌晨自动打包核心数据库，以加密文件形式发送至您的 Telegram |
+| **定时云端备份** | 每周一凌晨自动生成数据库一致性快照，经 TLS 加密通道发送至您的 Telegram，并可同步至 Cloudflare R2（备份文件本身为明文 SQLite，请妥善保管您的 Telegram 账号与 R2 凭证） |
 
 ---
 
@@ -289,6 +289,7 @@ tail -n 50 /var/log/relay.log
 | `80` / `443` | HTTPS 和证书申请 |
 | `8888` | 未配域名时的默认 Web |
 | `9999` | Agent 通信 |
+| `20000-49999` | 规则桥端口（出口节点监听，按需放行） |
 
 ### ☁️ Cloudflare CDN 避坑
 

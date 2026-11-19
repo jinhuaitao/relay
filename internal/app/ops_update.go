@@ -121,20 +121,23 @@ func handleUpdateAllAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	count := 0
-	// 遍历所有节点，仅向在线节点发送更新指令
+	var online []*AgentInfo
 	for _, agent := range agents {
 		if agent.IsOnline {
-			agent.sendMessage(Message{Type: "upgrade"})
-			count++
+			online = append(online, agent)
 		}
 	}
 	mu.Unlock()
 
+	// 锁外逐个下发：单个黑洞节点的写超时不会拖住全局 mu 与其他节点
+	for _, agent := range online {
+		agent.sendMessage(Message{Type: "upgrade"})
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   count,
+		"count":   len(online),
 	})
 }
 

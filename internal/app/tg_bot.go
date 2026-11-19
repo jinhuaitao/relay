@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -389,14 +390,23 @@ func startTgBotLoop() {
 						buildRulesMenuMarkup(page))
 				} else if data == "cmd:backup" {
 					go func() {
+						// 基于一致性快照备份，避免与并发写竞态
+						snap, err := snapshotDB()
+						if err != nil {
+							log.Printf("[TG] 生成备份快照失败: %v", err)
+							sendTelegram("❌ <b>云备份失败</b>\n无法生成数据库快照: " + tgEscape(err.Error()))
+							return
+						}
+						defer os.Remove(snap)
+
 						// 1. 先发送到 Telegram
-						sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
+						sendTelegramDocument(snap, fmt.Sprintf("☁️ <b>手动云备份</b>\n\n数据库文件已成功导出。\n时间: %s", time.Now().Format("2006-01-02 15:04:05")))
 
 						// 2. 触发 Cloudflare R2 备份
-						if err := uploadToR2(DBFile); err == nil {
+						if err := uploadToR2(snap); err == nil {
 							sendTelegram("✅ <b>R2 容灾备份成功</b>\n手动触发的备份已同步至 Cloudflare R2。")
 						} else if err.Error() != "R2 配置未启用" {
-							sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+							sendTelegram("❌ <b>R2 备份失败</b>\n" + tgEscape(err.Error()))
 						}
 					}()
 				} else if strings.HasPrefix(data, "toggle:") {
@@ -414,10 +424,10 @@ func startTgBotLoop() {
 						for i := range rules {
 							if rules[i].ID == id {
 								rules[i].Disabled = !rules[i].Disabled
+								upsertRuleNoLock(rules[i])
 								break
 							}
 						}
-						saveConfigNoLock()
 						mu.Unlock()
 						go pushConfigToAll()
 

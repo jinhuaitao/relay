@@ -156,6 +156,14 @@ func runAgent(name, masterAddr, token string) {
 					active[t.ID] = true
 					activeTargets.Store(t.ID, t.Target)
 
+					// 刷新硬熔断额度。独立于监听重建：额度变化不会断开存量连接
+					if t.TrafficLimit > 0 {
+						rem := t.TrafficLimit - t.UsedTraffic
+						taskRemaining.Store(t.ID, &rem)
+					} else {
+						taskRemaining.Delete(t.ID)
+					}
+
 					if oldVal, loaded := activeTasks.LoadOrStore(t.ID, t); loaded {
 						oldTask := oldVal.(ForwardTask)
 						if oldTask.Protocol != t.Protocol || oldTask.Listen != t.Listen || oldTask.SpeedLimit != t.SpeedLimit || oldTask.LBStrategy != t.LBStrategy {
@@ -181,6 +189,7 @@ func runAgent(name, masterAddr, token string) {
 						activeTargets.Delete(k)
 						activeTasks.Delete(k)
 						rrCounters.Delete(k)
+						taskRemaining.Delete(k)
 					}
 					return true
 				})

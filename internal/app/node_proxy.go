@@ -114,6 +114,11 @@ func startProxy(t ForwardTask) {
 		}()
 	}
 	if t.Protocol == "udp" || t.Protocol == "both" {
+		// stop 信号随 closeAll 下发，确保会话清理协程随规则删除退出，不再泄漏
+		udpStop := make(chan struct{})
+		l.Lock()
+		closers = append(closers, func() { close(udpStop) })
+		l.Unlock()
 		go func() {
 			addr, _ := net.ResolveUDPAddr("udp", t.Listen)
 			ln, err := net.ListenUDP("udp", addr)
@@ -123,7 +128,7 @@ func startProxy(t ForwardTask) {
 			l.Lock()
 			closers = append(closers, func() { ln.Close() })
 			l.Unlock()
-			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit, t.LBStrategy)
+			handleUDP(ln, t.ID, ipTracker, t.SpeedLimit, t.LBStrategy, udpStop)
 		}()
 	}
 }
@@ -212,6 +217,20 @@ func selectTarget(tid string, targets []string, strategy string) string {
 	}
 }
 
+// consumeQuota 在转发字节后扣减剩余流量额度，耗尽即关闭该任务的监听
+// （节点侧硬熔断）。与主控的推送式熔断互为兜底，消除上报周期内的超额流量。
+func consumeQuota(tid string, n int64) {
+	v, ok := taskRemaining.Load(tid)
+	if !ok {
+		return
+	}
+	if atomic.AddInt64(v.(*int64), -n) <= 0 {
+		if closeFunc, ok := runningListeners.Load(tid); ok {
+			closeFunc.(func())()
+		}
+	}
+}
+
 func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	defer src.Close()
 
@@ -243,11 +262,11 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 		return
 	}
 	cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx, limit)
-	copyCount(src, dst, &cnt.Rx, limit)
+	go copyCount(dst, src, &cnt.Tx, limit, tid)
+	copyCount(src, dst, &cnt.Rx, limit, tid)
 }
 
-func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string) {
+func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string, stop <-chan struct{}) {
 	udpSessions := &sync.Map{}
 	v, ok := agentTraffic.Load(tid)
 	if !ok {
@@ -256,50 +275,57 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	cnt := v.(*TrafficCounter)
 
 	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(30 * time.Second)
-			now := time.Now()
-			udpSessions.Range(func(key, value interface{}) bool {
-				s := value.(*udpSession)
-				if now.Sub(s.lastActive) > 45*time.Second {
-					s.conn.Close()
-					udpSessions.Delete(key)
-					tracker.Remove(key.(string))
-				}
-				return true
-			})
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				udpSessions.Range(func(key, value interface{}) bool {
+					s := value.(*udpSession)
+					if now.Sub(s.lastActive) > 45*time.Second {
+						s.conn.Close()
+						udpSessions.Delete(key)
+						tracker.Remove(key.(string))
+					}
+					return true
+				})
+			}
 		}
 	}()
 
 	// 每个数据包从池中借还缓冲，避免长期独占导致池失效
 	for {
-		bufPtr := bufPool.Get().(*[]byte)
+		bufPtr := udpBufPool.Get().(*[]byte)
 		buf := *bufPtr
 		n, srcAddr, err := ln.ReadFromUDP(buf)
 		if err != nil {
-			bufPool.Put(bufPtr)
+			udpBufPool.Put(bufPtr)
 			break
 		}
 		atomic.AddInt64(&cnt.Tx, int64(n))
+		consumeQuota(tid, int64(n))
 		sAddr := srcAddr.String()
 		val, ok := udpSessions.Load(sAddr)
 		if ok {
 			s := val.(*udpSession)
 			s.lastActive = time.Now()
 			s.conn.Write(buf[:n])
-			bufPool.Put(bufPtr)
+			udpBufPool.Put(bufPtr)
 		} else {
 			var currentTargetStr string
 			if v, ok := activeTargets.Load(tid); ok {
 				currentTargetStr = v.(string)
 			} else {
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 			targets := strings.Split(currentTargetStr, ",")
 			bestTarget := selectTarget(tid, targets, strategy)
 			if bestTarget == "" {
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 
@@ -310,17 +336,17 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 			newConn, err := net.DialUDP("udp", nil, dstAddr)
 			if err != nil {
 				atomic.AddInt64(vConn.(*int64), -1)
-				bufPool.Put(bufPtr)
+				udpBufPool.Put(bufPtr)
 				continue
 			}
 			s := &udpSession{conn: newConn, lastActive: time.Now()}
 			udpSessions.Store(sAddr, s)
 			tracker.Add(sAddr)
 			newConn.Write(buf[:n])
-			bufPool.Put(bufPtr)
+			udpBufPool.Put(bufPtr)
 			go func(c *net.UDPConn, sa *net.UDPAddr, k string, bt string) {
-				bPtr := bufPool.Get().(*[]byte)
-				defer bufPool.Put(bPtr)
+				bPtr := udpBufPool.Get().(*[]byte)
+				defer udpBufPool.Put(bPtr)
 				b := *bPtr
 				for {
 					c.SetReadDeadline(time.Now().Add(65 * time.Second))
@@ -334,13 +360,14 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 					}
 					ln.WriteToUDP(b[:m], sa)
 					atomic.AddInt64(&cnt.Rx, int64(m))
+					consumeQuota(tid, int64(m))
 				}
 			}(newConn, srcAddr, sAddr, bestTarget)
 		}
 	}
 }
 
-func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
+func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64, tid string) {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -367,6 +394,7 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64) {
 				nw, werr := dst.Write(toWrite)
 				if nw > 0 {
 					atomic.AddInt64(c, int64(nw))
+					consumeQuota(tid, int64(nw))
 					toWrite = toWrite[nw:]
 				}
 				if werr != nil {

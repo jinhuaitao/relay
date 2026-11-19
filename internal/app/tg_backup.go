@@ -31,10 +31,6 @@ func sendTelegramDocument(filePath string, caption string) {
 		return
 	}
 
-	if db != nil {
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-	}
-
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("[TG] 备份文件打开失败: %v", err)
@@ -92,11 +88,6 @@ func uploadToR2(filePath string) error {
 		return fmt.Errorf("R2 配置未启用")
 	}
 
-	// 强制 SQLite 刷盘，保证上传的是最完整的数据快照
-	if db != nil {
-		db.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-	}
-
 	// MinIO SDK 要求 Endpoint 不带协议头
 	endpoint = strings.TrimPrefix(endpoint, "https://")
 	endpoint = strings.TrimPrefix(endpoint, "http://")
@@ -145,14 +136,25 @@ func autoBackupLoop() {
 			if db != nil {
 				db.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_backup_date', ?)", today)
 			}
-			sendTelegramDocument(DBFile, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
+
+			// 与下载接口一致：备份必须基于一致性快照，
+			// 直接读运行中的 DBFile 会与并发写竞态，导出撕裂页
+			snap, err := snapshotDB()
+			if err != nil {
+				log.Printf("[TG] 生成备份快照失败: %v", err)
+				sendTelegram("❌ <b>云备份失败</b>\n无法生成数据库快照: " + tgEscape(err.Error()))
+				continue
+			}
+
+			sendTelegramDocument(snap, fmt.Sprintf("☁️ <b>自动云备份</b>\n\n这是本周的系统数据备份。\n时间: %s", now.Format("2006-01-02 15:04:05")))
 
 			// === 触发 R2 备份 ===
-			if err := uploadToR2(DBFile); err == nil {
+			if err := uploadToR2(snap); err == nil {
 				sendTelegram("✅ <b>R2 容灾备份成功</b>\n数据库已安全同步至 Cloudflare R2。")
 			} else if err.Error() != "R2 配置未启用" {
-				sendTelegram("❌ <b>R2 备份失败</b>\n" + err.Error())
+				sendTelegram("❌ <b>R2 备份失败</b>\n" + tgEscape(err.Error()))
 			}
+			os.Remove(snap)
 		}
 	}
 }

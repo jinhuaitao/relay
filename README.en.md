@@ -10,7 +10,7 @@
 
 <p align="center">
 
-[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org/dl/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Alpine-lightgrey)](https://www.alpinelinux.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-Master%2FAgent-blue)](https://github.com/jinhuaitao/relay)
 [![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=flat&logo=sqlite)
@@ -88,7 +88,7 @@
 | **Inline Keyboard** | Send `/menu` to bring up the full keyboard menu. No need to type commands on mobile — one-click status check, seamless start/stop of forwarding rules |
 | **Automated Traffic Management** | Set monthly billing reset day. System automatically executes network-wide traffic reset at midnight |
 | **Tiered Alerts** | Warning triggered at 80% and 95% traffic usage; auto precise circuit breaker at 100% with alert notification |
-| **Scheduled Cloud Backup** | Every Monday at midnight, core database is automatically packaged and sent to your Telegram as an encrypted file |
+| **Scheduled Cloud Backup** | Every Monday after 02:00, a consistent database snapshot is generated and sent to your Telegram over a TLS-encrypted channel, with optional sync to Cloudflare R2 (the backup file itself is plaintext SQLite — keep your Telegram account and R2 credentials safe) |
 
 ---
 
@@ -288,6 +288,7 @@ tail -n 50 /var/log/relay.log
 | `80` / `443` | HTTPS and certificate application |
 | `8888` | Default Web when no domain is configured |
 | `9999` | Agent communication |
+| `20000-49999` | Rule bridge ports (listened on exit nodes, open as needed) |
 
 ### ☁️ Cloudflare CDN Pitfalls
 

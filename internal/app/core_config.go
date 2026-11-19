@@ -107,17 +107,49 @@ func loadConfig() {
 	}
 }
 
+// saveConfig 由流量脏标记定时触发：只更新流量与告警列。
+// 结构性变更（增删改规则、启停）由各 handler 即时单行持久化，
+// 不再每 30 秒全表 DELETE + 重插。
 func saveConfig() {
 	mu.Lock()
 	defer mu.Unlock()
-	saveConfigNoLock()
+	for _, r := range rules {
+		_, _ = db.Exec("UPDATE rules SET total_tx=?, total_rx=?, alert_80=?, alert_95=?, alert_100=? WHERE id=?",
+			r.TotalTx, r.TotalRx, b2i(r.Alert80), b2i(r.Alert95), b2i(r.Alert100), r.ID)
+	}
 }
 
-func saveConfigNoLock() {
-	conf := config
-	lRules := make([]LogicalRule, len(rules))
-	copy(lRules, rules)
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
+const ruleUpsertSQL = `INSERT OR REPLACE INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+
+func ruleArgs(r LogicalRule) []interface{} {
+	return []interface{}{
+		r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort,
+		r.Protocol, r.BridgePort, r.TrafficLimit, b2i(r.Disabled), r.SpeedLimit, r.TotalTx, r.TotalRx,
+		r.LBStrategy, b2i(r.Alert80), b2i(r.Alert95), b2i(r.Alert100),
+	}
+}
+
+// upsertRuleNoLock 单行持久化一条规则。调用方必须持有 mu。
+func upsertRuleNoLock(r LogicalRule) {
+	_, _ = db.Exec(ruleUpsertSQL, ruleArgs(r)...)
+}
+
+// deleteRuleRowNoLock 单行删除一条规则。调用方必须持有 mu。
+func deleteRuleRowNoLock(id string) {
+	_, _ = db.Exec("DELETE FROM rules WHERE id = ?", id)
+}
+
+// saveSettingsNoLock 仅持久化 settings 表（口令、域名、TG/R2 凭证等）。
+// 调用方必须持有 mu。
+func saveSettingsNoLock() {
+	conf := config
 	tx, _ := db.Begin()
 	setS := func(k, v string) { _, _ = tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", k, v) }
 	setS("web_user", conf.WebUser)
@@ -148,25 +180,31 @@ func saveConfigNoLock() {
 	setS("r2_secret_key", conf.R2SecretKey)
 	setS("r2_endpoint", conf.R2Endpoint)
 	setS("r2_bucket", conf.R2Bucket)
+	_ = tx.Commit()
+}
 
-	_, _ = tx.Exec("DELETE FROM rules")
+// saveConfigNoLock 全量落盘（settings + 规则集合）。
+// 用于关机、导入覆盖、月度清零等低频场景；用 upsert + 清理失效 ID
+// 替代旧的 DELETE FROM rules 全表重插。调用方必须持有 mu。
+func saveConfigNoLock() {
+	saveSettingsNoLock()
+
+	lRules := make([]LogicalRule, len(rules))
+	copy(lRules, rules)
+
+	tx, _ := db.Begin()
 	for _, r := range lRules {
-		d, a80, a95, a100 := 0, 0, 0, 0
-		if r.Disabled {
-			d = 1
+		_, _ = tx.Exec(ruleUpsertSQL, ruleArgs(r)...)
+	}
+	if len(lRules) == 0 {
+		_, _ = tx.Exec("DELETE FROM rules")
+	} else {
+		ids := make([]interface{}, len(lRules))
+		for i, r := range lRules {
+			ids[i] = r.ID
 		}
-		if r.Alert80 {
-			a80 = 1
-		}
-		if r.Alert95 {
-			a95 = 1
-		}
-		if r.Alert100 {
-			a100 = 1
-		}
-
-		_, _ = tx.Exec(`INSERT INTO rules (id, group_name, note, entry_agent, entry_port, exit_agent, target_ip, target_port, protocol, bridge_port, traffic_limit, disabled, speed_limit, total_tx, total_rx, lb_strategy, alert_80, alert_95, alert_100) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Group, r.Note, r.EntryAgent, r.EntryPort, r.ExitAgent, r.TargetIP, r.TargetPort, r.Protocol, r.BridgePort, r.TrafficLimit, d, r.SpeedLimit, r.TotalTx, r.TotalRx, r.LBStrategy, a80, a95, a100)
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(lRules)), ",")
+		_, _ = tx.Exec("DELETE FROM rules WHERE id NOT IN ("+placeholders+")", ids...)
 	}
 	_ = tx.Commit()
 }

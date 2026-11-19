@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func generateUUID() string {
@@ -45,19 +47,88 @@ func md5Hash(s string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// hashPasswordBcrypt 是新口令的唯一散列方式（自适应成本，抗 GPU 爆破）。
+func hashPasswordBcrypt(password string) (string, error) {
+	b, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(b), err
+}
+
+// verifyPassword 兼容三代存储格式：bcrypt、加盐 SHA256（salt$hash）、旧版无盐 MD5。
+// 后两种仅为存量数据保留，登录成功后由调用方升级为 bcrypt。
+func verifyPassword(stored, password string) bool {
+	if stored == "" {
+		return false
+	}
+	if strings.HasPrefix(stored, "$2") {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)) == nil
+	}
+	parts := strings.Split(stored, "$")
+	if len(parts) == 2 {
+		return hashPassword(password, parts[0]) == parts[1]
+	}
+	return md5Hash(password) == stored
+}
+
+// cloudflareNets 是 Cloudflare 官方公布的回源网段。
+// CF-Connecting-IP 只有在这批网段直连时才可信，否则任何人都能伪造该头
+// 绕过登录防爆破封禁、污染审计日志。
+var cloudflareNets = func() []*net.IPNet {
+	cidrs := []string{
+		"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+		"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+		"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+		"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+		"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+		"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+	}
+	var nets []*net.IPNet
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
+func isCloudflareIP(ip net.IP) bool {
+	for _, n := range cloudflareNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// getClientIP 只在可信来源下采纳代理头：
+//   - CF-Connecting-IP：仅当 TCP 层对端属于 Cloudflare 官方网段；
+//   - X-Forwarded-For：仅当对端是本机/内网（本机反代场景）。
+//
+// 其余情况一律使用 TCP 层 RemoteAddr，伪造头不再影响封禁与日志。
 func getClientIP(r *http.Request) string {
 	if r == nil {
 		return "System"
 	}
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return ip
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		ips := strings.Split(ip, ",")
-		return strings.TrimSpace(ips[0])
+	remote := net.ParseIP(host)
+	if remote != nil {
+		if isCloudflareIP(remote) {
+			if ip := r.Header.Get("CF-Connecting-IP"); ip != "" && net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+		if remote.IsLoopback() || remote.IsPrivate() {
+			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+				first := strings.TrimSpace(strings.Split(xff, ",")[0])
+				if net.ParseIP(first) != nil {
+					return first
+				}
+			}
+		}
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return ip
+	return host
 }
 
 // isLoopbackRequest 判断请求是否来自本机（127.0.0.0/8 或 ::1）。
