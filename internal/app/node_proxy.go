@@ -8,7 +8,6 @@ package app
 import (
 	"context"
 	"crypto/rand"
-	"golang.org/x/time/rate"
 	"io"
 	"math/big"
 	"net"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type IpTracker struct {
@@ -57,6 +58,7 @@ func (t *IpTracker) Remove(addr string) {
 }
 
 func startProxy(t ForwardTask) {
+	ctx, cancel := context.WithCancel(context.Background())
 	var closers []func()
 	var l sync.Mutex
 	activeConns := make(map[net.Conn]struct{})
@@ -68,6 +70,7 @@ func startProxy(t ForwardTask) {
 			return
 		}
 		closed = true
+		cancel() // Stop TCP pumps even when both are waiting on a rate limiter.
 		for _, f := range closers {
 			f()
 		}
@@ -104,7 +107,7 @@ func startProxy(t ForwardTask) {
 				l.Unlock()
 				ipTracker.Add(c.RemoteAddr().String())
 				go func(conn net.Conn) {
-					pipeTCP(conn, t.ID, t.SpeedLimit, t.LBStrategy)
+					pipeTCP(ctx, conn, t.ID, t.SpeedLimit, t.LBStrategy)
 					l.Lock()
 					delete(activeConns, conn)
 					l.Unlock()
@@ -231,7 +234,7 @@ func consumeQuota(tid string, n int64) {
 	}
 }
 
-func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
+func pipeTCP(ctx context.Context, src net.Conn, tid string, limit int64, strategy string) {
 	defer src.Close()
 
 	var targetStr string
@@ -251,7 +254,8 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	atomic.AddInt64(vConn.(*int64), 1)
 	defer atomic.AddInt64(vConn.(*int64), -1)
 
-	dst, err := net.DialTimeout("tcp", bestTarget, 2*time.Second)
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	dst, err := dialer.DialContext(ctx, "tcp", bestTarget)
 	if err != nil {
 		return
 	}
@@ -261,9 +265,80 @@ func pipeTCP(src net.Conn, tid string, limit int64, strategy string) {
 	if !ok {
 		return
 	}
-	cnt := v.(*TrafficCounter)
-	go copyCount(dst, src, &cnt.Tx, limit, tid)
-	copyCount(src, dst, &cnt.Rx, limit, tid)
+	relayTCPPair(ctx, src, dst, v.(*TrafficCounter), limit, tid, tcpHalfCloseIdle)
+}
+
+const tcpHalfCloseIdle = 2 * time.Minute
+
+// Propagate a clean EOF as a FIN without closing the still-writable socket.
+// Only half-closed connections have a forwarding idle deadline.
+func relayTCPPair(ctx context.Context, src, dst net.Conn, cnt *TrafficCounter, limit int64, tid string, halfCloseIdle time.Duration) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	finished := make(chan bool, 2)
+	progress := make(chan struct{}, 1)
+	var draining atomic.Bool
+	touch := func() {
+		if draining.Load() {
+			select {
+			case progress <- struct{}{}:
+			default:
+			}
+		}
+	}
+	pump := func(to, from net.Conn, count *int64) {
+		clean := false
+		if copyCount(ctx, to, from, count, limit, tid, touch) == nil {
+			if writer, ok := to.(interface{ CloseWrite() error }); ok {
+				clean = writer.CloseWrite() == nil
+			}
+		}
+		finished <- clean
+	}
+	go pump(dst, src, &cnt.Tx)
+	go pump(src, dst, &cnt.Rx)
+
+	pending := 2
+	var timer *time.Timer
+	var idle <-chan time.Time
+drain:
+	for {
+		select {
+		case clean := <-finished:
+			pending--
+			if pending == 0 {
+				return
+			}
+			if !clean {
+				break drain
+			}
+			timer = time.NewTimer(halfCloseIdle)
+			defer timer.Stop()
+			idle = timer.C
+			draining.Store(true)
+		case <-progress:
+			timer.Reset(halfCloseIdle)
+		case <-idle:
+			// Prefer a write already queued when the idle timer fired.
+			select {
+			case <-progress:
+				timer.Reset(halfCloseIdle)
+			default:
+				break drain
+			}
+		case <-ctx.Done():
+			break drain
+		}
+	}
+
+	// Abort socket I/O and limiter waits before releasing connection counters.
+	cancel()
+	src.Close()
+	dst.Close()
+	for range pending {
+		<-finished
+	}
 }
 
 func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, strategy string, stop <-chan struct{}) {
@@ -367,7 +442,8 @@ func handleUDP(ln *net.UDPConn, tid string, tracker *IpTracker, limit int64, str
 	}
 }
 
-func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64, tid string) {
+// copyCount returns nil only on a clean read EOF.
+func copyCount(ctx context.Context, dst io.Writer, src io.Reader, c *int64, limit int64, tid string, progress func()) error {
 	bufPtr := bufPool.Get().(*[]byte)
 	defer bufPool.Put(bufPtr)
 	buf := *bufPtr
@@ -376,16 +452,17 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64, tid string) 
 	var limiter *rate.Limiter
 	if limit > 0 {
 		// Limit(limit) 表示每秒允许的字节数，Burst 设为 32KB 应对缓冲区突发
-		limiter = rate.NewLimiter(rate.Limit(limit), 32*1024)
+		limiter = rate.NewLimiter(rate.Limit(limit), CopyBufferSize)
 	}
 
-	ctx := context.Background()
 	for {
 		nr, err := src.Read(buf)
 		if nr > 0 {
 			// 如果开启了限速，平滑消费令牌，替代粗暴的 time.Sleep
 			if limiter != nil {
-				_ = limiter.WaitN(ctx, nr)
+				if waitErr := limiter.WaitN(ctx, nr); waitErr != nil {
+					return waitErr
+				}
 			}
 
 			// 必须写完整个切片：dst.Write 允许短写，未补齐会截断转发流
@@ -396,14 +473,21 @@ func copyCount(dst io.Writer, src io.Reader, c *int64, limit int64, tid string) 
 					atomic.AddInt64(c, int64(nw))
 					consumeQuota(tid, int64(nw))
 					toWrite = toWrite[nw:]
+					progress()
 				}
 				if werr != nil {
-					return
+					return werr
+				}
+				if nw == 0 {
+					return io.ErrShortWrite
 				}
 			}
 		}
+		if err == io.EOF {
+			return nil
+		}
 		if err != nil {
-			break
+			return err
 		}
 	}
 }
